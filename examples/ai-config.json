@@ -1,0 +1,14 @@
+{
+  "credentials": { "demo-grant": "fake" },
+  "routes": [
+    {
+      "selection": { "provider": "fake", "model": "small" },
+      "credential": "demo-grant"
+    }
+  ],
+  "apps": {
+    "ai-example": { "credential_grants": ["demo-grant"] }
+  },
+  "default": { "provider": "fake", "model": "small" },
+  "provider_default_models": { "fake": "small" }
+}

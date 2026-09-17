@@ -5,6 +5,7 @@ use std::path::{Component, Path, PathBuf};
 #[derive(Debug)]
 pub struct App {
     pub name: String,
+    pub requests_ai: bool,
     pub root: PathBuf,
     pub entrypoint: PathBuf,
 }
@@ -103,8 +104,8 @@ pub fn load(app_dir: &Path) -> Result<App, Error> {
     if !valid_name(&manifest.name) {
         return Err(Error::InvalidName);
     }
-    if let Some(capability) = manifest.capabilities.into_iter().next() {
-        return Err(Error::UnsupportedCapability(capability));
+    if let Some(capability) = manifest.capabilities.iter().find(|c| c.as_str() != "ai") {
+        return Err(Error::UnsupportedCapability(capability.clone()));
     }
 
     let requested = Path::new(&manifest.entrypoint);
@@ -140,6 +141,7 @@ pub fn load(app_dir: &Path) -> Result<App, Error> {
     }
 
     Ok(App {
+        requests_ai: manifest.capabilities.iter().any(|c| c == "ai"),
         name: manifest.name,
         root: app_dir,
         entrypoint,
@@ -208,11 +210,11 @@ mod tests {
         assert!(matches!(load(directory.path()), Err(Error::InvalidName)));
         std::fs::write(
             directory.path().join("paraco.json"),
-            r#"{"name":"hello","entrypoint":"main.ts","capabilities":["ai"]}"#,
+            r#"{"name":"hello","entrypoint":"main.ts","capabilities":["storage"]}"#,
         )
         .unwrap();
         assert!(
-            matches!(load(directory.path()), Err(Error::UnsupportedCapability(capability)) if capability == "ai")
+            matches!(load(directory.path()), Err(Error::UnsupportedCapability(capability)) if capability == "storage")
         );
     }
 

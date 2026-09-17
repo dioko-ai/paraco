@@ -20,6 +20,16 @@ struct App {
 
 impl App {
     fn start(source: &str, port: u16, manifest: &str, missing_deno: bool) -> Self {
+        Self::start_config(source, port, manifest, missing_deno, None)
+    }
+
+    fn start_config(
+        source: &str,
+        port: u16,
+        manifest: &str,
+        missing_deno: bool,
+        config: Option<&std::path::Path>,
+    ) -> Self {
         if !missing_deno {
             assert!(
                 Command::new("deno").arg("--version").output().is_ok(),
@@ -43,6 +53,9 @@ impl App {
             .process_group(0);
         if missing_deno {
             command.env("PATH", dir.path());
+        }
+        if let Some(config) = config {
+            command.arg("--ai-config").arg(config);
         }
         let child = command.spawn().unwrap();
         Self { child, dir, port }
@@ -304,6 +317,99 @@ fn repository_hello_example_serves_expected_response() {
     let response = app.request("/");
     assert!(response.starts_with("HTTP/1.1 200"));
     assert!(response.ends_with("Hello from Paraco"));
+    app.interrupt();
+    assert!(app.wait().success());
+}
+
+const AI_MANIFEST: &str = r#"{"name":"test","entrypoint":"main.ts","capabilities":["ai"]}"#;
+const AI_APP: &str = r#"
+export default { async fetch(request, context) {
+  if (new URL(request.url).pathname === "/pid") return new Response(String(Deno.pid));
+  try {
+    const result = await context.ai.complete({prompt: "private prompt", provider: "fake", model: "small"});
+    return Response.json(result);
+  } catch (error) { return new Response(error.message, {status: 403}); }
+}};
+"#;
+
+#[test]
+fn ai_capability_works_end_to_end_with_explicit_host_grant() {
+    let config = tempfile::tempdir().unwrap();
+    let path = config.path().join("ai.json");
+    fs::write(
+        &path,
+        r#"{
+      "credentials":{"test-key":"fake"},
+      "routes":[{"selection":{"provider":"fake","model":"small"},"credential":"test-key"}],
+      "apps":{"test":{"credential_grants":["test-key"]}}
+    }"#,
+    )
+    .unwrap();
+    let mut app = App::start_config(AI_APP, free_port(), AI_MANIFEST, false, Some(&path));
+    app.ready();
+    let response = app.request("/");
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    assert!(response.contains("Fake AI response"));
+    assert!(response.contains("fake") && response.contains("small"));
+    for private in ["private prompt", "test-key"] {
+        assert!(!response.contains(private));
+        assert!(!app.logs().contains(private));
+    }
+    let pid = app.pid();
+    app.interrupt();
+    assert!(app.wait().success());
+    app.assert_released(pid);
+
+    // A grant for another identity never authorizes this launched app.
+    let contents = fs::read_to_string(&path)
+        .unwrap()
+        .replace("\"test\":", "\"other\":");
+    fs::write(&path, contents).unwrap();
+    let mut denied = App::start_config(AI_APP, free_port(), AI_MANIFEST, false, Some(&path));
+    denied.ready();
+    let response = denied.request("/");
+    assert!(response.starts_with("HTTP/1.1 403"));
+    assert!(response.contains("no credential grant"));
+    denied.interrupt();
+    assert!(denied.wait().success());
+}
+
+#[test]
+fn ai_request_without_host_configuration_does_not_grant_access() {
+    let mut app = App::start(AI_APP, free_port(), AI_MANIFEST, false);
+    app.ready();
+    let response = app.request("/");
+    assert!(response.starts_with("HTTP/1.1 403"));
+    assert!(response.contains("no configured AI route"));
+    app.interrupt();
+    assert!(app.wait().success());
+}
+
+#[test]
+fn app_without_ai_has_no_capability() {
+    let mut app = App::run(
+        r#"export default {fetch(_request, context) {return new Response(String(context.ai === undefined));}};"#,
+    );
+    app.ready();
+    assert!(app.request("/").ends_with("true"));
+    app.interrupt();
+    assert!(app.wait().success());
+}
+
+#[test]
+fn repository_ai_example_uses_runtime_default() {
+    let config = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/ai-config.json");
+    let mut app = App::start_config(
+        include_str!("../examples/ai/main.ts"),
+        free_port(),
+        include_str!("../examples/ai/paraco.json"),
+        false,
+        Some(&config),
+    );
+    app.ready();
+    let response = app.request("/");
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    assert!(response.contains("Fake AI response"));
     app.interrupt();
     assert!(app.wait().success());
 }

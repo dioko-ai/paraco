@@ -1,0 +1,5 @@
+{
+  "name": "ai-example",
+  "entrypoint": "main.ts",
+  "capabilities": ["ai"]
+}
