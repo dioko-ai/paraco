@@ -2,7 +2,7 @@
 
 This document records the installation direction discussed for Paraco and guides
 future implementation. It is a plan, not documentation of a shipped installer.
-Use it alongside [the product spec](../base_spec.md) and
+Use it alongside [the product spec](../spec.md) and
 [the first-runtime milestone](first-runtime.md).
 
 ## Current state
