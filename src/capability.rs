@@ -154,6 +154,9 @@ fn serve(
     caller: &str,
     proxy: &FakeProxy,
 ) -> std::io::Result<()> {
+    // Accepted sockets can inherit the listener's nonblocking mode on macOS.
+    // Framed reads and writes below use blocking I/O with bounded timeouts.
+    stream.set_nonblocking(false)?;
     let deadline = Instant::now() + IO_TIMEOUT;
     let mut header = [0; 4];
     read_exact_before(stream, &mut header, deadline)?;
@@ -191,6 +194,42 @@ fn token_matches(candidate: &str, expected: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nonblocking_accepted_socket_waits_for_request_frame() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut server, _) = listener.accept().unwrap();
+        // Explicitly reproduce macOS inheritance on every test platform.
+        server.set_nonblocking(true).unwrap();
+        let worker = thread::spawn(move || {
+            serve(
+                &mut server,
+                "expected",
+                "test",
+                &FakeProxy::new(Config::default()).unwrap(),
+            )
+        });
+        thread::sleep(Duration::from_millis(50));
+        let body = br#"{"token":"wrong","request":{"prompt":"hello"}}"#;
+        client
+            .write_all(&(body.len() as u32).to_be_bytes())
+            .unwrap();
+        thread::sleep(Duration::from_millis(50));
+        client.write_all(body).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let mut header = [0; 4];
+        client.read_exact(&mut header).unwrap();
+        let mut response = vec![0; u32::from_be_bytes(header) as usize];
+        client.read_exact(&mut response).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&response).unwrap()["error"],
+            "unauthorized AI caller"
+        );
+        worker.join().unwrap().unwrap();
+    }
 
     fn exchange(address: &str, value: serde_json::Value) -> serde_json::Value {
         let mut stream = TcpStream::connect(address).unwrap();
