@@ -1,0 +1,6 @@
+{
+  "apps": [
+    { "path": "hello" },
+    { "path": "ai", "aiConfig": "ai-config.json" }
+  ]
+}

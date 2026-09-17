@@ -1,17 +1,20 @@
 //! Offline AI policy core. Configuration and caller identity are supplied by the
 //! trusted host, never by the application's request payload.
 
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Selection {
     pub provider: String,
     pub model: String,
 }
 
 /// A configured route references a host-owned credential, not a credential value.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Route {
     pub selection: Selection,
     pub credential: String,
@@ -38,14 +41,15 @@ pub struct Config {
 
 /// Only selection and prompt are app-controlled. There is no caller or credential
 /// field. Prompt content deliberately has no derived Debug implementation.
-#[derive(Default)]
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Request {
     pub provider: Option<String>,
     pub model: Option<String>,
     pub prompt: String,
 }
 
-#[derive(PartialEq, Eq)]
+#[derive(PartialEq, Eq, Serialize)]
 pub struct Response {
     pub selection: Selection,
     pub text: String,
