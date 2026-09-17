@@ -30,6 +30,26 @@ Acceptance checks:
 - An app that cannot import or bind does not report ready and returns an error.
 - Ctrl+C reaps the app process and releases its port.
 
+## Automated verification
+
+On Unix, run `cargo test` with Deno available on `PATH`. The integration suite
+launches the actual CLI and Deno adapter using temporary app directories and
+loopback ports. Missing Deno fails the suite explicitly; it does not silently
+skip runtime coverage. `cargo test --bin paraco` runs only the manifest unit
+tests and does not require Deno.
+
+The suite covers the repository hello example, stdout/stderr forwarding, invalid
+manifests, missing Deno, invalid exports/imports, occupied ports, request failures
+followed by successful requests, unexpected child exit, Ctrl+C cleanup, startup
+timeout, and the five-second forced-shutdown fallback. Cleanup checks verify
+that the Deno PID no longer exists and the app port can be bound again. Tests use
+bounded waits and isolated process groups for cleanup even on assertion failure.
+The timeout cases make the suite take approximately ten seconds.
+
+These integration tests currently target Unix only because they verify Unix
+signals and process cleanup. Windows runtime verification remains future work.
+Run them in an environment that permits loopback listeners and subprocess signals.
+
 Deferred work includes containers, AI access and credential proxying, persistent
 services, background jobs, non-loopback networking, cloud worker adapters,
 databases, installation, and management interfaces.
