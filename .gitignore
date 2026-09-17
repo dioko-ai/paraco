@@ -1,1 +1,5 @@
 /target/
+
+# Local product planning documents
+/cloud_spec.private.md
+/base_spec.md
