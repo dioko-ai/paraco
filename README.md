@@ -2,7 +2,7 @@
 
 Paraco is a local-first runtime for portable applications. This repository is
 building its standalone foundation: Rust supervises Deno applications and serves
-them through a local gateway with a read-only dashboard.
+them through a local gateway, with a separate authenticated management dashboard.
 
 ## Try it
 
@@ -33,11 +33,32 @@ Open <http://127.0.0.1:3000/> for the dashboard. The example hosts:
 Use `--port 8787` for another loopback port. This runs in the foreground;
 Ctrl+C stops all apps. Configuration paths resolve relative to the configuration
 file, and the manifest name determines each app's URL. The dashboard refreshes
-its starting/running/failed statuses every five seconds.
+app statuses every five seconds. To start, stop, or restart apps in the browser,
+open the separate `management dashboard` URL printed in the terminal. That page
+refreshes status every two seconds; its private access link changes each server session.
 
 See [local hosting](docs/local-hosting.md) for the configuration, app base-path
 contract, and limits. [TODO.md](TODO.md) tracks completed work and the next
-increments: lifecycle controls, then background service operation.
+increments: retained logs, recovery, then background
+service operation.
+
+## Manage running apps
+
+On Unix, use another terminal to control apps hosted by `paraco serve`:
+
+```sh
+cargo run -- status
+cargo run -- stop hello
+cargo run -- start hello
+cargo run -- restart hello
+```
+
+Commands print JSON status and acknowledge lifecycle requests immediately. Use
+`status hello` to check completion; add the server's `--port` if it differs from
+3000. CLI management uses a private local socket. Browser controls use the separate
+authorized management dashboard; the gateway dashboard stays read-only.
+See [local lifecycle](docs/local-lifecycle.md) for state, security, and recovery
+semantics. Desired state is currently kept only for the running server session.
 
 ## Application contract
 
@@ -84,8 +105,12 @@ untrusted code.
 ```sh
 cargo fmt --check
 cargo test
+node --test tests/management.test.cjs
 cargo run -- run ./examples/hello
 ```
+
+The dashboard JavaScript tests use Node.js (no npm dependencies); Node.js is not
+needed to run Paraco.
 
 See [the first-runtime brief](docs/first-runtime.md) for the acceptance criteria
 and intentionally deferred work.
@@ -95,9 +120,10 @@ the future bundled runtime, CLI installers, and platform packaging plan.
 
 ## Current scope
 
-The runtime supports foreground single-app and multi-app hosting, a read-only
-dashboard, and a local fake AI capability. Lifecycle controls, background service
-operation, persistence, real AI providers, and AI HTTP compatibility/streaming
+The runtime supports foreground single-app and multi-app hosting, authenticated
+browser lifecycle controls, Unix CLI lifecycle controls, and a local fake AI
+capability. Retained logs, automatic recovery, background service operation,
+persistence, real AI providers, and AI HTTP compatibility/streaming
 remain future work. Cloud integration and bundling/installers are deferred.
 
 ## Try the local AI capability

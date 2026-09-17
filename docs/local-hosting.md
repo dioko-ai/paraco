@@ -1,13 +1,16 @@
 # Foreground local hosting
 
-Run several app directories and a read-only dashboard in one foreground server:
+Run several app directories and local dashboards in one foreground server:
 
 ```sh
 cargo run -- serve --config ./examples/server.json
 ```
 
 Open `http://127.0.0.1:3000/`. Use `--port 8787` to choose another port. Deno must
-be on `PATH`; there is no runtime installation or service registration in this
+be on `PATH`. The terminal also prints a private management dashboard link on a
+separate loopback port, with start, stop, and restart controls. See
+[local lifecycle](local-lifecycle.md#browser-management) for authorization.
+There is no runtime installation or service registration in this
 increment. Ctrl+C or SIGTERM stops the server and all its apps on Unix.
 
 ## Configuration
@@ -50,7 +53,7 @@ Client-supplied forwarding metadata is removed. Hop-by-hop headers are removed
 in both directions. Local upstream requests never use inherited proxy settings.
 
 `/apps/hello` redirects with HTTP 308 to `/apps/hello/`, preserving the query.
-Unknown routes return 404; starting or failed apps return 503. Proxy connection
+Unknown routes return 404; starting, stopping, stopped, or failed apps return 503. Proxy connection
 failures return 502, and an upstream timeout before headers returns 504.
 
 Use relative assets such as `style.css` on an app's root page, or construct
@@ -72,8 +75,9 @@ browser URL resolution rules.
 
 ## Dashboard and supervision
 
-The root dashboard shows configured app names, routes, and starting/running/failed
-states. Running apps have an Open app link. Failed apps show a supervisor error;
+The gateway root dashboard shows configured app names, routes, and starting/running/failed
+states, plus stopping and stopped states after lifecycle commands. Running apps
+have an Open app link. Failed apps show a supervisor error;
 other apps continue serving. The page refreshes every five seconds and does not
 cache its status. It is read-only and requires no external assets or services.
 Running means the adapter bound its listener and the process has not exited;
@@ -86,8 +90,8 @@ free before startup. The public gateway binds before any app is launched.
 
 Startup happens independently: a slow import does not prevent the dashboard or
 another app from serving. Startup times out after ten seconds. A failed or crashed
-app remains failed until the whole server is restarted; automatic retries and
-individual lifecycle controls are the next increment. App output currently goes
+app remains failed until explicitly started or restarted through the
+[local lifecycle CLI](local-lifecycle.md); automatic retries are future work. App output currently goes
 to the foreground terminal; retained per-app logs are also later work.
 
 On shutdown, supervisors stop apps concurrently, send SIGTERM on Unix, and force
@@ -98,7 +102,7 @@ be interrupted. Background operation and OS service integration come later.
 
 ## Current limits
 
-- This is loopback-only hosting for trusted local apps. All paths share one browser
+- This is loopback-only hosting for trusted local apps. Hosted app paths share one browser
   origin; path routing does not isolate cookies, browser storage, or scripts across
   apps. Separate processes do not provide a complete untrusted-code sandbox.
 - HTTP/1 request/response proxying is supported. Protocol upgrades such as
@@ -108,8 +112,10 @@ be interrupted. Background operation and OS service integration come later.
   response headers interrupts the body; it cannot replace the already-sent status.
 - Only `127.0.0.1:<port>` and `localhost:<port>` Host headers are accepted. The
   gateway always supplies the canonical `127.0.0.1:<port>` host to apps.
-- Service installation, restart recovery, start/stop/restart buttons, and local
-  management APIs are not implemented. Cloud and release packaging remain deferred.
+- Unix CLI lifecycle commands use a private local socket. Browser controls use a
+  separate authenticated loopback origin. Service installation and automatic
+  restart recovery remain future work.
+  Cloud and release packaging remain deferred.
 
 ## Verification
 

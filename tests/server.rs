@@ -139,6 +139,94 @@ impl Server {
         let response = self.wait_for(&format!("/apps/{name}/inspect"), "\"pid\"");
         serde_json::from_str(response.split_once("\r\n\r\n").unwrap().1).unwrap()
     }
+    fn command(&self, action: &str, app: Option<&str>) -> std::process::Output {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_paraco"));
+        command.arg(action).arg("--port").arg(self.port.to_string());
+        if let Some(app) = app {
+            command.arg(app);
+        }
+        command.output().unwrap()
+    }
+    fn control(&self, action: &str, app: Option<&str>) -> serde_json::Value {
+        let output = self.command(action, app);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).unwrap()
+    }
+    fn state(&self, name: &str, expected: &str) -> serde_json::Value {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            let apps = self.control("status", Some(name));
+            if apps[0]["state"] == expected {
+                return apps[0].clone();
+            }
+            assert!(
+                Instant::now() < deadline,
+                "Expected {expected}: {apps}\n{}",
+                self.logs()
+            );
+            thread::sleep(Duration::from_millis(25));
+        }
+    }
+    #[cfg(target_os = "linux")]
+    fn capability_ports(&self) -> Vec<u16> {
+        let inodes: Vec<_> = fs::read_dir(format!("/proc/{}/fd", self.child.id()))
+            .unwrap()
+            .filter_map(|entry| fs::read_link(entry.ok()?.path()).ok())
+            .filter_map(|path| {
+                path.to_str()?
+                    .strip_prefix("socket:[")?
+                    .strip_suffix(']')
+                    .map(str::to_owned)
+            })
+            .collect();
+        fs::read_to_string(format!("/proc/{}/net/tcp", self.child.id()))
+            .unwrap()
+            .lines()
+            .skip(1)
+            .filter_map(|line| {
+                let fields: Vec<_> = line.split_whitespace().collect();
+                if fields[3] != "0A" || !inodes.iter().any(|inode| inode == fields[9]) {
+                    return None;
+                }
+                let port = u16::from_str_radix(fields[1].split_once(':')?.1, 16).ok()?;
+                (port != self.port && port != self.management().0).then_some(port)
+            })
+            .collect()
+    }
+    fn management(&self) -> (u16, String) {
+        let logs = self.logs();
+        let url = logs
+            .lines()
+            .find_map(|line| line.strip_prefix("paraco: management dashboard "))
+            .unwrap();
+        let (address, token) = url.split_once("/#").unwrap();
+        (
+            address.rsplit_once(':').unwrap().1.parse().unwrap(),
+            token.into(),
+        )
+    }
+    fn browser_request(&self, method: &str, path: &str, headers: &str, body: &str) -> String {
+        let port = self.management().0;
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        write!(stream, "{method} {path} HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\nContent-Length: {}\r\n{headers}Connection: close\r\n\r\n{body}", body.len()).unwrap();
+        let mut result = String::new();
+        stream.read_to_string(&mut result).unwrap();
+        result
+    }
+    fn socket_path(&self) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "paraco-control-{}/{}.sock",
+            unsafe { libc::geteuid() },
+            self.port
+        ))
+    }
     fn wait_exit(&mut self) -> std::process::ExitStatus {
         let deadline = Instant::now() + Duration::from_secs(12);
         loop {
@@ -384,4 +472,398 @@ fn gateway_rejects_foreign_hosts_upgrades_and_oversized_bodies() {
             .ends_with("arrived")
     );
     server.stop(libc::SIGINT);
+}
+
+#[test]
+fn lifecycle_commands_isolate_apps_and_reap_replaced_processes() {
+    let mut server = Server::run(&[("one", APP), ("two", APP)]);
+    server.ready();
+    let first = server.inspect("one")["pid"].as_i64().unwrap() as i32;
+    let other = server.inspect("two")["pid"].clone();
+    assert_eq!(server.control("status", None).as_array().unwrap().len(), 2);
+    for _ in 0..3 {
+        server.control("start", Some("one"));
+    }
+    assert_eq!(server.inspect("one")["pid"], first);
+    for _ in 0..3 {
+        server.control("stop", Some("one"));
+    }
+    assert_eq!(server.state("one", "stopped")["desired"], "stopped");
+    assert_reaped(first);
+    assert!(server.request("GET", "/apps/one/", "").contains("503"));
+    assert!(server.request("GET", "/", "").contains("stopped"));
+    assert_eq!(server.inspect("two")["pid"], other);
+    thread::sleep(Duration::from_millis(150));
+    assert_eq!(server.control("status", Some("one"))[0]["state"], "stopped");
+    server.control("start", Some("one"));
+    server.state("one", "running");
+    let second = server.inspect("one")["pid"].as_i64().unwrap() as i32;
+    assert_ne!(first, second);
+    assert_eq!(server.inspect("one")["base"], "/apps/one/");
+    server.control("restart", Some("one"));
+    server.state("one", "running");
+    assert_reaped(second);
+    let third = server.inspect("one")["pid"].as_i64().unwrap() as i32;
+    assert_ne!(second, third);
+    assert_eq!(server.inspect("two")["pid"], other);
+    let missing = server.command("start", Some("missing"));
+    assert!(!missing.status.success());
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("unknown application"));
+    server.stop(libc::SIGINT);
+    assert_reaped(third);
+    assert!(!server.socket_path().exists());
+    assert!(!server.command("status", None).status.success());
+}
+
+#[test]
+fn failed_apps_can_be_fixed_and_started_without_restarting_server() {
+    let mut server = Server::run(&[("broken", "export default {};"), ("healthy", APP)]);
+    server.ready();
+    assert_eq!(server.state("broken", "failed")["desired"], "running");
+    let healthy = server.inspect("healthy")["pid"].clone();
+    fs::write(server.dir.path().join("broken/main.ts"), APP).unwrap();
+    server.control("start", Some("broken"));
+    server.state("broken", "running");
+    let pid = server.inspect("broken")["pid"].as_i64().unwrap() as i32;
+    unsafe {
+        libc::kill(pid, libc::SIGKILL);
+    }
+    let failed = server.state("broken", "failed");
+    assert_eq!(failed["desired"], "running");
+    assert!(failed["error"].as_str().unwrap().contains("unexpectedly"));
+    assert_reaped(pid);
+    server.control("restart", Some("broken"));
+    server.state("broken", "running");
+    assert_ne!(server.inspect("broken")["pid"], pid);
+    assert_eq!(server.inspect("healthy")["pid"], healthy);
+    server.stop(libc::SIGTERM);
+}
+
+#[test]
+fn stop_cancels_startup_and_latest_command_wins_without_orphans() {
+    let source = "console.log(`CHILD:${Deno.pid}`); setInterval(() => {}, 1000); await new Promise(() => {});";
+    let mut server = Server::run(&[("slow", source), ("healthy", APP)]);
+    server.ready();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !server.logs().contains("CHILD:") {
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(25));
+    }
+    let start = Instant::now();
+    server.control("stop", Some("slow"));
+    server.state("slow", "stopped");
+    assert!(start.elapsed() < Duration::from_secs(5));
+    for action in ["start", "restart", "restart", "stop", "start", "stop"] {
+        server.control(action, Some("slow"));
+    }
+    server.state("slow", "stopped");
+    for pid in server
+        .logs()
+        .lines()
+        .filter_map(|line| line.strip_prefix("CHILD:"))
+    {
+        assert_reaped(pid.parse().unwrap());
+    }
+    server.inspect("healthy");
+    fs::write(server.dir.path().join("slow/main.ts"), APP).unwrap();
+    server.control("start", Some("slow"));
+    server.state("slow", "running");
+    server.inspect("slow");
+    server.stop(libc::SIGINT);
+}
+
+#[test]
+fn control_is_private_bounded_and_not_exposed_over_http() {
+    use std::os::unix::{fs::PermissionsExt, net::UnixStream};
+    let mut server = Server::run(&[("one", APP)]);
+    server.ready();
+    server.state("one", "running");
+    let path = server.socket_path();
+    assert_eq!(
+        fs::metadata(path.parent().unwrap())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
+    );
+    assert_eq!(
+        fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    for request in [
+        "not json\n".to_owned(),
+        "x".repeat(4097),
+        "{\"action\":\"stop\"}\n".to_owned(),
+        "{\"action\":\"stop\",\"app\":\"one\",\"extra\":true}\n".to_owned(),
+    ] {
+        let mut stream = UnixStream::connect(&path).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        stream.write_all(request.as_bytes()).unwrap();
+        let mut reply = String::new();
+        stream.read_to_string(&mut reply).unwrap();
+        assert!(reply.contains("error"), "{reply}");
+    }
+    // A client sending occasional bytes must not extend the absolute deadline.
+    let mut trickling = UnixStream::connect(&path).unwrap();
+    trickling
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    let mut writer = trickling.try_clone().unwrap();
+    let sending = thread::spawn(move || {
+        for _ in 0..12 {
+            if writer.write_all(b" ").is_err() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(200));
+        }
+    });
+    let start = Instant::now();
+    let mut reply = String::new();
+    trickling.read_to_string(&mut reply).unwrap();
+    assert!(reply.contains("error"));
+    assert!(start.elapsed() < Duration::from_secs(2));
+    sending.join().unwrap();
+    let _stalled = UnixStream::connect(&path).unwrap();
+    assert_eq!(server.control("status", Some("one"))[0]["state"], "running");
+    assert!(
+        server
+            .request("POST", "/control", r#"{"action":"stop","app":"one"}"#)
+            .contains("404")
+    );
+    assert!(server.request("POST", "/", "").contains("405"));
+    server.inspect("one");
+    server.stop(libc::SIGINT);
+}
+
+#[test]
+fn ai_capability_is_recreated_and_released_on_lifecycle_changes() {
+    let dir = Server::fixture(&[("ai", APP)]);
+    let app = dir.path().join("ai");
+    fs::write(
+        app.join("paraco.json"),
+        r#"{"name":"ai","entrypoint":"main.ts","capabilities":["ai"]}"#,
+    )
+    .unwrap();
+    fs::write(
+        app.join("main.ts"),
+        r#"
+export default { async fetch(_request, context) {
+ return Response.json({pid: Deno.pid, result: await context.ai.complete({prompt: "hello"})});
+}};
+"#,
+    )
+    .unwrap();
+    fs::write(dir.path().join("ai.json"), r#"{"credentials":{"fake":"fake"},"routes":[{"selection":{"provider":"fake","model":"test"},"credential":"fake"}],"apps":{"ai":{"credential_grants":["fake"]}},"default":{"provider":"fake","model":"test"}}"#).unwrap();
+    let config = dir.path().join("server.json");
+    fs::write(&config, r#"{"apps":[{"path":"ai","aiConfig":"ai.json"}]}"#).unwrap();
+    let mut server = Server::start(dir, &config, free_port());
+    server.ready();
+    let first = server.wait_for("/apps/ai/", "Fake AI response");
+    let first: serde_json::Value =
+        serde_json::from_str(first.split_once("\r\n\r\n").unwrap().1).unwrap();
+    server.control("restart", Some("ai"));
+    server.state("ai", "running");
+    assert_reaped(first["pid"].as_i64().unwrap() as i32);
+    server.wait_for("/apps/ai/", "Fake AI response");
+    #[cfg(target_os = "linux")]
+    let ports = server.capability_ports();
+    server.control("stop", Some("ai"));
+    server.state("ai", "stopped");
+    #[cfg(target_os = "linux")]
+    {
+        assert_eq!(ports.len(), 1, "expected one host-owned AI listener");
+        assert!(server.capability_ports().is_empty());
+        for port in ports {
+            TcpListener::bind(("127.0.0.1", port)).expect("AI listener not released");
+        }
+    }
+    server.control("start", Some("ai"));
+    server.wait_for("/apps/ai/", "Fake AI response");
+    server.stop(libc::SIGTERM);
+}
+
+#[test]
+fn slow_stop_keeps_control_and_other_apps_responsive() {
+    let source = format!(
+        "{APP}\nDeno.addSignalListener('SIGTERM', () => {{}}); setInterval(() => {{}}, 1000);"
+    );
+    let mut server = Server::run(&[("stubborn", &source), ("healthy", APP)]);
+    server.ready();
+    let pid = server.inspect("stubborn")["pid"].as_i64().unwrap() as i32;
+    let start = Instant::now();
+    server.control("stop", Some("stubborn"));
+    let status = server.control("status", Some("stubborn"));
+    assert_eq!(status[0]["state"], "stopping");
+    assert_eq!(status[0]["desired"], "stopped");
+    server.inspect("healthy");
+    assert!(server.request("GET", "/", "").contains("stopping"));
+    assert!(start.elapsed() < Duration::from_secs(3));
+    server.state("stubborn", "stopped");
+    assert_reaped(pid);
+    assert!(start.elapsed() >= Duration::from_secs(5));
+    server.stop(libc::SIGINT);
+}
+
+#[test]
+fn occupied_control_socket_is_preserved_and_launches_no_apps() {
+    use std::os::unix::net::UnixListener;
+    let mut live = Server::run(&[]);
+    live.ready();
+    let port = free_port();
+    let path = live
+        .socket_path()
+        .parent()
+        .unwrap()
+        .join(format!("{port}.sock"));
+    let listener = UnixListener::bind(&path).unwrap();
+    let dir = Server::fixture(&[("one", "console.log('UNEXPECTED_START'); export default {};")]);
+    let config = dir.path().join("server.json");
+    let mut conflicting = Server::start(dir, &config, port);
+    assert!(!conflicting.wait_exit().success());
+    assert!(conflicting.logs().contains("cannot bind control socket"));
+    assert!(!conflicting.logs().contains("UNEXPECTED_START"));
+    assert!(path.exists());
+    drop(listener);
+    fs::remove_file(path).unwrap();
+    live.stop(libc::SIGINT);
+}
+
+#[test]
+fn control_rejects_insecure_or_symlinked_directories() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir
+        .path()
+        .join(format!("paraco-control-{}", unsafe { libc::geteuid() }));
+    fs::create_dir(&path).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    for symlinked in [false, true] {
+        if symlinked {
+            fs::remove_dir(&path).unwrap();
+            symlink(dir.path(), &path).unwrap();
+        }
+        let output = Command::new(env!("CARGO_BIN_EXE_paraco"))
+            .arg("status")
+            .env("TMPDIR", dir.path())
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("control directory"));
+    }
+}
+
+#[test]
+fn browser_management_controls_apps_and_releases_listener() {
+    let mut server = Server::run(&[("hello", APP), ("other", APP)]);
+    server.ready();
+    let old_pid = server.inspect("hello")["pid"].as_u64().unwrap() as i32;
+    let other_pid = server.inspect("other")["pid"].clone();
+    let (port, token) = server.management();
+    assert_ne!(port, server.port);
+    let headers = format!(
+        "Authorization: Bearer {token}\r\nOrigin: http://127.0.0.1:{port}\r\nContent-Type: application/json\r\nSec-Fetch-Site: same-origin\r\n"
+    );
+    let page = server.browser_request("GET", "/", "", "");
+    assert!(page.starts_with("HTTP/1.0 200"), "{page}");
+    assert!(page.contains("dashboard.js"));
+    assert!(page.contains("frame-ancestors 'none'"));
+    assert!(page.contains("referrer-policy: no-referrer"));
+    assert!(!page.contains(&token));
+    assert!(!server.request("GET", "/", "").contains(&token));
+    let script = server.browser_request("GET", "/dashboard.js", "", "");
+    assert!(script.contains("text/javascript"));
+    let status = server.browser_request("GET", "/api/apps", &headers, "");
+    assert!(status.contains("\"desired\":\"running\""), "{status}");
+    for (action, state) in [
+        ("stop", "stopped"),
+        ("start", "running"),
+        ("restart", "running"),
+    ] {
+        let before = if action == "restart" {
+            Some(server.inspect("hello")["pid"].clone())
+        } else {
+            None
+        };
+        let body = format!(r#"{{"action":"{action}","app":"hello"}}"#);
+        let response = server.browser_request("POST", "/api/apps", &headers, &body);
+        assert!(response.starts_with("HTTP/1.0 200"), "{response}");
+        server.state("hello", state);
+        if let Some(before) = before {
+            assert_ne!(server.inspect("hello")["pid"], before);
+            assert_reaped(before.as_u64().unwrap() as i32);
+        }
+        assert_eq!(server.inspect("other")["pid"], other_pid);
+    }
+    assert_reaped(old_pid);
+    server.stop(libc::SIGTERM);
+    assert!(TcpStream::connect(("127.0.0.1", port)).is_err());
+    TcpListener::bind(("127.0.0.1", port)).unwrap();
+}
+
+#[test]
+fn browser_management_rejects_unauthorized_cross_origin_and_invalid_commands() {
+    let mut server = Server::run(&[("hello", APP)]);
+    server.ready();
+    let pid = server.inspect("hello")["pid"].clone();
+    let (port, token) = server.management();
+    let origin = format!("Origin: http://127.0.0.1:{port}\r\n");
+    let auth = format!("Authorization: Bearer {token}\r\n");
+    let valid = format!("{auth}{origin}Content-Type: application/json\r\n");
+    let command = r#"{"action":"stop","app":"hello"}"#;
+    for (headers, code) in [
+        (String::new(), 401),
+        (format!("{origin}Authorization: Bearer wrong\r\n"), 401),
+        (auth.clone(), 403),
+        (
+            format!("{auth}Origin: http://127.0.0.1:{}\r\n", server.port),
+            403,
+        ),
+        (format!("{auth}Origin: null\r\n"), 403),
+        (format!("{valid}Sec-Fetch-Site: same-site\r\n"), 403),
+        (format!("{auth}{origin}Content-Type: text/plain\r\n"), 415),
+    ] {
+        let response = server.browser_request("POST", "/api/apps", &headers, command);
+        assert!(
+            response.starts_with(&format!("HTTP/1.0 {code}")),
+            "{response}"
+        );
+        assert!(!response.contains("access-control-allow-origin"));
+    }
+    assert!(
+        server
+            .browser_request("GET", "/api/apps", "", "")
+            .starts_with("HTTP/1.0 401")
+    );
+    assert!(
+        server
+            .browser_request("OPTIONS", "/api/apps", &valid, "")
+            .starts_with("HTTP/1.0 405")
+    );
+    for body in [
+        "invalid",
+        r#"{"action":"stop"}"#,
+        r#"{"action":"stop","app":"missing"}"#,
+        r#"{"action":"stop","app":"hello","extra":true}"#,
+    ] {
+        assert!(
+            server
+                .browser_request("POST", "/api/apps", &valid, body)
+                .starts_with("HTTP/1.0 400")
+        );
+    }
+    assert!(
+        server
+            .browser_request("POST", "/api/apps", &valid, &"x".repeat(4097))
+            .starts_with("HTTP/1.0 413")
+    );
+    assert!(
+        server
+            .request("POST", "/api/apps", command)
+            .starts_with("HTTP/1.0 404")
+    );
+    assert_eq!(server.inspect("hello")["pid"], pid);
+    server.stop(libc::SIGTERM);
 }
