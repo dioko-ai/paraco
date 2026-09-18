@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 mod capability;
 mod control;
+mod guardian;
 mod logs;
 mod manifest;
 mod runner;
@@ -74,6 +75,9 @@ enum Command {
 }
 
 fn main() {
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("__paraco_guardian")) {
+        std::process::exit(guardian::run());
+    }
     let cli = Cli::parse();
     let result = execute(cli);
     if let Err(error) = result {

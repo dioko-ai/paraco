@@ -61,8 +61,22 @@ recorded public port, without connecting to a server.
 Apps' multi-line stack traces produce multiple records with the same run ID.
 Invalid UTF-8 becomes the replacement character. Oversized lines retain their
 first 16 KiB and discard the remainder through the next newline. Partial final
-lines are captured at EOF. Ordering is capture/write order; stdout and stderr
-are independent pipes, so exact ordering between streams is not guaranteed.
+lines are captured at EOF. Accepted records retain capture/write order; stdout
+and stderr are independent pipes, so exact ordering between streams is not
+guaranteed. Delivery is asynchronous: a reader may request a bounded flush, but
+shutdown never waits for a blocked filesystem operation and can discard queued
+records.
+
+## Loss diagnostics
+
+The authenticated management log view labels truncated records and shows nonzero
+**store** loss counters for the current runtime/store scope: queue drops,
+truncations, write failures, known shutdown discards, and flush-barrier timeout
+or enqueue failures. A flush timeout is an unknown persistence outcome, not a
+discarded-record count. These live counters reset when the runtime exits and
+cannot report loss if the diagnostic sink itself is unavailable. Foreground
+console display is independently best-effort; a blocked terminal never blocks
+pipe draining or JSONL persistence, but console-display loss is not durable.
 
 For example, with `jq` installed:
 
@@ -112,9 +126,13 @@ The runtime does not independently log AI prompts or responses. Anything an app
 explicitly prints is retained, including any sensitive data it chooses to print.
 
 An unusable store at startup prevents application launches and reports an error.
-A later write/rotation/lock error prints a warning once per launch and leaves the
-app running; subsequent records retry storage, but failed records are lost.
-Storage is bounded, not a lossless audit trail.
+A later write/rotation/lock error leaves the app running; the failed record is
+lost and the sink continues with later records. It deliberately does not print a
+synchronous terminal warning because that terminal can itself be blocked. The
+runtime maintains independent queue-drop, truncation, write-failure, and
+shutdown-discard diagnostics at the log-dispatch boundary; authenticated
+management exposes the live store-scoped counters described above. Storage is bounded, not a lossless audit
+trail.
 
 ## Verification and next increment
 

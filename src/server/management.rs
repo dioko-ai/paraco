@@ -8,6 +8,10 @@ pub(super) struct Management {
     authorization: String,
     gateway_port: u16,
     store: logs::Store,
+    // SQLite tail reads run on the blocking pool. Keep their admission separate
+    // from request proxying so dashboard refreshes cannot consume it without
+    // bound, while also avoiding an unbounded spawn_blocking backlog.
+    log_reads: Arc<tokio::sync::Semaphore>,
 }
 
 pub(super) async fn bind(
@@ -30,6 +34,7 @@ pub(super) async fn bind(
         authorization: format!("Bearer {token}"),
         gateway_port,
         store,
+        log_reads: Arc::new(tokio::sync::Semaphore::new(4)),
     };
     Ok((
         listener,
@@ -130,16 +135,31 @@ async fn handle(state: &Management, request: Request) -> Response {
         if !state.apps.read().unwrap().contains_key(&app) {
             return StatusCode::NOT_FOUND.into_response();
         }
+        let store_losses = state.store.losses();
         let store = state.store.clone();
         let port = state.gateway_port;
+        // Do not queue a potentially slow file/SQLite read. The owned permit
+        // remains alive until the blocking job has completed (or its join has
+        // been cancelled), so there are at most four admitted jobs.
+        let Ok(_read_permit) = state.log_reads.clone().try_acquire_owned() else {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Log reader is busy; retry refresh.",
+            )
+                .into_response();
+        };
         return match tokio::task::spawn_blocking(move || {
+            // The permit deliberately belongs to this closure rather than the
+            // request future. A disconnected browser drops its JoinHandle,
+            // but cannot admit another filesystem job until this one ends.
+            let _read_permit = _read_permit;
             store.tail_launch(Some(&app), Some(port), run_id.as_deref(), limit)
         })
         .await
         {
             Ok(Ok(records)) => (
                 [(header::CONTENT_TYPE, "application/json")],
-                serde_json::json!({"records": records}).to_string(),
+                serde_json::json!({"records": records, "store_losses": store_losses, "console_losses": runner::console_losses()}).to_string(),
             )
                 .into_response(),
             _ => (
@@ -187,10 +207,27 @@ async fn handle(state: &Management, request: Request) -> Response {
             .into_response();
     };
     match manage(&state.apps, command) {
-        Ok(apps) => (
-            [(header::CONTENT_TYPE, "application/json")],
-            serde_json::json!({"apps": apps, "gateway": format!("http://127.0.0.1:{}", state.gateway_port)}).to_string(),
-        ).into_response(),
+        Ok(apps) => {
+            let roots = state.apps.read().unwrap();
+            let apps: Vec<_> = apps
+                .into_iter()
+                .map(|app| {
+                    let mut value = serde_json::to_value(&app).unwrap();
+                    if let Some(root) = roots.get(&app.name).map(|record| &record.root) {
+                        value["url"] = serde_json::Value::String(format!(
+                            "http://{}",
+                            app_host(&app.name, root, state.gateway_port)
+                        ));
+                    }
+                    value
+                })
+                .collect();
+            (
+                [(header::CONTENT_TYPE, "application/json")],
+                serde_json::json!({"apps": apps}).to_string(),
+            )
+                .into_response()
+        }
         Err(error) => (StatusCode::BAD_REQUEST, error).into_response(),
     }
 }

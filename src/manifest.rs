@@ -34,6 +34,8 @@ pub enum Error {
         path: PathBuf,
     },
     UnsupportedCapability(String),
+    DuplicateCapability(String),
+    UnsupportedSchemaVersion(u32),
 }
 
 impl fmt::Display for Error {
@@ -68,6 +70,15 @@ impl fmt::Display for Error {
             Self::UnsupportedCapability(capability) => {
                 write!(f, "unsupported requested capability `{capability}`")
             }
+            Self::DuplicateCapability(capability) => {
+                write!(
+                    f,
+                    "manifest capability `{capability}` may be requested only once"
+                )
+            }
+            Self::UnsupportedSchemaVersion(version) => {
+                write!(f, "unsupported manifest schemaVersion `{version}`")
+            }
         }
     }
 }
@@ -77,6 +88,8 @@ impl std::error::Error for Error {}
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Manifest {
+    #[serde(default)]
+    schema_version: Option<u32>,
     name: String,
     entrypoint: String,
     capabilities: Vec<String>,
@@ -101,11 +114,25 @@ pub fn load(app_dir: &Path) -> Result<App, Error> {
             source,
         })?;
 
+    if let Some(version) = manifest.schema_version
+        && version != 1
+    {
+        return Err(Error::UnsupportedSchemaVersion(version));
+    }
     if !valid_name(&manifest.name) {
         return Err(Error::InvalidName);
     }
     if let Some(capability) = manifest.capabilities.iter().find(|c| c.as_str() != "ai") {
         return Err(Error::UnsupportedCapability(capability.clone()));
+    }
+    if manifest
+        .capabilities
+        .iter()
+        .filter(|c| c.as_str() == "ai")
+        .count()
+        > 1
+    {
+        return Err(Error::DuplicateCapability("ai".into()));
     }
 
     let requested = Path::new(&manifest.entrypoint);
@@ -216,6 +243,24 @@ mod tests {
         assert!(
             matches!(load(directory.path()), Err(Error::UnsupportedCapability(capability)) if capability == "storage")
         );
+        std::fs::write(
+            directory.path().join("paraco.json"),
+            r#"{"schemaVersion":2,"name":"hello","entrypoint":"main.ts","capabilities":[]}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            load(directory.path()),
+            Err(Error::UnsupportedSchemaVersion(2))
+        ));
+        std::fs::write(
+            directory.path().join("paraco.json"),
+            r#"{"schemaVersion":1,"name":"hello","entrypoint":"main.ts","capabilities":["ai","ai"]}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            load(directory.path()),
+            Err(Error::DuplicateCapability(capability)) if capability == "ai"
+        ));
     }
 
     #[test]

@@ -53,8 +53,9 @@ mod transport {
     use std::{
         fs,
         io::{Read, Write},
+        os::fd::AsRawFd,
         os::unix::{
-            fs::{DirBuilderExt, MetadataExt, PermissionsExt},
+            fs::{DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt},
             net::{UnixListener, UnixStream},
         },
         path::PathBuf,
@@ -87,24 +88,94 @@ mod transport {
         Ok(directory.join(format!("{port}.sock")))
     }
 
+    // Keep this inode permanently: unlinking locks would permit multiple owners.
+    // Guardians inherit the open-file description and retain it through cleanup.
+    fn acquire_lease(path: &std::path::Path) -> Result<fs::File, String> {
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
+            .open(path.with_extension("lock"))
+            .map_err(|e| format!("cannot open control ownership lock: {e}"))?;
+        let metadata = file.metadata().map_err(|e| e.to_string())?;
+        if !metadata.is_file()
+            || metadata.uid() != unsafe { libc::geteuid() }
+            || metadata.mode() & 0o777 != 0o600
+            || metadata.nlink() != 1
+        {
+            return Err(
+                "control ownership lock must be a private, single-link regular file".into(),
+            );
+        }
+        let deadline = Instant::now() + Duration::from_secs(8);
+        loop {
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+                return Ok(file);
+            }
+            let error = std::io::Error::last_os_error();
+            if error.kind() != std::io::ErrorKind::WouldBlock {
+                return Err(format!("cannot lock control endpoint: {error}"));
+            }
+            if Instant::now() >= deadline {
+                return Err(
+                    "control endpoint is owned by a live runtime or application guardian".into(),
+                );
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+    }
+
+    fn recover_socket(path: &std::path::Path) -> Result<(), String> {
+        let metadata = match fs::symlink_metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(format!("cannot inspect control socket: {error}")),
+        };
+        if !metadata.file_type().is_socket()
+            || metadata.uid() != unsafe { libc::geteuid() }
+            || metadata.mode() & 0o777 != 0o600
+        {
+            return Err("refusing to replace an unexpected control endpoint".into());
+        }
+        // Protect live listeners from older runtimes that do not hold a lease too.
+        match UnixStream::connect(path) {
+            Ok(_) => return Err("control socket belongs to a live listener".into()),
+            Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => {}
+            Err(error) => return Err(format!("cannot verify stale control socket: {error}")),
+        }
+        fs::remove_file(path).map_err(|e| format!("cannot remove stale control socket: {e}"))
+    }
+
     pub struct Server {
         stop: Arc<AtomicBool>,
         worker: Option<thread::JoinHandle<()>>,
         path: PathBuf,
+        lease: Arc<fs::File>,
     }
 
     impl Server {
+        pub fn lease(&self) -> Option<Arc<fs::File>> {
+            Some(self.lease.clone())
+        }
+
         pub fn start(
             port: u16,
             handler: impl Fn(Command) -> Result<Vec<Status>, String> + Send + 'static,
         ) -> Result<Self, String> {
             let path = endpoint(port)?;
-            let listener = UnixListener::bind(&path).map_err(|e| format!("cannot bind control socket {}: {e}; if a previous server was killed, remove its stale socket after checking that it is no longer running", path.display()))?;
+            let lease = Arc::new(acquire_lease(&path)?);
+            recover_socket(&path)?;
+            let listener = UnixListener::bind(&path)
+                .map_err(|e| format!("cannot bind control socket {}: {e}", path.display()))?;
             // Own cleanup immediately, including failures during setup.
             let mut server = Self {
                 stop: Arc::new(AtomicBool::new(false)),
                 worker: None,
                 path,
+                lease,
             };
             fs::set_permissions(&server.path, fs::Permissions::from_mode(0o600))
                 .map_err(|e| e.to_string())?;
@@ -243,6 +314,44 @@ mod transport {
         serde_json::from_slice(&read_frame(&mut stream, 1024 * 1024)?)
             .map_err(|_| "invalid control response".into())
     }
+    #[cfg(test)]
+    mod ownership_tests {
+        use super::*;
+
+        #[test]
+        fn ownership_survives_until_the_last_guardian_duplicate_closes() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("test.sock");
+            let runtime = acquire_lease(&path).unwrap();
+            let guardian = runtime.try_clone().unwrap();
+            drop(runtime);
+            let (tx, rx) = std::sync::mpsc::channel();
+            let waiting = thread::spawn(move || {
+                let lease = acquire_lease(&path).unwrap();
+                tx.send(()).unwrap();
+                lease
+            });
+            assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
+            drop(guardian);
+            rx.recv_timeout(Duration::from_secs(2)).unwrap();
+            drop(waiting.join().unwrap());
+        }
+
+        #[test]
+        fn ownership_rejects_symlinks_and_hardlinks_without_modifying_targets() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("test.sock");
+            let target = dir.path().join("keep");
+            fs::write(&target, "preserve").unwrap();
+            fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).unwrap();
+            std::os::unix::fs::symlink(&target, path.with_extension("lock")).unwrap();
+            assert!(acquire_lease(&path).is_err());
+            fs::remove_file(path.with_extension("lock")).unwrap();
+            fs::hard_link(&target, path.with_extension("lock")).unwrap();
+            assert!(acquire_lease(&path).is_err());
+            assert_eq!(fs::read_to_string(target).unwrap(), "preserve");
+        }
+    }
 }
 
 #[cfg(not(unix))]
@@ -250,6 +359,9 @@ mod transport {
     use super::*;
     pub struct Server;
     impl Server {
+        pub fn lease(&self) -> Option<std::sync::Arc<std::fs::File>> {
+            None
+        }
         pub fn start(
             _port: u16,
             _handler: impl Fn(Command) -> Result<Vec<Status>, String> + Send + 'static,

@@ -41,20 +41,35 @@ app in the server configuration.
 
 | Public request | App receives | `context.basePath` |
 | --- | --- | --- |
-| `/apps/hello/` | `/` | `/apps/hello/` |
-| `/apps/hello/style.css` | `/style.css` | `/apps/hello/` |
-| `/apps/hello/items?q=one` | `/items?q=one` | `/apps/hello/` |
+| `http://app-<stable-id>.localhost:<port>/` | `/` | `/` |
+| `http://app-<stable-id>.localhost:<port>/style.css` | `/style.css` | `/` |
+| `http://app-<stable-id>.localhost:<port>/items?q=one` | `/items?q=one` | `/` |
 | Single-app `paraco run` request `/items` | `/items` | `/` |
 
-The app sees the gateway's canonical loopback origin in `request.url`, with the
-mount prefix removed from the path. The base path always begins and ends with
-`/`. Query strings, methods, request bodies, and end-to-end headers are forwarded.
-Client-supplied forwarding metadata is removed. Hop-by-hop headers are removed
-in both directions. Local upstream requests never use inherited proxy settings.
+Each hosted app has a distinct deterministic `.localhost` hostname derived from
+its canonical app root, manifest name, and fixed gateway port. The app receives that canonical URL
+and Host; this separates browser origins even though all traffic reaches the same
+loopback listener. Query strings, methods, request bodies, and end-to-end headers
+are forwarded. Client-supplied forwarding metadata and hop-by-hop headers are
+removed. Local upstream requests never use inherited proxy settings.
 
-`/apps/hello` redirects with HTTP 308 to `/apps/hello/`, preserving the query.
-Unknown routes return 404; starting, stopping, stopped, or failed apps return 503. Proxy connection
-failures return 502, and an upstream timeout before headers returns 504.
+The legacy shared `/apps/<name>/...` URLs are migration redirects only: GET and
+HEAD receive a 308 to the app's canonical origin, while other methods receive
+405. The shared gateway never proxies app-controlled content. Unknown routes
+return 404; starting, stopping, stopped, or failed apps return 503. Proxy
+connection failures return 502, and an upstream timeout before headers returns 504.
+
+## Hosted-workload limits
+
+Hosted configuration accepts at most 50 applications (`maxApps`, default 50).
+The gateway admits up to 64 concurrent proxy responses overall and 8 per app;
+it does not queue excess work, returning 503 so callers can retry. Permits stay
+held until a streamed response completes or is cancelled. The management log
+endpoint likewise admits four blocking reads and returns 503 rather than
+creating an unbounded blocking-pool queue. These are M1 safety limits, not
+throughput guarantees or CPU/RSS quotas. Shutdown allows at most two seconds
+for outstanding runtime work after listeners close. Measure 1, 10, and 50-app
+workloads on the target host with `scripts/probe-hosted-workload.cjs`.
 
 Use relative assets such as `style.css` on an app's root page, or construct
 public links using `context.basePath`. For redirects, for example:
@@ -93,6 +108,21 @@ another app from serving. Startup times out after ten seconds. A failed or crash
 app retries when its restart policy is enabled; otherwise it remains failed until started or restarted through the
 [local lifecycle CLI](local-lifecycle.md); automatic retries are future work. App output goes
 to the foreground terminal and the bounded persistent [JSONL log store](local-logs.md).
+
+### Output and log delivery
+
+Child stdout and stderr are always drained independently of terminal output and
+persistent logging. Each destination has a finite record queue (1024 records);
+Child-to-persistence queues hold 1024 records and terminal queues hold 256; when
+a destination is blocked, later records for that destination are discarded
+instead of delaying readiness, lifecycle actions, or child reaping. Accepted
+JSONL records retain FIFO ordering at the persistence worker and the existing
+rotation limits, but a blocked filesystem may leave a gap or lose a final
+lifecycle record. Stopping first terminates and reaps the child; it never waits
+for a terminal or log-writer flush. Queue-drop, truncation, write-failure, and
+shutdown-discard counters are kept independently so a blocked sink cannot hide
+loss in another sink. This is the M1 blocked-output safety slice, not completion
+of the remaining M1 cron/scheduler gates.
 Use `paraco logs <app>` even after the server stops.
 
 On shutdown, supervisors stop apps concurrently, send SIGTERM on Unix, and force
@@ -103,16 +133,21 @@ be interrupted. Background operation and OS service integration come later.
 
 ## Current limits
 
-- This is loopback-only hosting for trusted local apps. Hosted app paths share one browser
-  origin; path routing does not isolate cookies, browser storage, or scripts across
-  apps. Separate processes do not provide a complete untrusted-code sandbox.
+- This is loopback-only hosting for trusted local apps. Each hosted app uses a
+  distinct `.localhost` browser origin, and cross-origin `Origin` requests are
+  rejected without CORS headers. The gateway drops response cookies that request
+  a `Domain` attribute and gives every app launch a private loopback authorization
+  header which the adapter verifies and removes before calling app code. This is
+  a browser boundary, not authentication against a hostile local process or a
+  complete untrusted-code sandbox.
 - HTTP/1 request/response proxying is supported. Protocol upgrades such as
   WebSockets are explicitly unsupported.
 - Request bodies are buffered up to 1 MiB with a ten-second body-read deadline.
   Upstream responses stream with a thirty-second request deadline. A timeout after
   response headers interrupts the body; it cannot replace the already-sent status.
-- Only `127.0.0.1:<port>` and `localhost:<port>` Host headers are accepted. The
-  gateway always supplies the canonical `127.0.0.1:<port>` host to apps.
+- The shared dashboard accepts only `127.0.0.1:<port>` and `localhost:<port>`;
+  app traffic accepts only its generated canonical hostname. Forged forwarding
+  metadata and backend authorization headers are overwritten by the gateway.
 - Unix CLI lifecycle commands use a private local socket. Browser controls use a
   separate authenticated loopback origin. Service installation and automatic
   restart recovery remain future work.

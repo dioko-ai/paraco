@@ -7,7 +7,8 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU32, Ordering},
+        atomic::{AtomicU32, Ordering},
+        mpsc::{self, SyncSender, TrySendError},
     },
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -16,14 +17,66 @@ use std::{
 const FILE_BYTES: u64 = 2 * 1024 * 1024;
 const FILE_COUNT: usize = 5;
 pub const LINE_BYTES: usize = 16 * 1024;
+const QUEUE_RECORDS: usize = 1024;
+const MAX_PERSISTENCE_WORKERS: usize = 32;
+static PERSISTENCE_WORKERS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Snapshot of records deliberately lost at the asynchronous persistence boundary.
+#[allow(dead_code)] // consumed by management diagnostics in the next M1 slice
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct LossCounters {
+    pub queue_drops: u64,
+    pub truncations: u64,
+    pub write_failures: u64,
+    pub shutdown_discards: u64,
+    /// A flush barrier whose persistence result is unknown, not a record loss.
+    pub flush_timeouts: u64,
+    /// A flush barrier that could not enter the bounded queue.
+    pub flush_enqueue_failures: u64,
+}
+
+struct Losses {
+    queue_drops: std::sync::atomic::AtomicU64,
+    truncations: std::sync::atomic::AtomicU64,
+    write_failures: std::sync::atomic::AtomicU64,
+    #[allow(dead_code)]
+    shutdown_discards: std::sync::atomic::AtomicU64,
+    flush_timeouts: std::sync::atomic::AtomicU64,
+    flush_enqueue_failures: std::sync::atomic::AtomicU64,
+}
+
+impl Losses {
+    #[allow(dead_code)]
+    fn snapshot(&self) -> LossCounters {
+        LossCounters {
+            queue_drops: self.queue_drops.load(Ordering::Relaxed),
+            truncations: self.truncations.load(Ordering::Relaxed),
+            write_failures: self.write_failures.load(Ordering::Relaxed),
+            shutdown_discards: self.shutdown_discards.load(Ordering::Relaxed),
+            flush_timeouts: self.flush_timeouts.load(Ordering::Relaxed),
+            flush_enqueue_failures: self.flush_enqueue_failures.load(Ordering::Relaxed),
+        }
+    }
+}
+
+enum QueueItem {
+    Record(Record),
+    Flush(mpsc::SyncSender<()>),
+}
+
+struct Sink {
+    sender: SyncSender<QueueItem>,
+    losses: Arc<Losses>,
+}
 
 #[derive(Clone)]
 pub struct Store {
     path: PathBuf,
     file_bytes: u64,
+    sink: Option<Arc<Sink>>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Record {
     pub schema_version: u8,
     pub timestamp_unix_ms: u64,
@@ -46,7 +99,6 @@ pub struct AppLog {
     port: u16,
     run_id: String,
     pid: Arc<AtomicU32>,
-    warned: Arc<AtomicBool>,
 }
 
 pub fn directory(explicit: Option<&Path>) -> Result<PathBuf, String> {
@@ -71,6 +123,14 @@ pub fn directory(explicit: Option<&Path>) -> Result<PathBuf, String> {
 
 impl Store {
     pub fn open(path: &Path) -> Result<Self, String> {
+        Self::open_with_limit(path, FILE_BYTES)
+    }
+
+    fn open_with_limit(path: &Path, file_bytes: u64) -> Result<Self, String> {
+        Self::open_inner(path, file_bytes)
+    }
+
+    fn open_inner(path: &Path, file_bytes: u64) -> Result<Self, String> {
         let mut builder = fs::DirBuilder::new();
         builder.recursive(true);
         #[cfg(unix)]
@@ -94,19 +154,96 @@ impl Store {
                 );
             }
         }
-        let store = Self {
+        let bare = Self {
             path: path.canonicalize().map_err(|e| e.to_string())?,
-            file_bytes: FILE_BYTES,
+            file_bytes,
+            sink: None,
         };
-        let _lock = store.lock().map_err(|e| format!("cannot lock logs: {e}"))?;
-        store
-            .repair()
+        let _lock = bare.lock().map_err(|e| format!("cannot lock logs: {e}"))?;
+        bare.repair()
             .map_err(|e| format!("cannot initialize logs: {e}"))?;
-        Ok(store)
+        let (sender, receiver) = mpsc::sync_channel(QUEUE_RECORDS);
+        let losses = Arc::new(Losses {
+            queue_drops: std::sync::atomic::AtomicU64::new(0),
+            truncations: std::sync::atomic::AtomicU64::new(0),
+            write_failures: std::sync::atomic::AtomicU64::new(0),
+            shutdown_discards: std::sync::atomic::AtomicU64::new(0),
+            flush_timeouts: std::sync::atomic::AtomicU64::new(0),
+            flush_enqueue_failures: std::sync::atomic::AtomicU64::new(0),
+        });
+        if PERSISTENCE_WORKERS
+            .fetch_update(Ordering::AcqRel, Ordering::Relaxed, |count| {
+                (count < MAX_PERSISTENCE_WORKERS).then_some(count + 1)
+            })
+            .is_err()
+        {
+            return Err(
+                "persistent log worker limit reached; retry after an existing store closes".into(),
+            );
+        }
+        let worker_store = bare.clone();
+        let worker_losses = losses.clone();
+        thread::spawn(move || {
+            while let Ok(item) = receiver.recv() {
+                match item {
+                    QueueItem::Record(record) => {
+                        if worker_store.append(&record).is_err() {
+                            // Never synchronously fall back to stderr: it may be the blocked sink.
+                            worker_losses.write_failures.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                    QueueItem::Flush(done) => {
+                        let _ = done.send(());
+                    }
+                }
+            }
+            PERSISTENCE_WORKERS.fetch_sub(1, Ordering::AcqRel);
+        });
+        Ok(Self {
+            sink: Some(Arc::new(Sink { sender, losses })),
+            ..bare
+        })
+    }
+
+    #[cfg(test)]
+    fn with_blocked_writer(path: &Path) -> (Self, mpsc::Receiver<()>, mpsc::SyncSender<()>) {
+        let mut store = Self::open(path).unwrap();
+        let bare = Self {
+            path: store.path.clone(),
+            file_bytes: store.file_bytes,
+            sink: None,
+        };
+        let (sender, receiver) = mpsc::sync_channel(QUEUE_RECORDS);
+        let (entered_tx, entered_rx) = mpsc::sync_channel(1);
+        let (release_tx, release_rx) = mpsc::sync_channel(1);
+        let losses = Arc::new(Losses {
+            queue_drops: std::sync::atomic::AtomicU64::new(0),
+            truncations: std::sync::atomic::AtomicU64::new(0),
+            write_failures: std::sync::atomic::AtomicU64::new(0),
+            shutdown_discards: std::sync::atomic::AtomicU64::new(0),
+            flush_timeouts: std::sync::atomic::AtomicU64::new(0),
+            flush_enqueue_failures: std::sync::atomic::AtomicU64::new(0),
+        });
+        thread::spawn(move || {
+            if let Ok(QueueItem::Record(record)) = receiver.recv() {
+                let _ = entered_tx.send(());
+                let _ = release_rx.recv();
+                let _ = bare.append(&record);
+            }
+        });
+        store.sink = Some(Arc::new(Sink { sender, losses }));
+        (store, entered_rx, release_tx)
     }
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+    /// Live store-scoped counters; they reset when this runtime/store closes.
+    pub fn losses(&self) -> LossCounters {
+        self.sink
+            .as_ref()
+            .map(|sink| sink.losses.snapshot())
+            .unwrap_or_default()
     }
 
     pub fn outside(&self, app_root: &Path) -> Result<(), String> {
@@ -126,7 +263,6 @@ impl Store {
             port,
             run_id: random.iter().map(|b| format!("{b:02x}")).collect(),
             pid: Arc::new(AtomicU32::new(0)),
-            warned: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -245,6 +381,7 @@ impl Store {
         port: Option<u16>,
         count: usize,
     ) -> Result<Vec<Record>, String> {
+        self.flush(Duration::from_secs(2));
         self.tail_launch(app, port, None, count)
     }
 
@@ -255,6 +392,7 @@ impl Store {
         run_id: Option<&str>,
         count: usize,
     ) -> Result<Vec<Record>, String> {
+        self.flush(Duration::from_secs(2));
         if count > 10_000 {
             return Err("--tail must be at most 10000".into());
         }
@@ -289,6 +427,24 @@ impl Store {
             }
         }
         Ok(records.into_iter().collect())
+    }
+
+    /// Best-effort bounded persistence barrier for readers and tests. It never
+    /// waits for a filesystem operation already stalled in the sink worker.
+    fn flush(&self, timeout: Duration) {
+        let Some(sink) = &self.sink else { return };
+        let (done_tx, done_rx) = mpsc::sync_channel(0);
+        match sink.sender.try_send(QueueItem::Flush(done_tx)) {
+            Ok(()) if done_rx.recv_timeout(timeout).is_err() => {
+                sink.losses.flush_timeouts.fetch_add(1, Ordering::Relaxed);
+            }
+            Err(_) => {
+                sink.losses
+                    .flush_enqueue_failures
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            _ => {}
+        }
     }
 }
 
@@ -329,9 +485,35 @@ impl AppLog {
     pub fn event(&self, event: &str, message: &str) {
         self.write("supervisor", event, message, false);
     }
+    /// Optional deadline-bounded lifecycle flush. It is never a shutdown
+    /// dependency: a full or stalled queue is recorded as a discard instead.
+    pub fn flush(&self, timeout: Duration) {
+        let Some(sink) = &self.store.sink else { return };
+        let (done_tx, done_rx) = mpsc::sync_channel(0);
+        match sink.sender.try_send(QueueItem::Flush(done_tx)) {
+            Ok(()) if done_rx.recv_timeout(timeout).is_err() => {
+                sink.losses.flush_timeouts.fetch_add(1, Ordering::Relaxed);
+            }
+            Err(_) => {
+                sink.losses
+                    .flush_enqueue_failures
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            _ => {}
+        }
+    }
+    #[allow(dead_code)]
+    pub fn losses(&self) -> LossCounters {
+        self.store
+            .sink
+            .as_ref()
+            .map(|sink| sink.losses.snapshot())
+            .unwrap_or_default()
+    }
     pub fn write(&self, stream: &str, event: &str, message: &str, truncated: bool) {
         let end = message.floor_char_boundary(message.len().min(LINE_BYTES));
         let pid = self.pid.load(Ordering::Relaxed);
+        let was_truncated = truncated || end < message.len();
         let record = Record {
             schema_version: 1,
             timestamp_unix_ms: SystemTime::now()
@@ -346,15 +528,22 @@ impl AppLog {
             stream: stream.into(),
             event: event.into(),
             message: message[..end].into(),
-            truncated: truncated || end < message.len(),
+            truncated: was_truncated,
         };
-        if let Err(error) = self.store.append(&record)
-            && !self.warned.swap(true, Ordering::Relaxed)
-        {
-            eprintln!(
-                "paraco: persistent logging failed for {}: {error}; some records may be missing",
-                self.app
-            );
+        let Some(sink) = &self.store.sink else { return };
+        if was_truncated {
+            sink.losses.truncations.fetch_add(1, Ordering::Relaxed);
+        }
+        match sink.sender.try_send(QueueItem::Record(record)) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => {
+                sink.losses.queue_drops.fetch_add(1, Ordering::Relaxed);
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                sink.losses
+                    .shutdown_discards
+                    .fetch_add(1, Ordering::Relaxed);
+            }
         }
     }
 }
@@ -420,11 +609,56 @@ pub fn lines(reader: impl Read, mut emit: impl FnMut(&[u8], bool)) -> io::Result
 mod tests {
     use super::*;
 
+    fn wait_for_records(store: &Store, expected: usize) -> Vec<Record> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let records = store.tail(None, None, 1000).unwrap();
+            if records.len() >= expected || Instant::now() >= deadline {
+                return records;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn blocked_writer_drops_bounded_records_without_blocking_producers() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, entered, release) = Store::with_blocked_writer(&dir.path().join("logs"));
+        let log = store.app("hello", "run", 3000).unwrap();
+        log.event("starting", "first record blocks the fake writer");
+        entered.recv_timeout(Duration::from_secs(1)).unwrap();
+        let done = thread::spawn({
+            let log = log.clone();
+            move || {
+                for number in 0..(QUEUE_RECORDS * 2) {
+                    log.write("stdout", "output", &format!("{number}"), false);
+                }
+            }
+        });
+        done.join().unwrap(); // an external watchdog would fail this if try_send regressed to send.
+        assert!(log.losses().queue_drops > 0);
+        release.send(()).unwrap();
+    }
+
+    #[test]
+    fn timed_out_flush_is_an_unknown_outcome_not_a_discard() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, entered, release) = Store::with_blocked_writer(&dir.path().join("logs"));
+        let log = store.app("hello", "run", 3000).unwrap();
+        log.event("starting", "block the writer");
+        entered.recv_timeout(Duration::from_secs(1)).unwrap();
+        log.flush(Duration::from_millis(1));
+        assert_eq!(log.losses().flush_timeouts, 1);
+        assert_eq!(log.losses().shutdown_discards, 0);
+        release.send(()).unwrap();
+        log.flush(Duration::from_secs(1));
+        assert_eq!(log.losses().shutdown_discards, 0);
+    }
+
     #[test]
     fn rotates_prunes_and_keeps_latest_records_across_reopen() {
         let dir = tempfile::tempdir().unwrap();
-        let mut store = Store::open(&dir.path().join("logs")).unwrap();
-        store.file_bytes = 1024;
+        let store = Store::open_with_limit(&dir.path().join("logs"), 1024).unwrap();
         fs::write(store.path().join("unrelated.txt"), "keep me").unwrap();
         let log = store.app("hello", "serve", 3000).unwrap();
         for n in 0..100 {
@@ -491,7 +725,7 @@ mod tests {
         for worker in workers {
             worker.join().unwrap();
         }
-        let records = store.tail(None, None, 1000).unwrap();
+        let records = wait_for_records(&store, 200);
         assert_eq!(records.len(), 200);
         for record in records {
             assert!(record.timestamp_unix_ms > 0);

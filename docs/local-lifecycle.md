@@ -96,10 +96,33 @@ Deno permission limits. The gateway dashboard remains read-only. Browser managem
 loopback origin with a per-server credential, as described below.
 
 Control messages have size limits and timeouts. Normal server shutdown removes
-its socket. An existing socket is never automatically replaced. If a server is
-forcibly killed and leaves a stale socket, first confirm it is no longer running,
-then remove the exact socket path reported by the startup error and retry. The
-private parent directory is retained for subsequent server sessions.
+its socket. A private `<port>.lock` file establishes exclusive endpoint ownership;
+the file stays in place between sessions. Startup waits up to eight seconds for
+ownership, then checks any existing socket. Only a socket owned by this user with
+mode 0600 whose connection is refused can be removed. Live listeners, symlinks,
+regular files, and ambiguous connection failures are preserved and reported.
+Do not delete ownership lock files: their stable inode coordinates all owners.
+
+## Runtime crash recovery
+
+Each app runs beneath a small Rust guardian process. The runtime keeps a private
+pipe open to that guardian; closing the pipe or killing the runtime closes the
+ownership channel. The guardian sends Deno SIGTERM, allows five seconds for
+graceful exit, then kills and reaps it if necessary. This also works during app
+import and when JavaScript's event loop is blocked. The guardian owns the temporary
+adapter/cache directory and removes it after Deno exits. Persistent logs remain.
+
+For `serve`, guardians retain the endpoint ownership lock until cleanup completes.
+An immediate restart waits for them before recovering the stale socket and
+launching apps. A second runtime cannot replace a live runtime's endpoint. No
+stored PID is used as evidence that a process belongs to Paraco. The same
+parent-death cleanup applies to standalone `run`.
+
+This adds one guardian process per running app. It covers termination of the
+main runtime while its guardians remain operational; killing a guardian itself
+or failure of the OS is outside this mechanism. Apps remain trusted local code,
+and arbitrary app-created subprocess trees are not supported. OS service
+registration and durable desired state remain future work.
 
 ## Browser management
 
@@ -149,6 +172,11 @@ process identities, process reaping, failure repair, startup cancellation, rapid
 command changes, slow shutdown, management access restrictions, malformed and
 stalled clients, occupied sockets, and AI across restarts. On Linux, the AI test
 also inspects host-owned listeners and verifies their release after stopping.
+Crash tests kill the runtime during startup and with a blocked app event loop,
+restart immediately with multiple apps, verify Deno reaping and temporary-directory
+cleanup, and preserve live or unexpected control endpoints. These tests run in the
+Unix suite for Linux and macOS; local verification of this change is Linux x86-64
+with Deno 2.9.7. Native macOS evidence remains pending.
 
 ```sh
 cargo fmt --check

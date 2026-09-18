@@ -11,6 +11,10 @@ if (!entrypoint || !portText || !nonce) {
 // are sent to this process; this token authorizes only this running app.
 const hostConfig = JSON.parse(await new Response(Deno.stdin.readable).text());
 const bootstrap = hostConfig.ai;
+const backendToken = hostConfig.backendToken;
+if (backendToken !== null && (typeof backendToken !== "string" || backendToken.length < 16)) {
+  throw new Error("Paraco host received an invalid backend authorization token");
+}
 const connect = Deno.connect.bind(Deno);
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -98,6 +102,20 @@ const server = Deno.serve(
     },
   },
   async (request) => {
+    // The loopback listener is not browser-facing. Only the gateway knows this
+    // per-launch value, and it is removed before untrusted app code sees it.
+    if (backendToken !== null && request.headers.get("x-paraco-internal") !== backendToken) {
+      return new Response("Forbidden", { status: 403 });
+    }
+    const headers = new Headers(request.headers);
+    if (backendToken !== null) {
+      headers.delete("x-paraco-internal");
+      // The gateway connects to an ephemeral loopback port, but app code must
+      // observe its public canonical origin in both Host and request.url.
+      const canonical = new URL(request.url);
+      canonical.host = headers.get("host")!;
+      request = new Request(new Request(canonical, request), { headers });
+    }
     try {
       const response = await app.fetch(request, context);
       if (!(response instanceof Response)) {

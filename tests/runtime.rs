@@ -204,6 +204,62 @@ fn serves_http_forwards_logs_and_reaps_on_ctrl_c() {
 }
 
 #[test]
+fn forced_runtime_death_reaps_even_an_app_with_a_blocked_event_loop() {
+    let mut app = App::run(&format!(
+        "{HEALTHY}\nsetTimeout(() => {{ console.log('BLOCKED'); while (true) {{}} }}, 1000);"
+    ));
+    app.ready();
+    let pid = app.pid();
+    let deadline = Instant::now() + LIMIT;
+    while !app.stdout().contains("BLOCKED") {
+        assert!(Instant::now() < deadline, "{}", app.logs());
+        thread::sleep(Duration::from_millis(25));
+    }
+    assert_eq!(
+        unsafe { libc::kill(app.child.id() as i32, libc::SIGKILL) },
+        0
+    );
+    assert!(!app.wait().success());
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while unsafe { libc::kill(pid, 0) } == 0 {
+        assert!(Instant::now() < deadline, "Deno survived runtime death");
+        thread::sleep(Duration::from_millis(25));
+    }
+    app.assert_released(pid);
+}
+
+#[test]
+fn forced_runtime_death_during_import_reaps_the_starting_app() {
+    let mut app = App::run("console.log(`PID:${Deno.pid}`); while (true) {}");
+    let deadline = Instant::now() + LIMIT;
+    let pid: i32 = loop {
+        if let Some(pid) = app
+            .stdout()
+            .lines()
+            .find_map(|line| line.strip_prefix("PID:"))
+        {
+            break pid.parse().unwrap();
+        }
+        assert!(Instant::now() < deadline, "{}", app.logs());
+        thread::sleep(Duration::from_millis(25));
+    };
+    assert_eq!(
+        unsafe { libc::kill(app.child.id() as i32, libc::SIGKILL) },
+        0
+    );
+    app.wait();
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while unsafe { libc::kill(pid, 0) } == 0 {
+        assert!(
+            Instant::now() < deadline,
+            "starting Deno survived runtime death"
+        );
+        thread::sleep(Duration::from_millis(25));
+    }
+    app.assert_released(pid);
+}
+
+#[test]
 fn missing_deno_is_actionable() {
     let mut app = App::start(HEALTHY, free_port(), MANIFEST, true);
     assert!(!app.wait().success());

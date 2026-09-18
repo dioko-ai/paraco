@@ -1,4 +1,5 @@
 use crate::{control, logs, manifest, runner};
+use futures_util::StreamExt;
 mod management;
 use axum::{
     Router,
@@ -18,11 +19,17 @@ use std::{
     thread,
     time::Duration,
 };
+use tokio::sync::Semaphore;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Config {
     apps: Vec<AppConfig>,
+    #[serde(default = "default_max_apps")]
+    max_apps: usize,
+}
+fn default_max_apps() -> usize {
+    50
 }
 
 #[derive(Deserialize)]
@@ -75,7 +82,8 @@ struct PreparedApp {
 #[derive(Clone)]
 enum AppState {
     Starting,
-    Running(u16),
+    // The authorization value exists only for the current child launch.
+    Running(u16, String),
     Failed(String),
     Backoff(String),
     Stopping,
@@ -89,10 +97,12 @@ enum DesiredState {
 }
 
 struct AppRecord {
+    root: PathBuf,
     desired: DesiredState,
     state: AppState,
     generation: u64,
     cancel: Arc<AtomicBool>,
+    admission: Arc<Semaphore>,
 }
 
 type Inventory = Arc<RwLock<BTreeMap<String, AppRecord>>>;
@@ -102,6 +112,7 @@ struct Gateway {
     apps: Inventory,
     client: reqwest::Client,
     port: u16,
+    admission: Arc<Semaphore>,
 }
 
 /// Supervisors own their app resources; all stop concurrently before joining.
@@ -130,6 +141,9 @@ fn load(path: &Path) -> Result<Vec<PreparedApp>, String> {
         std::fs::read(&path).map_err(|e| format!("cannot read server configuration: {e}"))?;
     let config: Config =
         serde_json::from_slice(&bytes).map_err(|e| format!("invalid server configuration: {e}"))?;
+    if config.max_apps == 0 || config.max_apps > 50 || config.apps.len() > config.max_apps {
+        return Err("maxApps must be 1–50 and cover the configured applications".into());
+    }
     let root = path.parent().unwrap();
     let mut names = BTreeSet::new();
     config
@@ -163,13 +177,17 @@ pub fn serve(config: &Path, port: u16, log_dir: &Path) -> Result<(), String> {
     for prepared in &apps {
         store.outside(&prepared.app.root)?;
     }
-    eprintln!("paraco: logs at {}", store.path().display());
+    runner::announce(true, format!("paraco: logs at {}", store.path().display()));
     let stop = runner::install_interrupt_handler()?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .map_err(|e| e.to_string())?;
-    runtime.block_on(host(apps, port, stop, store))
+    let result = runtime.block_on(host(apps, port, stop, store));
+    // spawn_blocking work is intentionally bounded but may be waiting on a
+    // filesystem. Never let it turn process shutdown into an unbounded wait.
+    runtime.shutdown_timeout(Duration::from_secs(2));
+    result
 }
 
 async fn host(
@@ -188,10 +206,12 @@ async fn host(
                 (
                     a.app.name.clone(),
                     AppRecord {
+                        root: a.app.root.clone(),
                         desired: DesiredState::Running,
                         state: AppState::Starting,
                         generation: 0,
                         cancel: Arc::new(AtomicBool::new(false)),
+                        admission: Arc::new(Semaphore::new(8)),
                     },
                 )
             })
@@ -218,21 +238,29 @@ async fn host(
         let states = inventory.clone();
         let app_stop = stop.clone();
         let app_store = store.clone();
+        let lease = control.lease();
         supervisors.threads.push(thread::spawn(move || {
-            supervise(prepared, states, app_stop, app_store, port);
+            supervise(prepared, states, app_stop, app_store, port, lease);
         }));
     }
     let gateway = Gateway {
         apps: inventory,
         client,
         port,
+        admission: Arc::new(Semaphore::new(64)),
     };
     let app = Router::new().fallback(dispatch).with_state(gateway);
     let mut serving = tokio::spawn(async move { axum::serve(listener, app).await });
     let mut managing =
         tokio::spawn(async move { axum::serve(management_listener, management_router).await });
-    println!("paraco: management dashboard {management_url}");
-    println!("paraco: dashboard listening on http://127.0.0.1:{port}");
+    runner::announce(
+        false,
+        format!("paraco: management dashboard {management_url}"),
+    );
+    runner::announce(
+        false,
+        format!("paraco: dashboard listening on http://127.0.0.1:{port}"),
+    );
     let result = tokio::select! {
         result = &mut managing => result.map_err(|e| e.to_string())?.map_err(|e| e.to_string()),
         result = &mut serving => result.map_err(|e| e.to_string())?.map_err(|e| e.to_string()),
@@ -242,8 +270,8 @@ async fn host(
     serving.abort();
     managing.abort();
     // Dropping the owners reaps every child, including apps still starting.
-    drop(control);
     drop(supervisors);
+    drop(control);
     result
 }
 
@@ -252,13 +280,31 @@ async fn dispatch(State(gateway): State<Gateway>, request: Request) -> Response 
         .headers()
         .get(header::HOST)
         .and_then(|h| h.to_str().ok())
-        .unwrap_or("");
-    if host != format!("127.0.0.1:{}", gateway.port)
-        && host != format!("localhost:{}", gateway.port)
-    {
-        return (StatusCode::BAD_REQUEST, "Use the local gateway address").into_response();
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let gateway_hosts = [
+        format!("127.0.0.1:{}", gateway.port),
+        format!("localhost:{}", gateway.port),
+    ];
+    let app_name = gateway
+        .apps
+        .read()
+        .unwrap()
+        .iter()
+        .find(|(name, app)| host == app_host(name, &app.root, gateway.port))
+        .map(|(name, _)| name.clone());
+    if !gateway_hosts.contains(&host) && app_name.is_none() {
+        return (
+            StatusCode::BAD_REQUEST,
+            "Use an application or local gateway address",
+        )
+            .into_response();
     }
-    let path = request.uri().path();
+    let path = request.uri().path().to_owned();
+    if let Some(name) = app_name {
+        let suffix = path.trim_start_matches('/').to_owned();
+        return proxy_app(&gateway, request, &name, &suffix).await;
+    }
     if path == "/" {
         if request.method() != Method::GET && request.method() != Method::HEAD {
             return (
@@ -268,7 +314,7 @@ async fn dispatch(State(gateway): State<Gateway>, request: Request) -> Response 
             )
                 .into_response();
         }
-        let mut response = dashboard(&gateway.apps).into_response();
+        let mut response = dashboard(&gateway.apps, gateway.port).into_response();
         response
             .headers_mut()
             .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
@@ -285,29 +331,79 @@ async fn dispatch(State(gateway): State<Gateway>, request: Request) -> Response 
         .split_once('/')
         .map(|(n, p)| (n, Some(p)))
         .unwrap_or((tail, None));
+    let app = gateway
+        .apps
+        .read()
+        .unwrap()
+        .get(name)
+        .map(|app| app.root.clone());
+    let Some(root) = app else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    // The shared host is a migration-only surface. It cannot proxy app content.
+    if request.method() != Method::GET && request.method() != Method::HEAD {
+        return StatusCode::METHOD_NOT_ALLOWED.into_response();
+    }
+    let suffix = suffix.unwrap_or("");
+    let query = request
+        .uri()
+        .query()
+        .map(|q| format!("?{q}"))
+        .unwrap_or_default();
+    (
+        StatusCode::PERMANENT_REDIRECT,
+        [(
+            header::LOCATION,
+            format!(
+                "http://{}/{}{query}",
+                app_host(name, &root, gateway.port),
+                suffix
+            ),
+        )],
+    )
+        .into_response()
+}
+
+async fn proxy_app(gateway: &Gateway, request: Request, name: &str, suffix: &str) -> Response {
+    let root = match gateway.apps.read().unwrap().get(name) {
+        Some(app) => app.root.clone(),
+        None => return StatusCode::NOT_FOUND.into_response(),
+    };
+    let origin = format!("http://{}", app_host(name, &root, gateway.port));
+    // A hosted browser request must be same-origin. We deliberately do not emit
+    // CORS headers: this is a browser boundary, not local-process authentication.
+    if let Some(value) = request
+        .headers()
+        .get(header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+        && value != origin
+    {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    // Fetch Metadata covers requests (notably navigations and no-cors loads)
+    // that do not carry Origin.  `none` is a user-initiated navigation; absent
+    // metadata remains available to ordinary loopback HTTP clients, which are
+    // explicitly outside this browser-only boundary.
+    if let Some(site) = request
+        .headers()
+        .get("sec-fetch-site")
+        .and_then(|v| v.to_str().ok())
+        && site != "same-origin"
+        && site != "none"
+    {
+        return StatusCode::FORBIDDEN.into_response();
+    }
     let state = gateway
         .apps
         .read()
         .unwrap()
         .get(name)
-        .map(|app| app.state.clone());
-    let Some(state) = state else {
+        .map(|app| (app.state.clone(), app.admission.clone()));
+    let Some((state, app_admission)) = state else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    if suffix.is_none() {
-        let query = request
-            .uri()
-            .query()
-            .map(|q| format!("?{q}"))
-            .unwrap_or_default();
-        return (
-            StatusCode::PERMANENT_REDIRECT,
-            [(header::LOCATION, format!("/apps/{name}/{query}"))],
-        )
-            .into_response();
-    }
-    let port = match state {
-        AppState::Running(port) => port,
+    let (port, token) = match state {
+        AppState::Running(port, token) => (port, token),
         AppState::Starting => {
             return (StatusCode::SERVICE_UNAVAILABLE, "Application is starting").into_response();
         }
@@ -326,6 +422,22 @@ async fn dispatch(State(gateway): State<Gateway>, request: Request) -> Response 
                 .into_response();
         }
     };
+    // Acquire both bounded permits before reading the body; permits remain held
+    // for streaming completion/cancellation and are never queued.
+    let Ok(_global_permit) = gateway.admission.clone().try_acquire_owned() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Gateway is busy; retry shortly",
+        )
+            .into_response();
+    };
+    let Ok(_app_permit) = app_admission.try_acquire_owned() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Application is busy; retry shortly",
+        )
+            .into_response();
+    };
     if request.headers().contains_key(header::UPGRADE) {
         return (
             StatusCode::NOT_IMPLEMENTED,
@@ -338,7 +450,7 @@ async fn dispatch(State(gateway): State<Gateway>, request: Request) -> Response 
         .query()
         .map(|q| format!("?{q}"))
         .unwrap_or_default();
-    let target = format!("http://127.0.0.1:{port}/{}{query}", suffix.unwrap());
+    let target = format!("http://127.0.0.1:{port}/{suffix}{query}");
     let (mut parts, body) = request.into_parts();
     strip_hop_headers(&mut parts.headers);
     // Do not let client-supplied forwarding metadata masquerade as host context.
@@ -352,6 +464,13 @@ async fn dispatch(State(gateway): State<Gateway>, request: Request) -> Response 
     ] {
         parts.headers.remove(name);
     }
+    parts.headers.insert(
+        header::HOST,
+        HeaderValue::from_str(&app_host(name, &root, gateway.port)).unwrap(),
+    );
+    parts
+        .headers
+        .insert("x-paraco-internal", HeaderValue::from_str(&token).unwrap());
     let body =
         match tokio::time::timeout(Duration::from_secs(10), to_bytes(body, 1024 * 1024)).await {
             Ok(Ok(body)) => body,
@@ -385,10 +504,55 @@ async fn dispatch(State(gateway): State<Gateway>, request: Request) -> Response 
     let status = upstream.status();
     let mut headers = upstream.headers().clone();
     strip_hop_headers(&mut headers);
-    let mut response = Response::new(Body::from_stream(upstream.bytes_stream()));
+    // Apps may set host-only cookies, but cannot opt into the shared localhost
+    // parent domain through proxied response headers.
+    let cookies: Vec<_> = headers
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .filter(|value| {
+            // Cookie attributes are case-insensitive and optional whitespace
+            // around `=` is valid, so a substring search is insufficient.
+            !value
+                .as_bytes()
+                .split(|byte| *byte == b';')
+                .skip(1)
+                .any(|part| {
+                    let part = String::from_utf8_lossy(part);
+                    part.split_once('=')
+                        .is_some_and(|(name, _)| name.trim().eq_ignore_ascii_case("domain"))
+                })
+        })
+        .cloned()
+        .collect();
+    headers.remove(header::SET_COOKIE);
+    for cookie in cookies {
+        headers.append(header::SET_COOKIE, cookie);
+    }
+    // Keep admission permits in the response stream: they release only after
+    // upstream completion, client cancellation, or a streaming error.
+    let guarded_stream = futures_util::stream::unfold(
+        (upstream.bytes_stream(), _global_permit, _app_permit),
+        |(mut stream, global_permit, app_permit)| async move {
+            stream
+                .next()
+                .await
+                .map(|item| (item, (stream, global_permit, app_permit)))
+        },
+    );
+    let mut response = Response::new(Body::from_stream(guarded_stream));
     *response.status_mut() = status;
     *response.headers_mut() = headers;
     response
+}
+
+fn app_host(name: &str, root: &Path, port: u16) -> String {
+    // FNV-1a gives a single DNS-safe, stable label and avoids name normalization
+    // collisions until durable deployment IDs are introduced.
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in format!("{}:{name}:{port}", root.display()).bytes() {
+        hash = (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3);
+    }
+    format!("app-{hash:016x}.localhost:{port}")
 }
 
 fn strip_hop_headers(headers: &mut HeaderMap) {
@@ -423,22 +587,23 @@ fn escape(text: &str) -> String {
         .replace('\'', "&#39;")
 }
 
-fn dashboard(apps: &Inventory) -> Html<String> {
+fn dashboard(apps: &Inventory, port: u16) -> Html<String> {
     let apps = apps.read().unwrap();
     let rows: String = apps.iter().map(|(name, app)| {
         let (label, detail) = match &app.state {
             AppState::Starting => ("starting", "Starting application".to_string()),
-            AppState::Running(_) => ("running", format!("<a href=\"/apps/{name}/\">Open app <span aria-hidden=\"true\">↗</span></a>")),
+            AppState::Running(_, _) => ("running", "Application has an isolated .localhost origin".into()),
             AppState::Failed(error) => ("failed", escape(error)),
             AppState::Backoff(error) => ("backoff", escape(error)),
             AppState::Stopping => ("stopping", "Stopping application".into()),
             AppState::Stopped => ("stopped", "Application is stopped".into()),
         };
-        format!("<li class=\"app\"><div><h2>{name}</h2><p class=\"path\">/apps/{name}/</p></div><span class=\"status {label}\">{label}</span><div class=\"detail\">{detail}</div></li>")
+        let url = format!("http://{}", app_host(name, &app.root, port));
+        format!("<li class=\"app\"><div><h2>{name}</h2><a class=\"path\" href=\"{url}\">{url}</a></div><span class=\"status {label}\">{label}</span><div class=\"detail\">{detail}</div></li>")
     }).collect();
     let running = apps
         .values()
-        .filter(|s| matches!(s.state, AppState::Running(_)))
+        .filter(|s| matches!(s.state, AppState::Running(_, _)))
         .count();
     let rows = if rows.is_empty() {
         "<li class=\"empty\">No apps configured yet. Add an app directory to your server configuration.</li>".into()
@@ -464,10 +629,11 @@ fn supervise(
     stop: Arc<AtomicBool>,
     store: logs::Store,
     port: u16,
+    _lease: Option<Arc<std::fs::File>>,
 ) {
     let name = prepared.app.name;
     let root = prepared.app.root;
-    let base = format!("/apps/{name}/");
+    let base = "/".to_string();
     let mut handled = None;
     let mut retry_generation = None;
     let mut retries = 0;
@@ -509,11 +675,12 @@ fn supervise(
                 continue;
             }
         };
+        let backend_token = backend_token(&name, generation);
         let result = manifest::load(&root).map_err(|e| e.to_string()).and_then(|app| {
             if app.name != name {
                 return Err("manifest name changed; restore it or restart the server with updated configuration".into());
             }
-            runner::RunningApp::start(app, 0, prepared.ai_config.as_deref(), &base, &cancel, log.clone())
+            runner::RunningApp::start(app, 0, prepared.ai_config.as_deref(), &base, Some(&backend_token), &cancel, log.clone())
         });
         let mut running = match result {
             Ok(running) => running,
@@ -535,7 +702,12 @@ fn supervise(
             }
         };
         if !cancel.load(Ordering::Relaxed) && !stop.load(Ordering::Relaxed) {
-            publish(&apps, &name, generation, AppState::Running(running.port));
+            publish(
+                &apps,
+                &name,
+                generation,
+                AppState::Running(running.port, backend_token),
+            );
         }
         let mut failure = None;
         while !cancel.load(Ordering::Relaxed) && !stop.load(Ordering::Relaxed) {
@@ -565,6 +737,15 @@ fn supervise(
 
 // Waiting happens only on this app's worker, after its old resources are reaped.
 #[allow(clippy::too_many_arguments)]
+fn backend_token(name: &str, generation: u64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!("{name}-{generation}-{now:032x}")
+}
+
+#[allow(clippy::too_many_arguments)] // Worker state is intentionally passed explicitly.
 fn recover(
     apps: &Inventory,
     name: &str,
@@ -619,9 +800,29 @@ fn publish(apps: &Inventory, name: &str, generation: u64, state: AppState) {
     let app = records.get_mut(name).unwrap();
     if app.generation == generation {
         if let AppState::Failed(error) = &state {
-            eprintln!("paraco: {name}: {error}");
+            runner::announce(true, format!("paraco: {name}: {error}"));
         }
         app.state = state;
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::items_after_test_module)] // Keep focused origin tests near app_host helpers.
+mod origin_tests {
+    use super::app_host;
+    use std::path::Path;
+
+    #[test]
+    fn application_hosts_are_stable_and_distinct() {
+        assert_eq!(
+            app_host("alpha", Path::new("/a"), 8787),
+            app_host("alpha", Path::new("/a"), 8787)
+        );
+        assert_ne!(
+            app_host("alpha", Path::new("/a"), 8787),
+            app_host("alpha", Path::new("/b"), 8787)
+        );
+        assert!(app_host("alpha", Path::new("/a"), 8787).ends_with(".localhost:8787"));
     }
 }
 
@@ -667,7 +868,7 @@ fn manage(apps: &Inventory, command: control::Command) -> Result<Vec<control::St
         .map(|(name, app)| {
             let (state, error) = match &app.state {
                 AppState::Starting => ("starting", None),
-                AppState::Running(_) => ("running", None),
+                AppState::Running(_, _) => ("running", None),
                 AppState::Stopping => ("stopping", None),
                 AppState::Stopped => ("stopped", None),
                 AppState::Failed(error) => ("failed", Some(error.clone())),

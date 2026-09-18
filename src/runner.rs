@@ -3,7 +3,7 @@ use std::io::Write;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::{
-    Arc,
+    Arc, OnceLock,
     atomic::{AtomicBool, Ordering},
     mpsc,
 };
@@ -12,7 +12,21 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+const CONSOLE_QUEUE_RECORDS: usize = 256;
 const HOST_SOURCE: &str = include_str!("../runtime/deno_host.ts");
+#[derive(Clone, Copy, serde::Serialize)]
+pub struct ConsoleLossCounters {
+    pub queue_drops: u64,
+    pub write_failures: u64,
+}
+static CONSOLE_QUEUE_DROPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static CONSOLE_WRITE_FAILURES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub fn console_losses() -> ConsoleLossCounters {
+    ConsoleLossCounters {
+        queue_drops: CONSOLE_QUEUE_DROPS.load(Ordering::Relaxed),
+        write_failures: CONSOLE_WRITE_FAILURES.load(Ordering::Relaxed),
+    }
+}
 
 pub fn run(
     app_path: &Path,
@@ -26,14 +40,17 @@ pub fn run(
     let app = manifest::load(app_path).map_err(|error| error.to_string())?;
     let store = logs::Store::open(log_dir)?;
     store.outside(&app.root)?;
-    eprintln!("paraco: logs at {}", store.path().display());
+    announce(true, format!("paraco: logs at {}", store.path().display()));
     let log = store.app(&app.name, "run", port)?;
     let stop = install_interrupt_handler()?;
     let name = app.name.clone();
-    let mut running = RunningApp::start(app, port, ai_config, "/", &stop, log)?;
-    println!(
-        "paraco: {name} listening on http://127.0.0.1:{}",
-        running.port
+    let mut running = RunningApp::start(app, port, ai_config, "/", None, &stop, log)?;
+    announce(
+        false,
+        format!(
+            "paraco: {name} listening on http://127.0.0.1:{}",
+            running.port
+        ),
     );
     while !stop.load(Ordering::Relaxed) {
         running.check()?;
@@ -59,11 +76,20 @@ impl RunningApp {
         port: u16,
         ai_config: Option<&Path>,
         base_path: &str,
+        backend_token: Option<&str>,
         stop: &AtomicBool,
         log: logs::AppLog,
     ) -> Result<Self, String> {
         log.event("starting", "Starting application");
-        let result = Self::launch(app, port, ai_config, base_path, stop, log.clone());
+        let result = Self::launch(
+            app,
+            port,
+            ai_config,
+            base_path,
+            backend_token,
+            stop,
+            log.clone(),
+        );
         if let Err(error) = &result {
             log.event("failed", error);
         }
@@ -75,6 +101,7 @@ impl RunningApp {
         port: u16,
         ai_config: Option<&Path>,
         base_path: &str,
+        backend_token: Option<&str>,
         stop: &AtomicBool,
         log: logs::AppLog,
     ) -> Result<Self, String> {
@@ -96,6 +123,7 @@ impl RunningApp {
             .map_err(|_| "cannot create entrypoint file URL")?;
         let bootstrap = serde_json::json!({
             "basePath": base_path,
+            "backendToken": backend_token,
             "ai": capability.as_ref().map(|c| serde_json::json!({"address": c.address, "token": c.token}))
         });
         let input = serde_json::to_vec(&bootstrap).map_err(|_| "cannot encode host bootstrap")?;
@@ -149,7 +177,7 @@ impl RunningApp {
             .unwrap()
             .write_all(&input)
             .map_err(|_| "cannot initialize Deno host")?;
-        let (ready_tx, ready_rx) = mpsc::channel();
+        let (ready_tx, ready_rx) = mpsc::sync_channel(1);
         running.output = Some(forward_stdout(
             running.child.stdout.take().unwrap(),
             format!("PARACO_READY:{nonce}:"),
@@ -191,13 +219,14 @@ impl Drop for RunningApp {
         }
         self.log
             .event("stopped", "Application process reaped and output drained");
+        self.log.flush(Duration::from_millis(100));
     }
 }
 
 fn forward_stdout(
     stdout: impl std::io::Read + Send + 'static,
     marker: String,
-    ready: mpsc::Sender<u16>,
+    ready: mpsc::SyncSender<u16>,
     log: logs::AppLog,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
@@ -207,11 +236,11 @@ fn forward_stdout(
                 if let Ok(port) = line[marker.len()..].parse::<u16>()
                     && port != 0
                 {
-                    let _ = ready.send(port);
+                    let _ = ready.try_send(port);
                 }
             } else {
                 log.write("stdout", "output", &line, truncated);
-                let _ = writeln!(std::io::stdout(), "{line}");
+                console(false, line.into_owned());
             }
         }) {
             log.event("read_error", &format!("Cannot read stdout: {error}"));
@@ -227,11 +256,50 @@ fn forward_stderr(
         if let Err(error) = logs::lines(stderr, |bytes, truncated| {
             let line = String::from_utf8_lossy(bytes);
             log.write("stderr", "output", &line, truncated);
-            let _ = writeln!(std::io::stderr(), "{line}");
+            console(true, line.into_owned());
         }) {
             log.event("read_error", &format!("Cannot read stderr: {error}"));
         }
     })
+}
+
+/// A pair of process-wide bounded console workers. Pipe readers use `try_send`,
+/// so an undrained parent stdout/stderr can only lose display copies, never block
+/// readiness, JSONL dispatch, or child-pipe draining.
+pub fn announce(stderr: bool, line: String) {
+    static SINKS: OnceLock<(mpsc::SyncSender<String>, mpsc::SyncSender<String>)> = OnceLock::new();
+    let sinks = SINKS.get_or_init(|| {
+        let (out_tx, out_rx) = mpsc::sync_channel(CONSOLE_QUEUE_RECORDS);
+        let (err_tx, err_rx) = mpsc::sync_channel(CONSOLE_QUEUE_RECORDS);
+        thread::spawn(move || {
+            for line in out_rx {
+                if writeln!(std::io::stdout(), "{line}").is_err() {
+                    CONSOLE_WRITE_FAILURES.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        });
+        thread::spawn(move || {
+            for line in err_rx {
+                if writeln!(std::io::stderr(), "{line}").is_err() {
+                    CONSOLE_WRITE_FAILURES.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        });
+        (out_tx, err_tx)
+    });
+    if (if stderr {
+        sinks.1.try_send(line)
+    } else {
+        sinks.0.try_send(line)
+    })
+    .is_err()
+    {
+        CONSOLE_QUEUE_DROPS.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+fn console(stderr: bool, line: String) {
+    announce(stderr, line);
 }
 
 pub fn install_interrupt_handler() -> Result<Arc<AtomicBool>, String> {

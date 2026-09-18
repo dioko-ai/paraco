@@ -41,7 +41,7 @@ async function request(command, path = "/api/apps") {
   return await response.json();
 }
 
-function render({ apps, gateway }) {
+function render({ apps }) {
   summary.textContent = `${apps.filter(app => app.state === "running").length} of ${apps.length} apps running`;
   const focused = document.activeElement?.getAttribute("aria-label");
   const rows = apps.map(app => {
@@ -52,7 +52,7 @@ function render({ apps, gateway }) {
     const detail = element("div", app.error || "", "detail");
     if (app.state === "running") {
       const link = element("a", "Open app ↗");
-      link.href = `${gateway}/apps/${encodeURIComponent(app.name)}/`;
+      link.href = app.url;
       link.target = "_blank";
       link.rel = "noopener noreferrer";
       detail.append(link);
@@ -120,9 +120,12 @@ async function showLogs(app = logApp) {
     const launch = logLaunch.value.trim();
     const data = await request(null, `/api/logs?app=${encodeURIComponent(app)}&limit=100${launch ? `&run_id=${encodeURIComponent(launch)}` : ""}`);
     if (version !== logVersion) return;
-    logOutput.textContent = data.records.length ? data.records.map(record =>
-      `${new Date(record.timestamp_unix_ms).toISOString()} [${record.run_id}] ${record.stream}/${record.event}: ${record.message}`
+    const loss = Object.entries(data.store_losses || {}).filter(([, value]) => value).map(([key, value]) => `${key}=${value}`).join(", ");
+    const consoleLoss = Object.entries(data.console_losses || {}).filter(([, value]) => value).map(([key, value]) => `${key}=${value}`).join(", ");
+    const records = data.records.length ? data.records.map(record =>
+      `${new Date(record.timestamp_unix_ms).toISOString()} [${record.run_id}] ${record.stream}/${record.event}${record.truncated ? " [truncated]" : ""}: ${record.message}`
     ).join("\n") : "No retained logs match this app and launch.";
+    logOutput.textContent = `${loss ? `Store loss counters (runtime scope): ${loss}\n` : ""}${consoleLoss ? `Console display counters (process scope): ${consoleLoss}\n` : ""}${records}`;
   } catch (error) {
     if (version === logVersion) logOutput.textContent = `Unable to load logs: ${error.message}`;
   } finally {

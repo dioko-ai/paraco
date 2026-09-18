@@ -33,6 +33,7 @@ struct Server {
     child: Child,
     dir: TempDir,
     port: u16,
+    control_root: std::sync::Arc<TempDir>,
 }
 impl Server {
     fn fixture(apps: &[(&str, &str)]) -> TempDir {
@@ -64,16 +65,31 @@ impl Server {
         Self::start_with_logs(dir, config, port, &logs)
     }
     fn start_with_logs(dir: TempDir, config: &Path, port: u16, logs: &Path) -> Self {
-        assert!(
-            Command::new("deno")
-                .arg("--version")
-                .output()
-                .unwrap()
-                .status
-                .success(),
-            "Deno is required"
-        );
-        let child = Command::new(env!("CARGO_BIN_EXE_paraco"))
+        Self::start_with_control(
+            dir,
+            config,
+            port,
+            logs,
+            std::sync::Arc::new(tempfile::tempdir().unwrap()),
+        )
+    }
+    fn start_with_control(
+        dir: TempDir,
+        config: &Path,
+        port: u16,
+        logs: &Path,
+        control_root: std::sync::Arc<TempDir>,
+    ) -> Self {
+        let child = Self::spawn(dir.path(), config, port, logs, control_root.path());
+        Self {
+            child,
+            dir,
+            port,
+            control_root,
+        }
+    }
+    fn spawn(dir: &Path, config: &Path, port: u16, logs: &Path, control_root: &Path) -> Child {
+        Command::new(env!("CARGO_BIN_EXE_paraco"))
             .arg("--log-dir")
             .arg(logs)
             .arg("serve")
@@ -85,13 +101,14 @@ impl Server {
             // These must never redirect local upstream traffic through a proxy.
             .env("HTTP_PROXY", "http://127.0.0.1:1")
             .env("ALL_PROXY", "http://127.0.0.1:1")
+            // The Unix control socket must not share an ambient /tmp namespace.
+            .env("TMPDIR", control_root)
             .stdin(Stdio::null())
-            .stdout(File::create(dir.path().join("stdout")).unwrap())
-            .stderr(File::create(dir.path().join("stderr")).unwrap())
+            .stdout(File::create(dir.join("stdout")).unwrap())
+            .stderr(File::create(dir.join("stderr")).unwrap())
             .process_group(0)
             .spawn()
-            .unwrap();
-        Self { child, dir, port }
+            .unwrap()
     }
     fn run(apps: &[(&str, &str)]) -> Self {
         let dir = Self::fixture(apps);
@@ -114,6 +131,19 @@ impl Server {
         }
     }
     fn request(&self, method: &str, path: &str, body: &str) -> String {
+        // Keep call sites concise while exercising an app at its canonical
+        // browser origin.  Legacy `/apps/name/` strings in these integration
+        // tests are test notation, not a request sent to the shared gateway.
+        let (host, path) = path
+            .strip_prefix("/apps/")
+            .and_then(|tail| tail.split_once('/'))
+            .map(|(name, suffix)| {
+                (
+                    app_host(name, &self.dir.path().join(name), self.port),
+                    format!("/{suffix}"),
+                )
+            })
+            .unwrap_or_else(|| (format!("127.0.0.1:{}", self.port), path.to_owned()));
         let mut stream = TcpStream::connect(("127.0.0.1", self.port)).unwrap();
         stream
             .set_read_timeout(Some(Duration::from_secs(3)))
@@ -121,7 +151,7 @@ impl Server {
         stream
             .set_write_timeout(Some(Duration::from_secs(3)))
             .unwrap();
-        write!(stream, "{method} {path} HTTP/1.0\r\nHost: 127.0.0.1:{}\r\nContent-Length: {}\r\nX-Test: preserved\r\nX-Forwarded-Host: forged\r\nConnection: close\r\n\r\n{body}", self.port, body.len()).unwrap();
+        write!(stream, "{method} {path} HTTP/1.0\r\nHost: {host}\r\nContent-Length: {}\r\nX-Test: preserved\r\nX-Forwarded-Host: forged\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
         let mut result = String::new();
         stream.read_to_string(&mut result).unwrap();
         result
@@ -151,7 +181,10 @@ impl Server {
         if let Some(app) = app {
             command.arg(app);
         }
-        command.output().unwrap()
+        command
+            .env("TMPDIR", self.control_root.path())
+            .output()
+            .unwrap()
     }
     fn control(&self, action: &str, app: Option<&str>) -> serde_json::Value {
         let output = self.command(action, app);
@@ -227,7 +260,7 @@ impl Server {
         result
     }
     fn socket_path(&self) -> std::path::PathBuf {
-        std::env::temp_dir().join(format!(
+        self.control_root.path().join(format!(
             "paraco-control-{}/{}.sock",
             unsafe { libc::geteuid() },
             self.port
@@ -248,6 +281,13 @@ impl Server {
         assert!(self.wait_exit().success(), "{}", self.logs());
         TcpListener::bind(("127.0.0.1", self.port)).expect("gateway port not released");
     }
+}
+fn app_host(name: &str, root: &Path, port: u16) -> String {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in format!("{}:{name}:{port}", root.display()).bytes() {
+        hash = (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3);
+    }
+    format!("app-{hash:016x}.localhost:{port}")
 }
 impl Drop for Server {
     fn drop(&mut self) {
@@ -279,11 +319,17 @@ fn routes_two_apps_assets_bodies_queries_and_redirects() {
     let one = server.inspect("one");
     let two = server.inspect("two");
     assert_ne!(one["pid"], two["pid"]);
-    assert_eq!(one["base"], "/apps/one/");
-    assert_eq!(two["base"], "/apps/two/");
+    assert_eq!(one["base"], "/");
+    assert_eq!(two["base"], "/");
     let root = server.wait_for("/", "2 of 2 apps running");
-    assert!(root.contains("href=\"/apps/one/\""));
-    assert!(root.contains("href=\"/apps/two/\""));
+    assert!(root.contains(&format!(
+        "href=\"http://{}/\"",
+        app_host("one", &server.dir.path().join("one"), server.port)
+    )));
+    assert!(root.contains(&format!(
+        "href=\"http://{}/\"",
+        app_host("two", &server.dir.path().join("two"), server.port)
+    )));
     assert!(root.contains("no-store"));
     assert!(
         server
@@ -299,12 +345,15 @@ fn routes_two_apps_assets_bodies_queries_and_redirects() {
     assert_eq!(value["query"], "?q=a%2Fb&x=2");
     assert_eq!(value["body"], "hello body");
     assert_eq!(value["method"], "POST");
-    assert_eq!(value["host"], format!("127.0.0.1:{}", server.port));
+    assert_eq!(
+        value["host"],
+        app_host("one", &server.dir.path().join("one"), server.port)
+    );
     assert_eq!(value["header"], "preserved");
     assert!(value["forwarded"].is_null());
     let redirect = server.request("GET", "/apps/one/redirect", "");
     assert!(redirect.contains("302"));
-    assert!(redirect.contains("location: /apps/one/next?from=redirect"));
+    assert!(redirect.contains("location: /next?from=redirect"));
     assert!(
         server
             .request("GET", "/apps/one/next?from=redirect", "")
@@ -316,7 +365,7 @@ fn routes_two_apps_assets_bodies_queries_and_redirects() {
             .contains("location: next")
     );
     let slash = server.request("POST", "/apps/one?q=yes", "body");
-    assert!(slash.contains("308") && slash.contains("location: /apps/one/?q=yes"));
+    assert!(slash.contains("404"));
     for path in [
         "/missing",
         "/apps/missing/",
@@ -505,7 +554,7 @@ fn lifecycle_commands_isolate_apps_and_reap_replaced_processes() {
     server.state("one", "running");
     let second = server.inspect("one")["pid"].as_i64().unwrap() as i32;
     assert_ne!(first, second);
-    assert_eq!(server.inspect("one")["base"], "/apps/one/");
+    assert_eq!(server.inspect("one")["base"], "/");
     server.control("restart", Some("one"));
     server.state("one", "running");
     assert_reaped(second);
@@ -727,14 +776,119 @@ fn occupied_control_socket_is_preserved_and_launches_no_apps() {
     let listener = UnixListener::bind(&path).unwrap();
     let dir = Server::fixture(&[("one", "console.log('UNEXPECTED_START'); export default {};")]);
     let config = dir.path().join("server.json");
-    let mut conflicting = Server::start(dir, &config, port);
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    let logs = dir.path().join("logs");
+    let mut conflicting =
+        Server::start_with_control(dir, &config, port, &logs, live.control_root.clone());
     assert!(!conflicting.wait_exit().success());
-    assert!(conflicting.logs().contains("cannot bind control socket"));
+    assert!(
+        conflicting
+            .logs()
+            .contains("control socket belongs to a live listener"),
+        "{}",
+        conflicting.logs()
+    );
     assert!(!conflicting.logs().contains("UNEXPECTED_START"));
     assert!(path.exists());
     drop(listener);
     fs::remove_file(path).unwrap();
     live.stop(libc::SIGINT);
+}
+
+#[test]
+fn forced_death_then_immediate_restart_waits_for_apps_and_recovers_socket() {
+    let stubborn = format!("{APP}\nsetInterval(() => {{}}, 1000);");
+    let mut server = Server::run(&[("one", &stubborn), ("two", APP)]);
+    server.ready();
+    let pids = [
+        server.inspect("one")["pid"].as_i64().unwrap() as i32,
+        server.inspect("two")["pid"].as_i64().unwrap() as i32,
+    ];
+    // The guardian also owns the adapter/cache directory after runtime death.
+    let temporary: Vec<_> = fs::read_dir(server.control_root.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.join("paraco-deno-host.ts").exists())
+        .collect();
+    assert_eq!(temporary.len(), 2);
+    assert_eq!(
+        unsafe { libc::kill(server.child.id() as i32, libc::SIGKILL) },
+        0
+    );
+    assert!(!server.wait_exit().success());
+    assert!(server.socket_path().exists());
+    server.child = Server::spawn(
+        server.dir.path(),
+        &server.dir.path().join("server.json"),
+        server.port,
+        &server.dir.path().join("logs"),
+        server.control_root.path(),
+    );
+    server.ready();
+    for pid in pids {
+        assert_reaped(pid);
+    }
+    for path in temporary {
+        assert!(!path.exists(), "orphan runtime temporary directory");
+    }
+    for name in ["one", "two"] {
+        assert!(!pids.contains(&(server.inspect(name)["pid"].as_i64().unwrap() as i32)));
+    }
+    server.stop(libc::SIGTERM);
+}
+
+#[test]
+fn a_second_runtime_cannot_disturb_the_live_runtime() {
+    let mut live = Server::run(&[("one", APP)]);
+    live.ready();
+    let pid = live.inspect("one")["pid"].clone();
+    let dir = Server::fixture(&[(
+        "unexpected",
+        "console.log('UNEXPECTED_START'); export default {};",
+    )]);
+    let config = dir.path().join("server.json");
+    let logs = dir.path().join("logs");
+    let mut other =
+        Server::start_with_control(dir, &config, live.port, &logs, live.control_root.clone());
+    assert!(!other.wait_exit().success());
+    assert!(!other.logs().contains("UNEXPECTED_START"));
+    assert_eq!(live.inspect("one")["pid"], pid);
+    assert_eq!(live.control("status", Some("one"))[0]["state"], "running");
+    live.stop(libc::SIGTERM);
+}
+
+#[test]
+fn unexpected_endpoint_files_are_never_removed() {
+    use std::os::unix::fs::symlink;
+    let mut owner = Server::run(&[]);
+    owner.ready();
+    owner.stop(libc::SIGTERM);
+    let path = owner.socket_path();
+    for symlinked in [false, true] {
+        let target = owner.dir.path().join("preserve");
+        fs::write(&target, "preserve").unwrap();
+        if symlinked {
+            symlink(&target, &path).unwrap();
+        } else {
+            fs::write(&path, "preserve").unwrap();
+        }
+        owner.child = Server::spawn(
+            owner.dir.path(),
+            &owner.dir.path().join("server.json"),
+            owner.port,
+            &owner.dir.path().join("logs"),
+            owner.control_root.path(),
+        );
+        assert!(!owner.wait_exit().success());
+        assert!(
+            owner
+                .logs()
+                .contains("refusing to replace an unexpected control endpoint")
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), "preserve");
+        fs::remove_file(&path).unwrap();
+    }
 }
 
 #[test]
@@ -1005,6 +1159,7 @@ fn dashboard_logs_are_authenticated_filtered_and_rotation_safe() {
         launch.event("output", &"x".repeat(16000));
     }
     launch.event("output", "after rotation");
+    launch.flush(Duration::from_secs(2));
     assert!(server.dir.path().join("logs/archive-1.jsonl").exists());
     assert!(
         server
