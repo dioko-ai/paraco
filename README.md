@@ -27,8 +27,8 @@ cargo run -- serve --config ./examples/server.json
 
 Open <http://127.0.0.1:3000/> for the dashboard. The example hosts:
 
-- Hello at <http://127.0.0.1:3000/apps/hello/>
-- Fake AI at <http://127.0.0.1:3000/apps/ai-example/>
+- Hello and Fake AI at the distinct canonical `.localhost` URLs shown by the
+  dashboard (the old `/apps/<name>/` links redirect only for GET/HEAD).
 
 Use `--port 8787` for another loopback port. This runs in the foreground;
 Ctrl+C stops all apps. Configuration paths resolve relative to the configuration
@@ -58,6 +58,8 @@ Commands print JSON status and acknowledge lifecycle requests immediately. Use
 authorized management dashboard; the gateway dashboard stays read-only.
 See [local lifecycle](docs/local-lifecycle.md) for state, security, and recovery
 semantics. Desired state is currently kept only for the running server session.
+On Unix, app guardians clean up Deno after a runtime crash, and restarting `serve`
+waits for cleanup before safely recovering its stale control socket.
 
 ## Persistent logs
 
@@ -73,8 +75,7 @@ cargo run -- logs hello --port 3000 --tail 500
 
 These commands work even after the server stops. Records identify the app,
 launch, process, stream, and capture time. See [local logs](docs/local-logs.md)
-for configuration, schema, pruning, and failure behavior. Dashboard log viewing
-is the next increment.
+for configuration, schema, pruning, dashboard viewing, and failure behavior.
 
 ## Application contract
 
@@ -89,11 +90,14 @@ manifest schema is intentionally explicit:
 }
 ```
 
+`schemaVersion` may be omitted for the existing v1 manifest or set to `1`.
 `name` is 1–63 lowercase ASCII letters, digits, or hyphens and starts with a
 letter. `entrypoint` must be a relative file contained in the application
 directory. `capabilities` is required and may be empty or contain `"ai"` for the
 local fake AI capability. Unknown fields and unsupported capabilities fail
-validation.
+validation. The machine-readable draft schema is
+[`docs/paraco-manifest.schema.json`](docs/paraco-manifest.schema.json), and the
+matching handler types are in [`runtime/paraco.d.ts`](runtime/paraco.d.ts).
 
 The entrypoint exports a default object whose `fetch` method receives web
 standard `Request` and returns a `Response` (or a promise for one):
@@ -131,6 +135,10 @@ needed to run Paraco.
 See [the first-runtime brief](docs/first-runtime.md) for the acceptance criteria
 and intentionally deferred work.
 
+See [development and verification](docs/development.md) for pinned toolchains,
+fresh-checkout checks, browser-smoke setup, and the distinction between configured
+CI and observed native evidence.
+
 See [installation and release planning](docs/installation-and-release.md) for
 the future bundled runtime, CLI installers, and platform packaging plan.
 
@@ -139,6 +147,12 @@ the future bundled runtime, CLI installers, and platform packaging plan.
 The runtime supports foreground single-app and multi-app hosting, authenticated
 browser lifecycle controls, Unix CLI lifecycle controls, and a local fake AI
 capability, plus bounded persistent logs and CLI log queries. Authenticated dashboard logs and opt-in bounded automatic recovery are available.
+Hosted apps use distinct canonical `.localhost` browser origins. They cannot use
+shared-domain cookies; cross-origin browser requests are rejected, while the
+separate management origin remains authenticated. Output-loss counters in the
+management log view distinguish storage and console loss. Hosted admission is
+bounded (50 apps, 64 gateway responses, 8 per app, and 4 log reads); these are
+safety limits rather than CPU/RSS quotas.
 Background service operation,
 persistence, real AI providers, and AI HTTP compatibility/streaming
 remain future work. Cloud integration and bundling/installers are deferred.

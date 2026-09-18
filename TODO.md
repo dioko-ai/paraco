@@ -1,7 +1,39 @@
 # Paraco development TODO
 
 Work in small increments and check items off only after implementation and
-verification. Cloud work is deferred; bundling and installation come last.
+verification. Cloud work remains deferred.
+
+## Proposed foundation pivot
+
+See [the foundation and cron plan](docs/foundation-and-cron-plan.md) for the
+proposed next milestone order, confirmed product decisions, and acceptance gates.
+It replaces the previous proposal to defer all bundling/platform verification
+until after capabilities. The unchecked sections below remain a backlog, not an
+execution order; completed work remains recorded as historical milestones.
+
+1. Establish Linux/macOS CI, pinned tools, and versioned contracts (M0).
+2. Harden lifecycle recovery and isolate application browser origins (M1).
+3. Prepare reproducible apps and test minimal private-Deno bundles (M2).
+4. Add durable identity/state and native service operation (M3).
+5. Add bounded tasks, scheduling, history, and notifications (M4–M5).
+6. Deliver the manual cron app, then AI drafting with explicit publication (M6–M7).
+7. Finish installation and release verification (M8).
+
+The detailed plan defines the acceptance gates; partial implementation progress
+is recorded below without declaring an entire milestone complete.
+
+## M1 crash recovery — implemented, native macOS verification pending
+
+- [x] Add per-app Rust guardians that terminate and reap Deno after runtime death,
+      including blocked JavaScript and incomplete startup.
+- [x] Retain endpoint ownership until guardians finish cleanup, then safely
+      recover verified stale sockets without replacing live endpoints.
+- [x] Verify immediate multi-app restart, temporary-directory cleanup, and
+      protection of unexpected endpoint files on Linux.
+- [ ] Retain successful native macOS crash-recovery test results.
+- [x] Implement browser-origin isolation, output-loss reporting, and bounded
+      workload admission; retain environment-specific measurement evidence before
+      claiming the workload gate observed.
 
 ## Foundations
 
@@ -52,7 +84,7 @@ verification. Cloud work is deferred; bundling and installation come last.
 - [ ] Add local application configuration and persistence.
 - [ ] Define subsequent scheduling, notifications, and health increments.
 
-## Bundling and installation — last
+## Bundling and installation
 
 - [ ] Define and build the pinned private Deno release bundle.
 - [ ] Verify clean-machine execution and supported platform targets.
@@ -67,13 +99,14 @@ See `docs/installation-and-release.md` for the detailed release plan.
 - [ ] Revisit public control protocols, cloud connectivity, and remote deployment
       only after the standalone local foundation is useful and verified.
 
-## Latest verification
+## M0/M1 verification status (2026-09)
 
-Dashboard logs and automatic recovery: the full Rust suite passed on Linux with
-Deno, including authenticated log filtering and rotation, crash recovery, bounded
-backoff, retry exhaustion, manual cancellation, and responsive unrelated apps.
-Four dashboard JavaScript tests passed with Node.js using
-`node --test tests/management.test.cjs`. These use a simulated DOM; visual browser
-verification remains manual. Rust formatting and Clippy with warnings denied
-passed. Integration tests require local networking and subprocess signals. This
-environment uses `/tmp/paraco-deno/bin` on `PATH`.
+| Gate | Status | Evidence / required follow-up |
+| --- | --- | --- |
+| Rust format, check, server-test compilation | observed pass | Linux x86_64, Rust 1.96.1; run `cargo fmt --check && cargo check && cargo test --test server --no-run`. |
+| Pinned complete check | pending | `npm run check` correctly fails locally before suites: Deno 2.2.5 and Playwright Chromium are absent; local Node is 22.22.3, not 22.14.0. |
+| Browser isolation and management | configured-only | CI installs Chromium and runs `node tests/browser-smoke.cjs`; retain a successful native artifact before claiming observed browser support. |
+| Guardian/crash recovery | pending native macOS | Run the Rust suite on macOS 13 with Deno 2.2.5; CI configuration is not evidence. |
+| Output-loss and admission regressions | implemented / compile-checked | Included in Rust tests; execute `cargo test` with pinned Deno to observe launch and blocked-output paths. |
+| 1/10/50 workload budget | pending observation | Run `PARACO_BIN=... node scripts/probe-hosted-workload.cjs one.json ten.json fifty.json` on the target host; retain its JSON, including optional noisy endpoint results. |
+| Other architectures and browsers | pending | No emulation or YAML configuration closes native architecture/browser gates. |
