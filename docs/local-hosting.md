@@ -91,8 +91,9 @@ free before startup. The public gateway binds before any app is launched.
 Startup happens independently: a slow import does not prevent the dashboard or
 another app from serving. Startup times out after ten seconds. A failed or crashed
 app remains failed until explicitly started or restarted through the
-[local lifecycle CLI](local-lifecycle.md); automatic retries are future work. App output currently goes
-to the foreground terminal; retained per-app logs are also later work.
+[local lifecycle CLI](local-lifecycle.md); automatic retries are future work. App output goes
+to the foreground terminal and the bounded persistent [JSONL log store](local-logs.md).
+Use `paraco logs <app>` even after the server stops.
 
 On shutdown, supervisors stop apps concurrently, send SIGTERM on Unix, and force
 termination after five seconds if needed. Every Deno child is reaped and its

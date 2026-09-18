@@ -39,7 +39,7 @@ refreshes status every two seconds; its private access link changes each server 
 
 See [local hosting](docs/local-hosting.md) for the configuration, app base-path
 contract, and limits. [TODO.md](TODO.md) tracks completed work and the next
-increments: retained logs, recovery, then background
+increments: dashboard log viewing, recovery, then background
 service operation.
 
 ## Manage running apps
@@ -59,6 +59,23 @@ Commands print JSON status and acknowledge lifecycle requests immediately. Use
 authorized management dashboard; the gateway dashboard stays read-only.
 See [local lifecycle](docs/local-lifecycle.md) for state, security, and recovery
 semantics. Desired state is currently kept only for the running server session.
+
+## Persistent logs
+
+Application output and lifecycle events are retained as agent-readable JSONL in
+`~/.paraco/logs` by default (`%USERPROFILE%\.paraco\logs` on Windows). Override
+with `--log-dir <path>` or `PARACO_LOG_DIR`. A rotating five-file store caps retained
+log data at 10 MiB per directory, shared across apps and server sessions.
+
+```sh
+cargo run -- logs hello --tail 100
+cargo run -- logs hello --port 3000 --tail 500
+```
+
+These commands work even after the server stops. Records identify the app,
+launch, process, stream, and capture time. See [local logs](docs/local-logs.md)
+for configuration, schema, pruning, and failure behavior. Dashboard log viewing
+is the next increment.
 
 ## Application contract
 
@@ -122,7 +139,8 @@ the future bundled runtime, CLI installers, and platform packaging plan.
 
 The runtime supports foreground single-app and multi-app hosting, authenticated
 browser lifecycle controls, Unix CLI lifecycle controls, and a local fake AI
-capability. Retained logs, automatic recovery, background service operation,
+capability, plus bounded persistent logs and CLI log queries. Dashboard log
+viewing, automatic recovery, background service operation,
 persistence, real AI providers, and AI HTTP compatibility/streaming
 remain future work. Cloud integration and bundling/installers are deferred.
 

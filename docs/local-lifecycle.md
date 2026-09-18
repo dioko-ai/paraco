@@ -115,7 +115,9 @@ works on platforms without Unix sockets; only Linux is verified so far.
 ## Scope and verification
 
 Desired state is in memory. Restarting the server starts all configured apps;
-persisting stopped state across server restarts is future work. Retained logs, automatic crash recovery, background services, cloud integration,
+persisting stopped state across server restarts is future work. Bounded persistent
+logs are available through the [log CLI](local-logs.md). Dashboard log viewing,
+automatic crash recovery, background services, cloud integration,
 and bundling/installers are outside this increment.
 
 Integration tests cover independent app control, repeated requests, changed

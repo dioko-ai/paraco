@@ -16,6 +16,7 @@ struct App {
     child: Child,
     dir: TempDir,
     port: u16,
+    _log_dir: TempDir,
 }
 
 impl App {
@@ -39,7 +40,9 @@ impl App {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("main.ts"), source).unwrap();
         fs::write(dir.path().join("paraco.json"), manifest).unwrap();
+        let log_dir = tempfile::tempdir().unwrap();
         let mut command = Command::new(env!("CARGO_BIN_EXE_paraco"));
+        command.arg("--log-dir").arg(log_dir.path().join("logs"));
         command
             .args([
                 "run",
@@ -58,7 +61,12 @@ impl App {
             command.arg("--ai-config").arg(config);
         }
         let child = command.spawn().unwrap();
-        Self { child, dir, port }
+        Self {
+            child,
+            dir,
+            port,
+            _log_dir: log_dir,
+        }
     }
 
     fn run(source: &str) -> Self {
@@ -412,4 +420,30 @@ fn repository_ai_example_uses_runtime_default() {
     assert!(response.contains("Fake AI response"));
     app.interrupt();
     assert!(app.wait().success());
+}
+
+#[test]
+fn persistent_single_app_logs_bound_large_lines_and_preserve_invalid_utf8() {
+    let mut app = App::run(&format!(
+        "Deno.stdout.writeSync(new Uint8Array([255, 10])); console.log('x'.repeat(200000));\n{HEALTHY}"
+    ));
+    app.ready();
+    assert!(app.request("/").contains("200 OK"));
+    app.interrupt();
+    assert!(app.wait().success());
+    let output = fs::read_to_string(app._log_dir.path().join("logs/current.jsonl")).unwrap();
+    let records: Vec<serde_json::Value> = output
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert!(records.iter().any(|r| r["message"] == "�"));
+    let large = records.iter().find(|r| r["truncated"] == true).unwrap();
+    assert_eq!(large["message"].as_str().unwrap().len(), 16 * 1024);
+    assert!(
+        records
+            .iter()
+            .any(|r| r["event"] == "running" && r["mode"] == "run")
+    );
+    assert!(records.iter().any(|r| r["event"] == "stopped"));
+    assert!(!output.contains("PARACO_READY:"));
 }

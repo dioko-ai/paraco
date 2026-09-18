@@ -1,4 +1,4 @@
-use crate::{control, manifest, runner};
+use crate::{control, logs, manifest, runner};
 mod management;
 use axum::{
     Router,
@@ -112,20 +112,30 @@ fn load(path: &Path) -> Result<Vec<PreparedApp>, String> {
         .collect()
 }
 
-pub fn serve(config: &Path, port: u16) -> Result<(), String> {
+pub fn serve(config: &Path, port: u16, log_dir: &Path) -> Result<(), String> {
     if port == 0 {
         return Err("port must be from 1 through 65535".into());
     }
     let apps = load(config)?;
+    let store = logs::Store::open(log_dir)?;
+    for prepared in &apps {
+        store.outside(&prepared.app.root)?;
+    }
+    eprintln!("paraco: logs at {}", store.path().display());
     let stop = runner::install_interrupt_handler()?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .map_err(|e| e.to_string())?;
-    runtime.block_on(host(apps, port, stop))
+    runtime.block_on(host(apps, port, stop, store))
 }
 
-async fn host(apps: Vec<PreparedApp>, port: u16, stop: Arc<AtomicBool>) -> Result<(), String> {
+async fn host(
+    apps: Vec<PreparedApp>,
+    port: u16,
+    stop: Arc<AtomicBool>,
+    store: logs::Store,
+) -> Result<(), String> {
     // Bind the gateway before launching apps: an occupied public port starts none.
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
         .await
@@ -165,8 +175,9 @@ async fn host(apps: Vec<PreparedApp>, port: u16, stop: Arc<AtomicBool>) -> Resul
     for prepared in apps {
         let states = inventory.clone();
         let app_stop = stop.clone();
+        let app_store = store.clone();
         supervisors.threads.push(thread::spawn(move || {
-            supervise(prepared, states, app_stop);
+            supervise(prepared, states, app_stop, app_store, port);
         }));
     }
     let gateway = Gateway {
@@ -404,7 +415,13 @@ fn dashboard(apps: &Inventory) -> Html<String> {
 // Each worker remains alive after failure or stop and owns at most one process.
 // Commands invalidate an attempt before cancelling it. Stale attempts must clean
 // up their resources before the worker can launch another generation.
-fn supervise(prepared: PreparedApp, apps: Inventory, stop: Arc<AtomicBool>) {
+fn supervise(
+    prepared: PreparedApp,
+    apps: Inventory,
+    stop: Arc<AtomicBool>,
+    store: logs::Store,
+    port: u16,
+) {
     let name = prepared.app.name;
     let root = prepared.app.root;
     let base = format!("/apps/{name}/");
@@ -425,15 +442,23 @@ fn supervise(prepared: PreparedApp, apps: Inventory, stop: Arc<AtomicBool>) {
             continue;
         }
         publish(&apps, &name, generation, AppState::Starting);
+        let log = match store.app(&name, "serve", port) {
+            Ok(log) => log,
+            Err(error) => {
+                publish(&apps, &name, generation, AppState::Failed(error));
+                continue;
+            }
+        };
         let result = manifest::load(&root).map_err(|e| e.to_string()).and_then(|app| {
             if app.name != name {
                 return Err("manifest name changed; restore it or restart the server with updated configuration".into());
             }
-            runner::RunningApp::start(app, 0, prepared.ai_config.as_deref(), &base, &cancel)
+            runner::RunningApp::start(app, 0, prepared.ai_config.as_deref(), &base, &cancel, log.clone())
         });
         let mut running = match result {
             Ok(running) => running,
             Err(error) => {
+                log.event("launch_failed", &error);
                 publish(&apps, &name, generation, AppState::Failed(error));
                 continue;
             }

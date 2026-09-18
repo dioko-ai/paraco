@@ -1,5 +1,5 @@
-use crate::{capability::Capability, manifest};
-use std::io::{BufRead, BufReader, Write};
+use crate::{capability::Capability, logs, manifest};
+use std::io::Write;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::{
@@ -14,14 +14,23 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const HOST_SOURCE: &str = include_str!("../runtime/deno_host.ts");
 
-pub fn run(app_path: &Path, port: u16, ai_config: Option<&Path>) -> Result<(), String> {
+pub fn run(
+    app_path: &Path,
+    port: u16,
+    ai_config: Option<&Path>,
+    log_dir: &Path,
+) -> Result<(), String> {
     if port == 0 {
         return Err("port must be from 1 through 65535".into());
     }
     let app = manifest::load(app_path).map_err(|error| error.to_string())?;
+    let store = logs::Store::open(log_dir)?;
+    store.outside(&app.root)?;
+    eprintln!("paraco: logs at {}", store.path().display());
+    let log = store.app(&app.name, "run", port)?;
     let stop = install_interrupt_handler()?;
     let name = app.name.clone();
-    let mut running = RunningApp::start(app, port, ai_config, "/", &stop)?;
+    let mut running = RunningApp::start(app, port, ai_config, "/", &stop, log)?;
     println!(
         "paraco: {name} listening on http://127.0.0.1:{}",
         running.port
@@ -41,6 +50,7 @@ pub struct RunningApp {
     errors: Option<thread::JoinHandle<()>>,
     _capability: Option<Capability>,
     _temporary: tempfile::TempDir,
+    log: logs::AppLog,
 }
 
 impl RunningApp {
@@ -50,6 +60,23 @@ impl RunningApp {
         ai_config: Option<&Path>,
         base_path: &str,
         stop: &AtomicBool,
+        log: logs::AppLog,
+    ) -> Result<Self, String> {
+        log.event("starting", "Starting application");
+        let result = Self::launch(app, port, ai_config, base_path, stop, log.clone());
+        if let Err(error) = &result {
+            log.event("failed", error);
+        }
+        result
+    }
+
+    fn launch(
+        app: manifest::App,
+        port: u16,
+        ai_config: Option<&Path>,
+        base_path: &str,
+        stop: &AtomicBool,
+        log: logs::AppLog,
     ) -> Result<Self, String> {
         let capability = if app.requests_ai {
             Some(Capability::start(&app, ai_config)?)
@@ -105,6 +132,7 @@ impl RunningApp {
                 format!("cannot launch Deno: {error}")
             }
         })?;
+        log.pid(child.id());
         let mut running = Self {
             child,
             port,
@@ -112,6 +140,7 @@ impl RunningApp {
             errors: None,
             _capability: capability,
             _temporary: temporary,
+            log: log.clone(),
         };
         running
             .child
@@ -125,9 +154,14 @@ impl RunningApp {
             running.child.stdout.take().unwrap(),
             format!("PARACO_READY:{nonce}:"),
             ready_tx,
+            log.clone(),
         ));
-        running.errors = Some(forward_stderr(running.child.stderr.take().unwrap()));
+        running.errors = Some(forward_stderr(
+            running.child.stderr.take().unwrap(),
+            log.clone(),
+        ));
         running.port = wait_until_ready(&mut running.child, &ready_rx, stop)?;
+        log.event("running", "Application listener ready");
         Ok(running)
     }
 
@@ -137,9 +171,9 @@ impl RunningApp {
             .try_wait()
             .map_err(|e| format!("cannot check Deno process: {e}"))?
         {
-            Err(format!(
-                "application exited unexpectedly with status {status}"
-            ))
+            let error = format!("application exited unexpectedly with status {status}");
+            self.log.event("failed", &error);
+            Err(error)
         } else {
             Ok(())
         }
@@ -155,6 +189,8 @@ impl Drop for RunningApp {
         if let Some(errors) = self.errors.take() {
             let _ = errors.join();
         }
+        self.log
+            .event("stopped", "Application process reaped and output drained");
     }
 }
 
@@ -162,37 +198,38 @@ fn forward_stdout(
     stdout: impl std::io::Read + Send + 'static,
     marker: String,
     ready: mpsc::Sender<u16>,
+    log: logs::AppLog,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
-        for line in BufReader::new(stdout).lines() {
-            match line {
-                Ok(line) if line.starts_with(&marker) => {
-                    if let Ok(port) = line[marker.len()..].parse::<u16>()
-                        && port != 0
-                    {
-                        let _ = ready.send(port);
-                    }
+        if let Err(error) = logs::lines(stdout, |bytes, truncated| {
+            let line = String::from_utf8_lossy(bytes);
+            if !truncated && line.starts_with(&marker) {
+                if let Ok(port) = line[marker.len()..].parse::<u16>()
+                    && port != 0
+                {
+                    let _ = ready.send(port);
                 }
-                Ok(line) => println!("{line}"),
-                Err(error) => {
-                    eprintln!("paraco: error reading Deno stdout: {error}");
-                    break;
-                }
+            } else {
+                log.write("stdout", "output", &line, truncated);
+                let _ = writeln!(std::io::stdout(), "{line}");
             }
+        }) {
+            log.event("read_error", &format!("Cannot read stdout: {error}"));
         }
     })
 }
 
-fn forward_stderr(stderr: impl std::io::Read + Send + 'static) -> thread::JoinHandle<()> {
+fn forward_stderr(
+    stderr: impl std::io::Read + Send + 'static,
+    log: logs::AppLog,
+) -> thread::JoinHandle<()> {
     thread::spawn(move || {
-        for line in BufReader::new(stderr).lines() {
-            match line {
-                Ok(line) => eprintln!("{line}"),
-                Err(error) => {
-                    eprintln!("paraco: error reading Deno stderr: {error}");
-                    break;
-                }
-            }
+        if let Err(error) = logs::lines(stderr, |bytes, truncated| {
+            let line = String::from_utf8_lossy(bytes);
+            log.write("stderr", "output", &line, truncated);
+            let _ = writeln!(std::io::stderr(), "{line}");
+        }) {
+            log.event("read_error", &format!("Cannot read stderr: {error}"));
         }
     })
 }

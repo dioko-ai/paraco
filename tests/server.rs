@@ -60,6 +60,10 @@ impl Server {
         dir
     }
     fn start(dir: TempDir, config: &Path, port: u16) -> Self {
+        let logs = dir.path().join("logs");
+        Self::start_with_logs(dir, config, port, &logs)
+    }
+    fn start_with_logs(dir: TempDir, config: &Path, port: u16, logs: &Path) -> Self {
         assert!(
             Command::new("deno")
                 .arg("--version")
@@ -70,6 +74,8 @@ impl Server {
             "Deno is required"
         );
         let child = Command::new(env!("CARGO_BIN_EXE_paraco"))
+            .arg("--log-dir")
+            .arg(logs)
             .arg("serve")
             .arg("--config")
             .arg(config)
@@ -866,4 +872,101 @@ fn browser_management_rejects_unauthorized_cross_origin_and_invalid_commands() {
     );
     assert_eq!(server.inspect("hello")["pid"], pid);
     server.stop(libc::SIGTERM);
+}
+
+#[test]
+fn persistent_logs_identify_apps_and_launches_and_survive_server_exit() {
+    let source = format!("console.log('startup-out'); console.error('startup-error');\n{APP}");
+    let mut server = Server::run(&[
+        ("hello", &source),
+        ("other", APP),
+        ("broken", "throw new Error('startup-failure-detail');"),
+    ]);
+    server.ready();
+    let first = server.inspect("hello")["pid"].as_u64().unwrap();
+    server.state("broken", "failed");
+    server.request("GET", "/apps/hello/throw", "");
+    server.control("restart", Some("hello"));
+    server.state("hello", "running");
+    let second = server.inspect("hello")["pid"].as_u64().unwrap();
+    server.stop(libc::SIGTERM);
+    let output = Command::new(env!("CARGO_BIN_EXE_paraco"))
+        .args(["logs", "hello", "--tail", "100", "--log-dir"])
+        .arg(server.dir.path().join("logs"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let records: Vec<serde_json::Value> = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert!(
+        records
+            .iter()
+            .all(|r| r["app"] == "hello" && r["mode"] == "serve" && r["port"] == server.port)
+    );
+    assert!(
+        records
+            .iter()
+            .any(|r| r["stream"] == "stdout" && r["message"] == "startup-out")
+    );
+    assert!(
+        records
+            .iter()
+            .any(|r| r["stream"] == "stderr" && r["message"] == "startup-error")
+    );
+    assert!(
+        records
+            .iter()
+            .any(|r| r["message"].as_str().unwrap().contains("request failure"))
+    );
+    let run_id = |pid| records.iter().find(|r| r["pid"] == pid).unwrap()["run_id"].clone();
+    assert_ne!(run_id(first), run_id(second));
+    assert!(
+        records
+            .iter()
+            .any(|r| r["event"] == "stopped" && r["pid"] == second)
+    );
+    let raw = fs::read_to_string(server.dir.path().join("logs/current.jsonl")).unwrap();
+    assert!(raw.contains("startup-failure-detail"));
+    assert!(!raw.contains("PARACO_READY:"));
+    assert!(!raw.contains(&server.management().1));
+}
+
+#[test]
+fn independent_servers_share_one_persistent_log_store() {
+    let logs = tempfile::tempdir().unwrap();
+    let source = format!("for(let i=0;i<100;i++) console.log(`record-${{i}}`);\n{APP}");
+    let start = || {
+        let dir = Server::fixture(&[("hello", &source)]);
+        let config = dir.path().join("server.json");
+        Server::start_with_logs(dir, &config, free_port(), &logs.path().join("logs"))
+    };
+    let mut first = start();
+    let mut second = start();
+    first.ready();
+    second.ready();
+    first.inspect("hello");
+    second.inspect("hello");
+    first.stop(libc::SIGTERM);
+    second.stop(libc::SIGTERM);
+    let output = fs::read_to_string(logs.path().join("logs/current.jsonl")).unwrap();
+    let records: Vec<serde_json::Value> = output
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    for port in [first.port, second.port] {
+        let lines: Vec<_> = records
+            .iter()
+            .filter(|r| r["port"] == port && r["stream"] == "stdout")
+            .collect();
+        assert_eq!(lines.len(), 100);
+        assert_eq!(lines.first().unwrap()["message"], "record-0");
+        assert_eq!(lines.last().unwrap()["message"], "record-99");
+    }
 }

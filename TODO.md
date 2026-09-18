@@ -28,7 +28,8 @@ verification. Cloud work is deferred; bundling and installation come last.
 - [x] Add start, stop, and restart operations through a private Unix control socket.
 - [x] Expose status and lifecycle controls through the CLI.
 - [x] Expose lifecycle controls through a separately protected dashboard management origin.
-- [ ] Add bounded per-app log access.
+- [x] Persist bounded JSONL logs with configurable location, rotation, and CLI app filters.
+- [ ] Add log viewing to the authenticated dashboard.
 - [x] Track in-memory desired state separately from observed process state.
 - [ ] Add bounded restart attempts and clear failure reporting.
 - [x] Verify manual failure recovery, startup cancellation, process and capability
@@ -68,8 +69,8 @@ See `docs/installation-and-release.md` for the detailed release plan.
 
 ## Latest verification
 
-Local lifecycle and dashboard: 51 Rust tests passed on Linux with Deno 2.9.7,
-including sixteen multi-app integration tests. Three dashboard JavaScript tests
+Persistent logs: 61 Rust tests passed on Linux with Deno 2.9.7, including storage
+rotation, concurrent writers, large output, and eighteen multi-app integration tests. Three dashboard JavaScript tests
 passed with Node.js using `node --test tests/management.test.cjs`. These use a
 simulated DOM; visual browser verification remains manual. Rust formatting and Clippy with warnings denied
 passed. The Deno adapter is unchanged from the preceding verified increment.

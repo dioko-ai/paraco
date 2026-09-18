@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 mod capability;
 mod control;
+mod logs;
 mod manifest;
 mod runner;
 mod server;
@@ -10,12 +11,23 @@ mod server;
 #[derive(Parser)]
 #[command(name = "paraco", version, about = "Run local Paraco applications")]
 struct Cli {
+    /// Persistent JSONL log directory (otherwise PARACO_LOG_DIR or ~/.paraco/logs).
+    #[arg(long, global = true)]
+    log_dir: Option<PathBuf>,
     #[command(subcommand)]
     command: Command,
 }
 
 #[derive(Subcommand)]
 enum Command {
+    /// Read retained JSONL records, even when the runtime is stopped.
+    Logs {
+        app: Option<String>,
+        #[arg(long, default_value_t = 100)]
+        tail: usize,
+        #[arg(long)]
+        port: Option<u16>,
+    },
     /// Inspect applications in a running local server.
     Status {
         app: Option<String>,
@@ -63,23 +75,39 @@ enum Command {
 
 fn main() {
     let cli = Cli::parse();
-    let result = match cli.command {
+    let result = execute(cli);
+    if let Err(error) = result {
+        eprintln!("paraco: {error}");
+        std::process::exit(1);
+    }
+}
+
+fn execute(cli: Cli) -> Result<(), String> {
+    match cli.command {
+        Command::Logs { app, tail, port } => logs::print(
+            &logs::directory(cli.log_dir.as_deref())?,
+            app.as_deref(),
+            port,
+            tail,
+        ),
         Command::Status { app, port } => control::execute(port, control::Action::Status, app),
         Command::Start { app, port } => control::execute(port, control::Action::Start, Some(app)),
         Command::Stop { app, port } => control::execute(port, control::Action::Stop, Some(app)),
         Command::Restart { app, port } => {
             control::execute(port, control::Action::Restart, Some(app))
         }
-        Command::Serve { config, port } => server::serve(&config, port),
+        Command::Serve { config, port } => {
+            server::serve(&config, port, &logs::directory(cli.log_dir.as_deref())?)
+        }
         Command::Run {
             app,
             port,
             ai_config,
-        } => runner::run(&app, port, ai_config.as_deref()),
-    };
-
-    if let Err(error) = result {
-        eprintln!("paraco: {error}");
-        std::process::exit(1);
+        } => runner::run(
+            &app,
+            port,
+            ai_config.as_deref(),
+            &logs::directory(cli.log_dir.as_deref())?,
+        ),
     }
 }
