@@ -90,7 +90,7 @@ free before startup. The public gateway binds before any app is launched.
 
 Startup happens independently: a slow import does not prevent the dashboard or
 another app from serving. Startup times out after ten seconds. A failed or crashed
-app remains failed until explicitly started or restarted through the
+app retries when its restart policy is enabled; otherwise it remains failed until started or restarted through the
 [local lifecycle CLI](local-lifecycle.md); automatic retries are future work. App output goes
 to the foreground terminal and the bounded persistent [JSONL log store](local-logs.md).
 Use `paraco logs <app>` even after the server stops.

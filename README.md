@@ -39,8 +39,7 @@ refreshes status every two seconds; its private access link changes each server 
 
 See [local hosting](docs/local-hosting.md) for the configuration, app base-path
 contract, and limits. [TODO.md](TODO.md) tracks completed work and the next
-increments: dashboard log viewing, recovery, then background
-service operation.
+increment: background service operation.
 
 ## Manage running apps
 
@@ -139,8 +138,8 @@ the future bundled runtime, CLI installers, and platform packaging plan.
 
 The runtime supports foreground single-app and multi-app hosting, authenticated
 browser lifecycle controls, Unix CLI lifecycle controls, and a local fake AI
-capability, plus bounded persistent logs and CLI log queries. Dashboard log
-viewing, automatic recovery, background service operation,
+capability, plus bounded persistent logs and CLI log queries. Authenticated dashboard logs and opt-in bounded automatic recovery are available.
+Background service operation,
 persistence, real AI providers, and AI HTTP compatibility/streaming
 remain future work. Cloud integration and bundling/installers are deferred.
 

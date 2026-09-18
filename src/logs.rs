@@ -245,6 +245,16 @@ impl Store {
         port: Option<u16>,
         count: usize,
     ) -> Result<Vec<Record>, String> {
+        self.tail_launch(app, port, None, count)
+    }
+
+    pub fn tail_launch(
+        &self,
+        app: Option<&str>,
+        port: Option<u16>,
+        run_id: Option<&str>,
+        count: usize,
+    ) -> Result<Vec<Record>, String> {
         if count > 10_000 {
             return Err("--tail must be at most 10000".into());
         }
@@ -269,6 +279,7 @@ impl Store {
                 };
                 if app.is_none_or(|name| name == record.app)
                     && port.is_none_or(|p| p == record.port)
+                    && run_id.is_none_or(|id| id == record.run_id)
                 {
                     if records.len() == count {
                         records.pop_front();

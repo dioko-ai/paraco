@@ -7,11 +7,13 @@ pub(super) struct Management {
     origin: String,
     authorization: String,
     gateway_port: u16,
+    store: logs::Store,
 }
 
 pub(super) async fn bind(
     apps: Inventory,
     gateway_port: u16,
+    store: logs::Store,
 ) -> Result<(tokio::net::TcpListener, Router, String), String> {
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
         .await
@@ -27,6 +29,7 @@ pub(super) async fn bind(
         origin,
         authorization: format!("Bearer {token}"),
         gateway_port,
+        store,
     };
     Ok((
         listener,
@@ -85,7 +88,7 @@ async fn handle(state: &Management, request: Request) -> Response {
             _ => {}
         }
     }
-    if path != "/api/apps" {
+    if path != "/api/apps" && path != "/api/logs" {
         return StatusCode::NOT_FOUND.into_response();
     }
     if headers
@@ -94,6 +97,57 @@ async fn handle(state: &Management, request: Request) -> Response {
         != Some(state.authorization.as_str())
     {
         return StatusCode::UNAUTHORIZED.into_response();
+    }
+    if path == "/api/logs" {
+        if request.method() != Method::GET {
+            return StatusCode::METHOD_NOT_ALLOWED.into_response();
+        }
+        let mut app = None;
+        let mut run_id = None;
+        let mut limit = 100usize;
+        for (key, value) in
+            url::form_urlencoded::parse(request.uri().query().unwrap_or("").as_bytes())
+        {
+            match key.as_ref() {
+                "app" if app.is_none() => app = Some(value.into_owned()),
+                "run_id"
+                    if run_id.is_none()
+                        && value.len() == 32
+                        && value.bytes().all(|b| b.is_ascii_hexdigit()) =>
+                {
+                    run_id = Some(value.into_owned())
+                }
+                "limit" => match value.parse::<usize>() {
+                    Ok(n) if n <= 500 => limit = n,
+                    _ => return (StatusCode::BAD_REQUEST, "limit must be 0–500").into_response(),
+                },
+                _ => return StatusCode::BAD_REQUEST.into_response(),
+            }
+        }
+        let Some(app) = app else {
+            return StatusCode::BAD_REQUEST.into_response();
+        };
+        if !state.apps.read().unwrap().contains_key(&app) {
+            return StatusCode::NOT_FOUND.into_response();
+        }
+        let store = state.store.clone();
+        let port = state.gateway_port;
+        return match tokio::task::spawn_blocking(move || {
+            store.tail_launch(Some(&app), Some(port), run_id.as_deref(), limit)
+        })
+        .await
+        {
+            Ok(Ok(records)) => (
+                [(header::CONTENT_TYPE, "application/json")],
+                serde_json::json!({"records": records}).to_string(),
+            )
+                .into_response(),
+            _ => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Unable to read logs; retry refresh.",
+            )
+                .into_response(),
+        };
     }
     let command = if request.method() == Method::GET {
         control::Command {

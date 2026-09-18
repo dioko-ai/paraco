@@ -124,5 +124,22 @@ limits, invalid UTF-8, CLI path precedence and filters, startup/request failures
 per-launch identity, and retrieval after shutdown. Integration fixtures use
 isolated log directories and do not write into the user's default store.
 
-The next increment is a log viewer through the authenticated management dashboard.
+## Dashboard viewer
+
+Open the authenticated management link printed by `serve`, then choose **View
+logs** on an app. The viewer shows the latest 100 retained records, refreshes every
+five seconds, and supports manual refresh. Paste a launch ID from a record into
+the launch filter to restrict results. Switching apps clears that filter. Empty
+results and retrieval errors have explicit messages; log text is rendered as text.
+
+`GET /api/logs?app=hello&limit=100&run_id=<launch-id>` requires the same bearer
+authorization and browser-origin checks as management status. `app` is required
+and must be configured on this server; the server also filters by gateway port.
+`run_id` is optional (32 hexadecimal characters); `limit` defaults to 100 and
+accepts 0–500. Results are JSON `{ "records": [...] }`, oldest first within the
+tail. Reads use the store lock on a blocking worker, so rotation cannot change
+files mid-read and disk work does not block the async request executor. Each read
+scans at most the retained 10 MiB store. Repeated refresh replaces the snapshot;
+records may disappear as retention prunes old logs. This is not lossless streaming.
+
 Cloud collection, live log following, and packaging remain deferred.

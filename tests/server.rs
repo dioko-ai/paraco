@@ -970,3 +970,121 @@ fn independent_servers_share_one_persistent_log_store() {
         assert_eq!(lines.last().unwrap()["message"], "record-99");
     }
 }
+
+#[test]
+fn dashboard_logs_are_authenticated_filtered_and_rotation_safe() {
+    let mut server = Server::run(&[("one", APP), ("two", APP)]);
+    server.ready();
+    server.state("one", "running");
+    let token = server.management().1;
+    let auth = format!("Authorization: Bearer {token}\r\n");
+    assert!(
+        server
+            .browser_request("GET", "/api/logs?app=one", "", "")
+            .contains("401 Unauthorized")
+    );
+    let store = log_store::Store::open(&server.dir.path().join("logs")).unwrap();
+    let launch = store.app("one", "serve", server.port).unwrap();
+    launch.event("output", "<script>hostile</script>");
+    let records = store.tail(Some("one"), Some(server.port), 1).unwrap();
+    let id = &records[0].run_id;
+    let path = format!("/api/logs?app=one&run_id={id}&limit=2");
+    let response = server.browser_request("GET", &path, &auth, "");
+    assert!(response.contains("hostile"));
+    assert!(
+        !server
+            .browser_request("GET", &format!("/api/logs?app=two&run_id={id}"), &auth, "")
+            .contains("hostile")
+    );
+    assert!(
+        server
+            .browser_request("GET", "/api/logs?app=one&limit=501", &auth, "")
+            .contains("400 Bad Request")
+    );
+    for _ in 0..150 {
+        launch.event("output", &"x".repeat(16000));
+    }
+    launch.event("output", "after rotation");
+    assert!(server.dir.path().join("logs/archive-1.jsonl").exists());
+    assert!(
+        server
+            .browser_request("GET", &path, &auth, "")
+            .contains("after rotation")
+    );
+}
+
+#[allow(dead_code)]
+#[path = "../src/logs.rs"]
+mod log_store;
+
+#[test]
+fn automatic_recovery_is_bounded_cancellable_and_isolated() {
+    let crash = "setTimeout(() => Deno.exit(9), 300); export default {fetch() {return new Response('up');}};";
+    let dir = Server::fixture(&[("crash", crash), ("healthy", APP)]);
+    let config = dir.path().join("server.json");
+    fs::write(&config, r#"{"apps":[{"path":"crash","restart":{"onFailure":true,"maxRetries":2,"backoffMs":500,"maxBackoffMs":1000}},{"path":"healthy"}]}"#).unwrap();
+    let mut server = Server::start(dir, &config, free_port());
+    server.ready();
+    server.state("crash", "backoff");
+    server.wait_for("/apps/healthy/next", "arrived");
+    // Correct the app before its scheduled retry, then confirm recovery.
+    fs::write(server.dir.path().join("crash/main.ts"), APP).unwrap();
+    server.state("crash", "running");
+    server.wait_for("/apps/crash/next", "arrived");
+    // A manual restart resets the budget; repeated crashes exhaust it.
+    fs::write(server.dir.path().join("crash/main.ts"), crash).unwrap();
+    server.control("restart", Some("crash"));
+    let failed = server.state("crash", "failed");
+    assert!(
+        failed["error"]
+            .as_str()
+            .unwrap()
+            .contains("retry limit reached (2/2)")
+    );
+    let store = log_store::Store::open(&server.dir.path().join("logs")).unwrap();
+    let launches = || {
+        store
+            .tail(Some("crash"), None, 1000)
+            .unwrap()
+            .iter()
+            .filter(|r| r.event == "starting")
+            .count()
+    };
+    let starts: Vec<_> = store
+        .tail(Some("crash"), None, 1000)
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.event == "starting")
+        .map(|r| r.timestamp_unix_ms)
+        .collect();
+    let attempts = &starts[starts.len() - 3..];
+    assert!(attempts[1] - attempts[0] >= 500);
+    assert!(attempts[2] - attempts[1] >= 1000);
+    let count = launches();
+    thread::sleep(Duration::from_millis(1200));
+    assert_eq!(launches(), count);
+    server.control("start", Some("crash"));
+    server.state("crash", "backoff");
+    server.control("stop", Some("crash"));
+    server.state("crash", "stopped");
+    let count = launches();
+    thread::sleep(Duration::from_millis(1200));
+    assert_eq!(launches(), count);
+    server.wait_for("/apps/healthy/next", "arrived");
+}
+
+#[test]
+fn startup_failures_also_exhaust_recovery_budget() {
+    let dir = Server::fixture(&[("broken", "throw Error('startup failure')")]);
+    let config = dir.path().join("server.json");
+    fs::write(&config, r#"{"apps":[{"path":"broken","restart":{"onFailure":true,"maxRetries":1,"backoffMs":25,"maxBackoffMs":25}}]}"#).unwrap();
+    let mut server = Server::start(dir, &config, free_port());
+    server.ready();
+    let failed = server.state("broken", "failed");
+    assert!(
+        failed["error"]
+            .as_str()
+            .unwrap()
+            .contains("retry limit reached (1/1)")
+    );
+}

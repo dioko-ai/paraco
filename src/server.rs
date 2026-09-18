@@ -30,9 +30,44 @@ struct Config {
 struct AppConfig {
     path: PathBuf,
     ai_config: Option<PathBuf>,
+    #[serde(default)]
+    restart: RestartPolicy,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RestartPolicy {
+    #[serde(default)]
+    on_failure: bool,
+    #[serde(default = "default_retries")]
+    max_retries: u32,
+    #[serde(default = "default_backoff")]
+    backoff_ms: u64,
+    #[serde(default = "default_max_backoff")]
+    max_backoff_ms: u64,
+}
+fn default_retries() -> u32 {
+    3
+}
+fn default_backoff() -> u64 {
+    1000
+}
+fn default_max_backoff() -> u64 {
+    30000
+}
+impl Default for RestartPolicy {
+    fn default() -> Self {
+        Self {
+            on_failure: false,
+            max_retries: default_retries(),
+            backoff_ms: default_backoff(),
+            max_backoff_ms: default_max_backoff(),
+        }
+    }
 }
 
 struct PreparedApp {
+    restart: RestartPolicy,
     app: manifest::App,
     ai_config: Option<PathBuf>,
 }
@@ -42,6 +77,7 @@ enum AppState {
     Starting,
     Running(u16),
     Failed(String),
+    Backoff(String),
     Stopping,
     Stopped,
 }
@@ -104,7 +140,13 @@ fn load(path: &Path) -> Result<Vec<PreparedApp>, String> {
             if !names.insert(app.name.clone()) {
                 return Err(format!("duplicate application name `{}`", app.name));
             }
+            if entry.restart.max_retries > 100 || entry.restart.backoff_ms == 0
+                || entry.restart.max_backoff_ms < entry.restart.backoff_ms
+                || entry.restart.max_backoff_ms > 300_000 {
+                return Err("restart policy requires maxRetries <= 100 and 1 <= backoffMs <= maxBackoffMs <= 300000".into());
+            }
             Ok(PreparedApp {
+                restart: entry.restart,
                 app,
                 ai_config: entry.ai_config.map(|p| root.join(p)),
             })
@@ -171,7 +213,7 @@ async fn host(
     let control_apps = inventory.clone();
     let control = control::Server::start(port, move |command| manage(&control_apps, command))?;
     let (management_listener, management_router, management_url) =
-        management::bind(inventory.clone(), port).await?;
+        management::bind(inventory.clone(), port, store.clone()).await?;
     for prepared in apps {
         let states = inventory.clone();
         let app_stop = stop.clone();
@@ -276,7 +318,7 @@ async fn dispatch(State(gateway): State<Gateway>, request: Request) -> Response 
             )
                 .into_response();
         }
-        AppState::Failed(_) => {
+        AppState::Failed(_) | AppState::Backoff(_) => {
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "Application failed; see the dashboard",
@@ -388,6 +430,7 @@ fn dashboard(apps: &Inventory) -> Html<String> {
             AppState::Starting => ("starting", "Starting application".to_string()),
             AppState::Running(_) => ("running", format!("<a href=\"/apps/{name}/\">Open app <span aria-hidden=\"true\">↗</span></a>")),
             AppState::Failed(error) => ("failed", escape(error)),
+            AppState::Backoff(error) => ("backoff", escape(error)),
             AppState::Stopping => ("stopping", "Stopping application".into()),
             AppState::Stopped => ("stopped", "Application is stopped".into()),
         };
@@ -426,6 +469,8 @@ fn supervise(
     let root = prepared.app.root;
     let base = format!("/apps/{name}/");
     let mut handled = None;
+    let mut retry_generation = None;
+    let mut retries = 0;
     while !stop.load(Ordering::Relaxed) {
         let (generation, desired, cancel) = {
             let records = apps.read().unwrap();
@@ -437,6 +482,10 @@ fn supervise(
             continue;
         }
         handled = Some(generation);
+        if retry_generation != Some(generation) {
+            retry_generation = Some(generation);
+            retries = 0;
+        }
         if desired == DesiredState::Stopped {
             publish(&apps, &name, generation, AppState::Stopped);
             continue;
@@ -445,7 +494,18 @@ fn supervise(
         let log = match store.app(&name, "serve", port) {
             Ok(log) => log,
             Err(error) => {
-                publish(&apps, &name, generation, AppState::Failed(error));
+                if recover(
+                    &apps,
+                    &name,
+                    generation,
+                    &prepared.restart,
+                    &mut retries,
+                    &cancel,
+                    &stop,
+                    error,
+                ) {
+                    handled = None;
+                }
                 continue;
             }
         };
@@ -459,7 +519,18 @@ fn supervise(
             Ok(running) => running,
             Err(error) => {
                 log.event("launch_failed", &error);
-                publish(&apps, &name, generation, AppState::Failed(error));
+                if recover(
+                    &apps,
+                    &name,
+                    generation,
+                    &prepared.restart,
+                    &mut retries,
+                    &cancel,
+                    &stop,
+                    error,
+                ) {
+                    handled = None;
+                }
                 continue;
             }
         };
@@ -475,10 +546,72 @@ fn supervise(
             thread::sleep(Duration::from_millis(25));
         }
         drop(running);
-        if let Some(error) = failure {
-            publish(&apps, &name, generation, AppState::Failed(error));
+        if let Some(error) = failure
+            && recover(
+                &apps,
+                &name,
+                generation,
+                &prepared.restart,
+                &mut retries,
+                &cancel,
+                &stop,
+                error,
+            )
+        {
+            handled = None;
         }
     }
+}
+
+// Waiting happens only on this app's worker, after its old resources are reaped.
+#[allow(clippy::too_many_arguments)]
+fn recover(
+    apps: &Inventory,
+    name: &str,
+    generation: u64,
+    policy: &RestartPolicy,
+    retries: &mut u32,
+    cancel: &AtomicBool,
+    stop: &AtomicBool,
+    error: String,
+) -> bool {
+    if cancel.load(Ordering::Relaxed) || stop.load(Ordering::Relaxed) {
+        return false;
+    }
+    if !policy.on_failure || *retries >= policy.max_retries {
+        let detail = if policy.on_failure {
+            format!(
+                "{error}; retry limit reached ({retries}/{})",
+                policy.max_retries
+            )
+        } else {
+            error
+        };
+        publish(apps, name, generation, AppState::Failed(detail));
+        return false;
+    }
+    let delay = policy
+        .backoff_ms
+        .saturating_mul(1u64 << (*retries).min(63))
+        .min(policy.max_backoff_ms);
+    *retries += 1;
+    publish(
+        apps,
+        name,
+        generation,
+        AppState::Backoff(format!(
+            "{error}; retry {retries}/{} in {delay} ms",
+            policy.max_retries
+        )),
+    );
+    let deadline = std::time::Instant::now() + Duration::from_millis(delay);
+    while std::time::Instant::now() < deadline {
+        if cancel.load(Ordering::Relaxed) || stop.load(Ordering::Relaxed) {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    !cancel.load(Ordering::Relaxed) && !stop.load(Ordering::Relaxed)
 }
 
 fn publish(apps: &Inventory, name: &str, generation: u64, state: AppState) {
@@ -538,6 +671,7 @@ fn manage(apps: &Inventory, command: control::Command) -> Result<Vec<control::St
                 AppState::Stopping => ("stopping", None),
                 AppState::Stopped => ("stopped", None),
                 AppState::Failed(error) => ("failed", Some(error.clone())),
+                AppState::Backoff(error) => ("backoff", Some(error.clone())),
             };
             control::Status {
                 name: name.clone(),

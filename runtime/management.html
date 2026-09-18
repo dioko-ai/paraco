@@ -14,5 +14,10 @@ button{font:inherit;padding:8px 14px;border:1px solid #bdcbb8;border-radius:6px;
 <header><div class="brand">paraco<span style="color:#67996a">.</span></div><span class="local">On this device</span></header>
 <section class="intro"><h1>Your local apps</h1><p id="summary">Connecting…</p><p id="message" role="status" aria-live="polite"></p></section>
 <ul id="apps" aria-label="Applications"></ul>
+<section id="logs" hidden aria-label="Application logs"><h2 id="log-title"></h2>
+<label>Launch ID (blank for all retained launches) <input id="log-launch" maxlength="32"></label>
+<button id="log-refresh" type="button">Refresh logs</button>
+<p>Latest 100 retained records. Refreshes every 5 seconds. Copy a launch ID below to filter.</p>
+<pre id="log-output" role="status" style="white-space:pre-wrap;overflow-wrap:anywhere;max-height:32rem;overflow:auto"></pre></section>
 <footer>Controls request a change immediately; status shows when it completes. Status refreshes every 2 seconds. Running indicates the app process is serving; it is not a health check.</footer>
 </main></body></html>

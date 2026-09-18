@@ -23,18 +23,18 @@ verification. Cloud work is deferred; bundling and installation come last.
 - [x] Add a runnable multi-app example and document the configuration and limits.
 - [x] Pass existing checks and new multi-app integration tests.
 
-## Local lifecycle management — in progress
+## Local lifecycle management — completed
 
 - [x] Add start, stop, and restart operations through a private Unix control socket.
 - [x] Expose status and lifecycle controls through the CLI.
 - [x] Expose lifecycle controls through a separately protected dashboard management origin.
 - [x] Persist bounded JSONL logs with configurable location, rotation, and CLI app filters.
-- [ ] Add log viewing to the authenticated dashboard.
+- [x] Add log viewing to the authenticated dashboard.
 - [x] Track in-memory desired state separately from observed process state.
-- [ ] Add bounded restart attempts and clear failure reporting.
+- [x] Add bounded restart attempts and clear failure reporting.
 - [x] Verify manual failure recovery, startup cancellation, process and capability
       cleanup, and that deliberately stopped apps stay stopped during the session.
-- [ ] Verify automatic recovery once restart policy is implemented.
+- [x] Verify automatic recovery, retry exhaustion, stop cancellation, and app isolation.
 
 ## Background service operation
 
@@ -69,9 +69,11 @@ See `docs/installation-and-release.md` for the detailed release plan.
 
 ## Latest verification
 
-Persistent logs: 61 Rust tests passed on Linux with Deno 2.9.7, including storage
-rotation, concurrent writers, large output, and eighteen multi-app integration tests. Three dashboard JavaScript tests
-passed with Node.js using `node --test tests/management.test.cjs`. These use a
-simulated DOM; visual browser verification remains manual. Rust formatting and Clippy with warnings denied
-passed. The Deno adapter is unchanged from the preceding verified increment.
-The integration tests require local networking and subprocess signals. This environment uses `/tmp/paraco-deno/bin` on `PATH`.
+Dashboard logs and automatic recovery: the full Rust suite passed on Linux with
+Deno, including authenticated log filtering and rotation, crash recovery, bounded
+backoff, retry exhaustion, manual cancellation, and responsive unrelated apps.
+Four dashboard JavaScript tests passed with Node.js using
+`node --test tests/management.test.cjs`. These use a simulated DOM; visual browser
+verification remains manual. Rust formatting and Clippy with warnings denied
+passed. Integration tests require local networking and subprocess signals. This
+environment uses `/tmp/paraco-deno/bin` on `PATH`.

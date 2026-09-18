@@ -25,7 +25,7 @@ available on other platforms.
 
 Every successful command prints a JSON array of app statuses. `status` lists all
 apps, or just the named app. Each record contains `name`, `desired`, `state`, and
-an `error` when failed. Unknown app names and transport errors produce a nonzero
+an `error` when failed or waiting to retry. Unknown app names and transport errors produce a nonzero
 exit code and an error on stderr.
 
 - `start` requests a running app. Starting an already running or starting app is
@@ -41,9 +41,8 @@ request was accepted, not that the app has finished starting or stopping. Use
 The read-only gateway dashboard continues refreshing every five seconds.
 
 Desired state is `running` or `stopped`. Observed state is `starting`, `running`,
-`stopping`, `stopped`, or `failed`. A crashed app has desired state `running` and
-observed state `failed`. There are no automatic retries yet. Apps deliberately
-stopped stay stopped for this server session.
+`stopping`, `stopped`, `backoff`, or `failed`. Apps deliberately stopped stay
+stopped for this server session. Automatic retries are opt-in per app.
 
 Commands for an app are serialized. A newer request supersedes a pending request;
 several quick restarts may coalesce. There is never more than one supervised
@@ -55,6 +54,32 @@ Each launch revalidates the manifest and reloads source and AI configuration, so
 failed app can be fixed and started without restarting the server. The configured
 name must remain the same; changing app names or the server's app list requires a
 server restart. Capability grants still come only from the host configuration.
+
+## Automatic recovery
+
+Configure recovery in each `serve` app entry:
+
+```json
+{"apps":[{"path":"./hello","restart":{"onFailure":true,"maxRetries":3,"backoffMs":1000,"maxBackoffMs":30000}}]}
+```
+
+Omitting `restart` disables automatic recovery. The other fields default to the
+values above. Startup failures and unexpected process exits (including exit code
+zero) count as failures; individual HTTP errors do not. Each retry revalidates
+and reloads the app after cleaning up its old process and capability resources.
+
+The delay doubles after each failure up to `maxBackoffMs`. `maxRetries` counts
+additional launches after the initial attempt, and is limited to 0–100. Delays
+must satisfy `1 <= backoffMs <= maxBackoffMs <= 300000` milliseconds. The retry
+budget lasts until a manual restart, a start of a failed/stopped app, or server
+restart; a successful launch does not reset it. This prevents repeatedly crashing
+apps from retrying forever.
+
+Both dashboards and CLI status show `backoff` with the last failure, retry number,
+and scheduled delay. Exhaustion shows `failed` with the failure and retry limit.
+Stop cancels a pending delay or launch. Restart resets the budget and supersedes
+pending retries. Start during backoff is a no-op. Other apps and management remain
+responsive while an app waits. Each launch has its own ID in persistent logs.
 
 ## Local management boundary
 
@@ -116,9 +141,8 @@ works on platforms without Unix sockets; only Linux is verified so far.
 
 Desired state is in memory. Restarting the server starts all configured apps;
 persisting stopped state across server restarts is future work. Bounded persistent
-logs are available through the [log CLI](local-logs.md). Dashboard log viewing,
-automatic crash recovery, background services, cloud integration,
-and bundling/installers are outside this increment.
+logs are available through the [log CLI and dashboard](local-logs.md).
+Background services, cloud integration, and bundling/installers remain future work.
 
 Integration tests cover independent app control, repeated requests, changed
 process identities, process reaping, failure repair, startup cancellation, rapid

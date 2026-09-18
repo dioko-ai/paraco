@@ -21,8 +21,8 @@ function element(tag, text, className) {
   return node;
 }
 
-async function request(command) {
-  const response = await fetch("/api/apps", {
+async function request(command, path = "/api/apps") {
+  const response = await fetch(path, {
     method: command ? "POST" : "GET",
     headers: {
       Authorization: `Bearer ${token}`,
@@ -65,6 +65,10 @@ function render({ apps, gateway }) {
       button.addEventListener("click", () => update({ action, app: app.name }));
       controls.append(button);
     }
+    const logs = element("button", "View logs");
+    logs.setAttribute("aria-label", `logs ${app.name}`);
+    logs.addEventListener("click", () => showLogs(app.name));
+    controls.append(logs);
     row.append(detail, controls);
     return row;
   });
@@ -96,3 +100,34 @@ async function update(command) {
   }
 }
 update();
+
+let logApp = "";
+let logVersion = 0;
+let logTimer;
+const logPanel = document.querySelector("#logs");
+const logTitle = document.querySelector("#log-title");
+const logOutput = document.querySelector("#log-output");
+const logLaunch = document.querySelector("#log-launch");
+async function showLogs(app = logApp) {
+  if (app !== logApp) logLaunch.value = "";
+  logApp = app;
+  const version = ++logVersion;
+  clearTimeout(logTimer);
+  logPanel.hidden = false;
+  logTitle.textContent = `Logs: ${app}`;
+  logOutput.textContent = "Loading logs…";
+  try {
+    const launch = logLaunch.value.trim();
+    const data = await request(null, `/api/logs?app=${encodeURIComponent(app)}&limit=100${launch ? `&run_id=${encodeURIComponent(launch)}` : ""}`);
+    if (version !== logVersion) return;
+    logOutput.textContent = data.records.length ? data.records.map(record =>
+      `${new Date(record.timestamp_unix_ms).toISOString()} [${record.run_id}] ${record.stream}/${record.event}: ${record.message}`
+    ).join("\n") : "No retained logs match this app and launch.";
+  } catch (error) {
+    if (version === logVersion) logOutput.textContent = `Unable to load logs: ${error.message}`;
+  } finally {
+    if (version === logVersion && token) logTimer = setTimeout(() => showLogs(), 5000);
+  }
+}
+document.querySelector("#log-refresh").addEventListener("click", () => showLogs());
+logLaunch.addEventListener("change", () => showLogs());
