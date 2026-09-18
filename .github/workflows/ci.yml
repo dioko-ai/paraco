@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  verify:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-13]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96.1
+        with:
+          components: rustfmt, clippy
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.2.5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.14.0
+          cache: npm
+      - run: npm ci
+      - if: runner.os == 'Linux'
+        run: npx playwright install --with-deps chromium
+      - if: runner.os != 'Linux'
+        run: npx playwright install chromium
+      - name: Run verification and retain result
+        run: |
+          mkdir -p verification-artifacts
+          set +e
+          npm run check 2>&1 | tee verification-artifacts/check.log
+          status=${PIPESTATUS[0]}
+          printf 'npm run check exit status: %s\n' "$status" > verification-artifacts/result.txt
+          exit "$status"
+      - name: Retain verification environment
+        if: always()
+        run: |
+          mkdir -p verification-artifacts
+          { rustc --version; deno --version; node --version; npx playwright --version; uname -a; } > verification-artifacts/environment.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: verification-${{ runner.os }}-${{ runner.arch }}
+          path: verification-artifacts/

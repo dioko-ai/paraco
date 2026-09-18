@@ -1,4 +1,6 @@
 /target/
+/node_modules/
+/.pi-subagents/
 
 # Local product planning documents
 /cloud_spec.private.md

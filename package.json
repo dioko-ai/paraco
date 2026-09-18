@@ -1,0 +1,16 @@
+{
+  "private": true,
+  "devDependencies": {
+    "@playwright/test": "1.52.0",
+    "ajv": "8.17.1",
+    "typescript": "5.8.3"
+  },
+  "scripts": {
+    "check:tools": "node scripts/verify-tools.cjs",
+    "test:management": "node --test tests/management.test.cjs",
+    "test:browser": "node tests/browser-smoke.cjs",
+    "check:schema": "node tests/schema-contract.cjs",
+    "check:types": "tsc --noEmit --lib es2022,dom runtime/paraco.d.ts",
+    "check": "npm run check:tools && cargo fmt --check && cargo clippy --all-targets -- -D warnings && npm run check:schema && npm run check:types && cargo test && node --test tests/management.test.cjs && node tests/browser-smoke.cjs"
+  }
+}
