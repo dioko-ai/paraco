@@ -25,8 +25,11 @@ increment. Ctrl+C or SIGTERM stops the server and all its apps on Unix.
 ```
 
 Paths are relative to the configuration file, independent of the shell's current
-working directory. Absolute paths also work. The app's manifest `name` determines
-its route; names must be unique within the server. Unknown configuration fields,
+working directory. Absolute paths also work. The app's manifest `name` labels the
+dashboard and must be unique within the server. The host allocates the browser
+origin and AI-grant identity from the app directory's canonical source, not that
+display name. Replacing a configured path allocates a new identity; removing a
+path retires it, so grants do not transfer when it is added again. Unknown configuration fields,
 invalid manifests, and duplicate names fail before launching any app. An empty
 `apps` list serves an empty dashboard. Changes take effect after restarting the
 server; hot reload and persistent registration are not implemented.
@@ -35,7 +38,11 @@ server; hot reload and persistent registration are not implemented.
 be outside that app's directory and is only valid for an app requesting `ai`.
 A configuration or startup error specific to that capability marks the app
 failed without stopping the other apps. No grants are inferred from listing an
-app in the server configuration.
+app in the server configuration. To configure a hosted grant, start the server,
+read the deployment ID from its management API (`GET /api/apps`) or the
+`app-<deployment-id>.localhost` link, put that ID under `apps` in the AI config,
+then restart the server. This is a host-managed discovery flow; app manifests
+cannot select an identity or grant themselves credentials.
 
 ## Routing and app URLs
 
@@ -47,7 +54,7 @@ app in the server configuration.
 | Single-app `paraco run` request `/items` | `/items` | `/` |
 
 Each hosted app has a distinct deterministic `.localhost` hostname derived from
-its canonical app root, manifest name, and fixed gateway port. The app receives that canonical URL
+its host-owned durable deployment ID. The app receives that canonical URL
 and Host; this separates browser origins even though all traffic reaches the same
 loopback listener. Query strings, methods, request bodies, and end-to-end headers
 are forwarded. Client-supplied forwarding metadata and hop-by-hop headers are
@@ -61,7 +68,7 @@ connection failures return 502, and an upstream timeout before headers returns 5
 
 ## Hosted-workload limits
 
-Hosted configuration accepts at most 50 applications (`maxApps`, default 50).
+Hosted configuration accepts at most 50 applications (`max_apps`, default 50).
 The gateway admits up to 64 concurrent proxy responses overall and 8 per app;
 it does not queue excess work, returning 503 so callers can retry. Permits stay
 held until a streamed response completes or is cancelled. The management log
@@ -83,9 +90,8 @@ return new Response(null, {
 
 Relative redirect locations also work. The gateway returns redirects to the
 browser without following them. It does not rewrite HTML, JavaScript, `Location`,
-or cookie paths. An absolute path such as `/settings` refers to the gateway root;
-it will not automatically become `/apps/hello/settings`. Set cookie `Path` to the
-app base path when appropriate. Relative URLs on nested pages follow normal
+or cookie paths. An absolute path such as `/settings` stays on the app's own
+canonical origin. Set cookie `Path` to the app base path when appropriate. Relative URLs on nested pages follow normal
 browser URL resolution rules.
 
 ## Dashboard and supervision
@@ -106,7 +112,7 @@ free before startup. The public gateway binds before any app is launched.
 Startup happens independently: a slow import does not prevent the dashboard or
 another app from serving. Startup times out after ten seconds. A failed or crashed
 app retries when its restart policy is enabled; otherwise it remains failed until started or restarted through the
-[local lifecycle CLI](local-lifecycle.md); automatic retries are future work. App output goes
+[local lifecycle CLI](local-lifecycle.md); automatic retries are opt-in. App output goes
 to the foreground terminal and the bounded persistent [JSONL log store](local-logs.md).
 
 ### Output and log delivery
@@ -149,9 +155,9 @@ be interrupted. Background operation and OS service integration come later.
   app traffic accepts only its generated canonical hostname. Forged forwarding
   metadata and backend authorization headers are overwritten by the gateway.
 - Unix CLI lifecycle commands use a private local socket. Browser controls use a
-  separate authenticated loopback origin. Service installation and automatic
-  restart recovery remain future work.
-  Cloud and release packaging remain deferred.
+  separate authenticated loopback origin. Explicit user-service installation and
+  opt-in automatic restart recovery are implemented; native service-manager
+  verification and release publication remain pending. Cloud work is deferred.
 
 ## Verification
 

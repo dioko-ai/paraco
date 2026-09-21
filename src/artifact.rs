@@ -65,17 +65,15 @@ pub fn prepare(source: &Path, output: &Path, deno: &Path) -> Result<(), String> 
     copy_tree(&source, &app_dir)?;
     let app = manifest::load(&app_dir).map_err(|e| e.to_string())?;
     let config = validate_config(&app.root)?;
-    validate_local_imports(&app.root)?;
     let cache = root.join("deno-cache");
     let lock = root.join("deno.lock");
     fs::create_dir(&cache).map_err(|e| format!("cannot create dependency cache: {e}"))?;
+    // Deno 2 writes a supplied lockfile and no longer accepts the old
+    // `--lock-write` flag. Seeding an empty lock also gives a dependency-free
+    // application an immutable lock artifact.
+    fs::write(&lock, "{}\n").map_err(|e| format!("cannot create dependency lockfile: {e}"))?;
     let mut command = Command::new(&runtime);
-    command
-        .arg("cache")
-        .arg("--quiet")
-        .arg("--lock")
-        .arg(&lock)
-        .arg("--lock-write");
+    command.arg("cache").arg("--quiet").arg("--lock").arg(&lock);
     if let Some(config) = &config {
         command.arg("--config").arg(config);
     } else {
@@ -91,6 +89,7 @@ pub fn prepare(source: &Path, output: &Path, deno: &Path) -> Result<(), String> 
     if !status.success() {
         return Err(format!("Deno preparation failed with {status}"));
     }
+    validate_resolved_graph(&runtime, &app, config.as_deref(), &cache)?;
     let digest = tree_digest(&app_dir)?;
     let metadata = Metadata {
         format: FORMAT,
@@ -205,32 +204,72 @@ fn safe_relative(value: &str) -> bool {
     value.starts_with("./") && !value.split('/').any(|part| part == "..")
 }
 
-fn validate_local_imports(root: &Path) -> Result<(), String> {
-    let mut files = Vec::new();
-    collect_files(root, root, &mut files)?;
-    for file in files.into_iter().filter(|p| {
-        matches!(
-            p.extension().and_then(|x| x.to_str()),
-            Some("ts" | "tsx" | "js" | "jsx")
-        )
-    }) {
-        let contents = fs::read_to_string(root.join(&file))
-            .map_err(|e| format!("cannot read source import: {e}"))?;
-        if contents.contains("../")
-            || contents.contains("file:")
-            || contents.contains("npm:")
-            || contents.contains("from \"/")
-            || contents.contains("from '/")
-            || contents.contains("import \"/")
-            || contents.contains("import '/")
-        {
-            return Err(format!(
-                "unsupported escaping or ambient import in {}",
-                file.display()
-            ));
-        }
+fn validate_resolved_graph(
+    deno: &Path,
+    app: &manifest::App,
+    config: Option<&Path>,
+    cache: &Path,
+) -> Result<(), String> {
+    let mut command = Command::new(deno);
+    command.arg("info").arg("--json");
+    if let Some(config) = config {
+        command.arg("--config").arg(config);
+    } else {
+        command.arg("--no-config");
+    }
+    let output = command
+        .arg(&app.entrypoint)
+        .env_clear()
+        .env("DENO_DIR", cache)
+        .current_dir(&app.root)
+        .output()
+        .map_err(|e| format!("cannot inspect prepared dependency graph: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "Deno dependency graph inspection failed with {}",
+            output.status
+        ));
+    }
+    let graph: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|e| format!("Deno dependency graph was not valid JSON: {e}"))?;
+    let modules = graph
+        .get("modules")
+        .and_then(serde_json::Value::as_array)
+        .ok_or("Deno dependency graph did not report modules")?;
+    for module in modules {
+        let specifier = module
+            .get("specifier")
+            .and_then(serde_json::Value::as_str)
+            .ok_or("Deno dependency graph contains a module without a specifier")?;
+        validate_graph_specifier(specifier, &app.root)?;
     }
     Ok(())
+}
+
+fn validate_graph_specifier(specifier: &str, root: &Path) -> Result<(), String> {
+    let url = url::Url::parse(specifier)
+        .map_err(|_| format!("invalid resolved dependency specifier {specifier}"))?;
+    match url.scheme() {
+        "https" | "jsr" => Ok(()),
+        "file" => {
+            let path = url
+                .to_file_path()
+                .map_err(|_| format!("invalid file dependency {specifier}"))?;
+            let path = path
+                .canonicalize()
+                .map_err(|_| format!("unavailable file dependency {specifier}"))?;
+            if path.starts_with(root) {
+                Ok(())
+            } else {
+                Err(format!(
+                    "resolved dependency escapes application root: {specifier}"
+                ))
+            }
+        }
+        scheme => Err(format!(
+            "unsupported resolved dependency scheme {scheme}: {specifier}"
+        )),
+    }
 }
 
 fn file_digest(path: &Path) -> Result<String, String> {
@@ -337,12 +376,25 @@ mod tests {
     }
 
     #[test]
-    fn rejects_escaping_and_rooted_source_imports() {
+    fn graph_specifiers_allow_contained_parent_imports_and_source_text() {
         let root = tempfile::tempdir().unwrap();
-        fs::write(root.path().join("main.ts"), "import '/tmp/secret.ts';").unwrap();
-        assert!(validate_local_imports(root.path()).is_err());
-        fs::write(root.path().join("main.ts"), "import '../secret.ts';").unwrap();
-        assert!(validate_local_imports(root.path()).is_err());
+        let nested = root.path().join("nested");
+        fs::create_dir(&nested).unwrap();
+        fs::write(
+            nested.join("module.ts"),
+            "// Documentation example: ../assets",
+        )
+        .unwrap();
+        assert!(
+            validate_graph_specifier(
+                url::Url::from_file_path(nested.join("module.ts"))
+                    .unwrap()
+                    .as_str(),
+                root.path()
+            )
+            .is_ok()
+        );
+        assert!(validate_graph_specifier("file:///tmp/secret.ts", root.path()).is_err());
     }
 
     #[test]

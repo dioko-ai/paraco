@@ -10,6 +10,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// The host writes one JSON bootstrap record, then retains stdin as its lease.
+pub const BOOTSTRAP_DELIMITER: u8 = b'\n';
+
 #[allow(dead_code)] // Used by the Unix guardian launch path; absent on other targets.
 pub fn inherit_lease(command: &mut Command, lease: Option<&File>) -> Result<(), String> {
     #[cfg(unix)]
@@ -100,9 +103,9 @@ fn supervise() -> Result<i32, String> {
     let count = input
         .by_ref()
         .take(65537)
-        .read_until(b'\n', &mut bootstrap)
+        .read_until(BOOTSTRAP_DELIMITER, &mut bootstrap)
         .map_err(|e| format!("cannot read host bootstrap: {e}"))?;
-    if count > 65536 || bootstrap.last() != Some(&b'\n') {
+    if count > 65536 || bootstrap.last() != Some(&BOOTSTRAP_DELIMITER) {
         return Err("incomplete or oversized host bootstrap".into());
     }
     let owner_gone = stop.clone();

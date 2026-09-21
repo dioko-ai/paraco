@@ -68,12 +68,16 @@ The proposed packaging foundation is a platform-specific bundle containing:
 - the compiled Rust `paraco` executable
 - a private Deno executable pinned to an exact, tested version
 - required license and third-party notices
-- release metadata identifying the Paraco version, Deno version, and target
+- `bundle.json` identifying the Paraco and Deno versions, target, source
+  revision, notices, checksums, and supplied-runtime provenance
 
-Paraco should locate its bundled Deno by absolute path relative to the installed
-bundle, independently of the working directory or a user's system Deno. Resolve
-launcher symlinks correctly, including those installed by Homebrew. The exact
-directory layout remains to be chosen.
+The archive root is `paraco-<version>-<target>`. The local installer accepts
+that exact layout and activates it as a versioned release. Paraco resolves its
+bundled Deno by absolute path relative to the installed bundle, independently of
+the working directory or a user's system Deno. It resolves launcher symlinks
+correctly, including those installed by Homebrew. A source-built binary is not
+identified as a bundle merely because it lives in a `bin` directory: it resolves
+the `deno` command on `PATH` to an absolute path before guardian startup.
 
 Deno remains a separate supervised process. Bundling does not require embedding
 V8 in Rust or compiling each user application into its own executable. A larger

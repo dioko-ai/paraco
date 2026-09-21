@@ -11,6 +11,9 @@
     "test:browser": "node tests/browser-smoke.cjs",
     "check:schema": "node tests/schema-contract.cjs",
     "check:types": "tsc --noEmit --lib es2022,dom runtime/paraco.d.ts",
-    "check": "npm run check:tools && cargo fmt --check && cargo clippy --all-targets -- -D warnings && npm run check:schema && npm run check:types && cargo test && node --test tests/management.test.cjs && node tests/browser-smoke.cjs"
+    "check": "npm run check:core && npm run check:tools && cargo test --tests && npm run test:browser",
+    "check:rust": "cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test --lib --bin paraco",
+    "check:core": "npm run check:rust && npm run check:schema && npm run check:types && npm run test:management",
+    "test:installer": "bash tests/install-archive.sh"
   }
 }

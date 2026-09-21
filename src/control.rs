@@ -20,6 +20,7 @@ pub struct Command {
 #[derive(Deserialize, Serialize)]
 pub struct Status {
     pub name: String,
+    pub deployment_id: String,
     pub desired: String,
     pub state: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -153,14 +154,10 @@ mod transport {
         stop: Arc<AtomicBool>,
         worker: Option<thread::JoinHandle<()>>,
         path: PathBuf,
-        lease: Arc<fs::File>,
+        _lease: Arc<fs::File>,
     }
 
     impl Server {
-        pub fn lease(&self) -> Option<Arc<fs::File>> {
-            Some(self.lease.clone())
-        }
-
         pub fn start(
             port: u16,
             handler: impl Fn(Command) -> Result<Vec<Status>, String> + Send + 'static,
@@ -175,7 +172,7 @@ mod transport {
                 stop: Arc::new(AtomicBool::new(false)),
                 worker: None,
                 path,
-                lease,
+                _lease: lease,
             };
             fs::set_permissions(&server.path, fs::Permissions::from_mode(0o600))
                 .map_err(|e| e.to_string())?;
@@ -359,9 +356,6 @@ mod transport {
     use super::*;
     pub struct Server;
     impl Server {
-        pub fn lease(&self) -> Option<std::sync::Arc<std::fs::File>> {
-            None
-        }
         pub fn start(
             _port: u16,
             _handler: impl Fn(Command) -> Result<Vec<Status>, String> + Send + 'static,

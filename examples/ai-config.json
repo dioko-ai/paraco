@@ -7,7 +7,7 @@
     }
   ],
   "apps": {
-    "ai-example": { "credential_grants": ["demo-grant"] }
+    "REPLACE_WITH_PARACO_IDENTITY_OUTPUT": { "credential_grants": ["demo-grant"] }
   },
   "default": { "provider": "fake", "model": "small" },
   "provider_default_models": { "fake": "small" }

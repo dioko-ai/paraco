@@ -12,7 +12,6 @@ mod runtime;
 mod server;
 mod service;
 mod state;
-mod storage;
 
 #[derive(Parser)]
 #[command(name = "paraco", version, about = "Run local Paraco applications")]
@@ -50,6 +49,11 @@ enum Command {
         app: Option<String>,
         #[arg(long, default_value_t = 3000)]
         port: u16,
+    },
+    /// Print the stable host-owned ID used by standalone run for an app source.
+    Identity {
+        /// Application directory.
+        app: PathBuf,
     },
     /// Start a stopped or failed application in a running local server.
     Start {
@@ -201,6 +205,13 @@ fn execute(cli: Cli) -> Result<(), String> {
             port,
             tail,
         ),
+        Command::Identity { app } => {
+            println!(
+                "{}",
+                runner::standalone_identity(&app, &logs::directory(cli.log_dir.as_deref())?)?
+            );
+            Ok(())
+        }
         Command::Status { app, port } => control::execute(port, control::Action::Status, app),
         Command::Start { app, port } => control::execute(port, control::Action::Start, Some(app)),
         Command::Stop { app, port } => control::execute(port, control::Action::Stop, Some(app)),

@@ -1,6 +1,6 @@
-//! Opt-in user-service definition helpers.  This module deliberately does not
-//! invoke systemctl or launchctl: callers must make that native-manager action
-//! explicitly, and definitions are always owned by Paraco before replacement.
+//! Opt-in user-service installation and native-manager operations.
+//! Explicit CLI actions invoke systemctl or launchctl; definitions must be
+//! owned by Paraco before replacement.
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -88,13 +88,13 @@ fn is_owned_contents(text: &str) -> bool {
 }
 
 pub fn write_owned(path: &Path, contents: &str) -> Result<(), String> {
-    if let Ok(existing) = fs::read_to_string(path) {
-        if !is_owned_contents(&existing) {
-            return Err(format!(
-                "refusing to replace foreign service registration {}",
-                path.display()
-            ));
-        }
+    if let Ok(existing) = fs::read_to_string(path)
+        && !is_owned_contents(&existing)
+    {
+        return Err(format!(
+            "refusing to replace foreign service registration {}",
+            path.display()
+        ));
     }
     let parent = path.parent().ok_or("service definition has no parent")?;
     fs::create_dir_all(parent)

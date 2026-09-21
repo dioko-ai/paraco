@@ -1,4 +1,4 @@
-use crate::{artifact, capability::Capability, guardian, logs, manifest, runtime};
+use crate::{artifact, capability::Capability, guardian, logs, manifest, runtime, state};
 use std::io::Write;
 use std::path::Path;
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -11,7 +11,9 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
-const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+// The guardian gives its Deno child five seconds after receiving our signal.
+// Leave it time to reap that child before escalating the guardian itself.
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(7);
 const CONSOLE_QUEUE_RECORDS: usize = 256;
 #[derive(Clone, Copy, serde::Serialize)]
 pub struct ConsoleLossCounters {
@@ -43,7 +45,7 @@ pub fn run(
     let log = store.app(&app.name, "run", port)?;
     let stop = install_interrupt_handler()?;
     let name = app.name.clone();
-    let deployment_id = standalone_deployment_id();
+    let (_state, deployment_id) = standalone_state(&app.root, log_dir)?;
     let mut running = RunningApp::start(
         app,
         &deployment_id,
@@ -84,7 +86,7 @@ pub fn run_prepared(
     let log = store.app(&artifact.app.name, "run", port)?;
     let stop = install_interrupt_handler()?;
     let name = artifact.app.name.clone();
-    let deployment_id = standalone_deployment_id();
+    let (_state, deployment_id) = standalone_state(&artifact.app.root, log_dir)?;
     let mut running = RunningApp::start_prepared(
         artifact,
         &deployment_id,
@@ -109,17 +111,29 @@ pub fn run_prepared(
     Ok(())
 }
 
-// Even one-shot hosts must not share an authorization identity merely because
-// their manifests reuse a name. Durable server deployments receive their IDs
-// from state.rs; this transient ID intentionally has no configured grants.
-fn standalone_deployment_id() -> String {
-    format!(
-        "standalone-{:x}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos()
-    )
+/// Allocate or discover the host-owned identity used by standalone `run`.
+/// Keeping this store open for the process also prevents a concurrent server
+/// from claiming the same lifecycle state directory.
+fn standalone_state(root: &Path, log_dir: &Path) -> Result<(state::Store, String), String> {
+    use sha2::{Digest, Sha256};
+    let source = root
+        .canonicalize()
+        .map_err(|e| format!("cannot canonicalize application source: {e}"))?;
+    let digest = Sha256::digest(source.as_os_str().as_encoded_bytes());
+    let state_root = log_dir
+        .with_file_name("standalone-state")
+        .join(format!("{:x}", digest));
+    let mut store = state::Store::open(&state_root)?;
+    let deployment = store.install(&source)?;
+    Ok((store, deployment.id))
+}
+
+/// Print the stable ID before configuring grants. This is intentionally a
+/// host command, rather than a manifest field controlled by the application.
+pub fn standalone_identity(app_path: &Path, log_dir: &Path) -> Result<String, String> {
+    let app = manifest::load(app_path).map_err(|error| error.to_string())?;
+    let (_store, id) = standalone_state(&app.root, log_dir)?;
+    Ok(id)
 }
 
 struct PreparedRuntime {
@@ -144,6 +158,7 @@ pub struct RunningApp {
 }
 
 impl RunningApp {
+    #[allow(clippy::too_many_arguments)] // launch resources are explicit at host boundary.
     pub fn start(
         app: manifest::App,
         deployment_id: &str,
@@ -174,6 +189,7 @@ impl RunningApp {
         result
     }
 
+    #[allow(clippy::too_many_arguments)] // prepared and source launches share this boundary.
     pub fn start_prepared(
         prepared: artifact::PreparedApp,
         deployment_id: &str,
@@ -215,6 +231,7 @@ impl RunningApp {
         result
     }
 
+    #[allow(clippy::too_many_arguments)] // each resource has a distinct lifetime.
     fn launch(
         app: manifest::App,
         deployment_id: &str,
@@ -243,9 +260,13 @@ impl RunningApp {
         let bootstrap = serde_json::json!({
             "basePath": base_path,
             "backendToken": backend_token,
-            "ai": capability.as_ref().map(|c| serde_json::json!({"address": c.address, "token": c.token, "http": {"address": c.http_address, "token": c.http_token}}))
+            "ai": capability.as_ref().map(|c| serde_json::json!({"address": c.address, "token": c.token, "timeoutMs": c.timeout.as_millis(), "http": {"address": c.http_address, "token": c.http_token}}))
         });
-        let input = serde_json::to_vec(&bootstrap).map_err(|_| "cannot encode host bootstrap")?;
+        let mut input =
+            serde_json::to_vec(&bootstrap).map_err(|_| "cannot encode host bootstrap")?;
+        // Guardian consumes one framed bootstrap line and then retains stdin as
+        // the owner lifetime pipe. Keep this delimiter in the shared host path.
+        input.push(guardian::BOOTSTRAP_DELIMITER);
         let deno = match &prepared {
             Some(p) => p.runtime.clone(),
             None => runtime::command_for_host()?,
@@ -300,6 +321,12 @@ impl RunningApp {
             .stderr(Stdio::piped());
         if let Some(path) = std::env::var_os("PATH") {
             command.env("PATH", path);
+        }
+        // The guardian owns its temporary adapter directory. Preserve an
+        // operator-selected temporary root while keeping all other ambient
+        // environment out of the app process.
+        if let Some(tmpdir) = std::env::var_os("TMPDIR") {
+            command.env("TMPDIR", tmpdir);
         }
         let child = command.spawn().map_err(|error| {
             if error.kind() == std::io::ErrorKind::NotFound {

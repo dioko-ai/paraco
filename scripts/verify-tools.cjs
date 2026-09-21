@@ -17,7 +17,11 @@ function version(command, args, expected) {
 
 try {
   version("deno", ["--version"], "deno 2.2.5");
-  version(process.execPath, ["--version"], "v22.14.0");
+  if (process.env.CI) {
+    version(process.execPath, ["--version"], "v22.14.0");
+  } else if (Number(process.versions.node.split(".")[0]) < 22) {
+    throw new Error("Node.js 22 or newer is required for local verification");
+  }
   // Playwright's downloaded browser is deliberately checked before a test
   // starts so a missing cache cannot look like an application failure.
   if (!existsSync("node_modules/@playwright/test")) {

@@ -19,8 +19,9 @@ repeatable-verification slice.
 
 The current runtime accepts code installed or reviewed by its owner. Its
 loopback-only gateway, restricted Deno launch permissions, and separate app
-processes reduce accidental exposure, but do not isolate hostile code. In
-particular, the current path-routed browser apps share an origin. Marketplace,
+processes reduce accidental exposure, but do not isolate hostile code. Hosted
+applications use distinct deployment-specific `.localhost` browser origins, with
+a separate authenticated management origin. Marketplace,
 third-party hosting, and hostile-code isolation require a separate security
 decision.
 

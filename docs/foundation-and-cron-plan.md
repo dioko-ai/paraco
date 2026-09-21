@@ -41,9 +41,12 @@ requirements. They can be changed before the affected milestone.
   an already selected text. See the official
   [Apache-2.0 license](https://www.apache.org/licenses/LICENSE-2.0.html) and
   [MIT license](https://opensource.org/license/mit).
-- Use a host-owned SQLite database for runtime state, transactional scheduling,
-  and task metadata, with versioned migrations. Keep executable artifacts,
-  application data, and credential storage logically separate.
+- Current deployment identity and desired state use one host-owned JSON store
+  with atomic replacement and synchronized writes. Do not add another custom
+  persistence store. Before implementing scheduling, migrate runtime state and
+  task metadata together to SQLite with versioned migrations and transactional
+  scheduling. Keep executable artifacts, application data, and credentials
+  logically separate.
 - A job is a bounded, fresh Deno task process. It is not a long-running process
   that independently watches a clock. A portable task exports an async handler
   receiving scoped capabilities and execution metadata.

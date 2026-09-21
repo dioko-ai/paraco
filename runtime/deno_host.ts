@@ -18,6 +18,10 @@ if (backendToken !== null && (typeof backendToken !== "string" || backendToken.l
 const connect = Deno.connect.bind(Deno);
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
+const aiTimeoutMs = bootstrap?.timeoutMs;
+if (bootstrap && (!Number.isSafeInteger(aiTimeoutMs) || aiTimeoutMs <= 0)) {
+  throw new Error("Paraco host received an invalid AI deadline");
+}
 
 async function readExact(conn: Deno.Conn, size: number): Promise<Uint8Array> {
   const bytes = new Uint8Array(size);
@@ -49,7 +53,7 @@ const aiContext = Object.freeze(
             try {
               conn.close();
             } catch { /* closed */ }
-          }, 3000);
+          }, aiTimeoutMs);
           try {
             const frame = new Uint8Array(body.length + 4);
             new DataView(frame.buffer).setUint32(0, body.length);

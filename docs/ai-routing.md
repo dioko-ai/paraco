@@ -1,7 +1,7 @@
 # Local AI routing core
 
-This increment retains the deterministic fake backend and adds an opt-in,
-non-streaming OpenAI-compatible provider. The fake backend makes no network
+This increment retains the deterministic fake backend and adds an opt-in
+OpenAI-compatible provider with completion and streaming support. The fake backend makes no network
 requests and needs no credentials or accounts. A real provider is enabled only
 by host configuration; the CLI and Deno host connect either backend to apps
 requesting `ai` through `context.ai.complete({ prompt, provider?, model? })`.
@@ -36,7 +36,7 @@ An unavailable or ungranted automatic app default can fall back to the runtime
 default. Explicit selections never fall back. Multiple authorized credentials for
 one provider/model pair do not make a model ambiguous: the first permitted route
 in configuration order wins. No arbitrary provider is selected when defaults are
-missing. Deployment-specific defaults are deferred until deployments exist.
+missing. Deployment-specific defaults are configured with host-owned deployment IDs.
 
 Success returns the actual provider/model and the constant `Fake AI response`.
 The fake backend does not interpret or echo prompts. Responses and error messages
@@ -58,29 +58,49 @@ credential denial, and deterministic response content. The full suite remains
 
 ## Local capability transport
 
-`paraco run ./examples/ai --ai-config ./examples/ai-config.json` starts a fake AI
-example. Configuration is read only when explicitly passed; it must be outside
+Before granting a standalone app, ask the host for its durable deployment ID:
+
+```sh
+paraco identity ./examples/ai
+```
+
+Use that exact output as the key in `apps` in the host-owned AI configuration.
+Replace `REPLACE_WITH_PARACO_IDENTITY_OUTPUT` in `examples/ai-config.json`, then
+run `paraco run ./examples/ai --ai-config ./examples/ai-config.json`.
+
+The identity is stable for the same canonical source. Moving to another source,
+or removing a hosted source from its server configuration, creates or retires a
+deployment respectively; grants do not follow an app display name. Configuration is read only when explicitly passed; it must be outside
 the canonical app directory so ordinary app read permissions do not include it.
 The example configuration illustrates credential identities (not secret values),
 routes, app grants, and optional app/runtime/provider defaults. Unknown fields
 and invalid references fail before Deno starts. An app cannot declare grants in
 its manifest. Without configuration the interface exists but calls are denied.
 
-The Rust host opens an ephemeral IPv4 loopback TCP listener per AI-enabled run.
+The Rust host opens an ephemeral IPv4 loopback listener and fresh token per
+AI-enabled run. Those listeners authenticate the individual launch, then forward
+to one long-lived host provider service per canonical AI configuration and its
+contents. Provider clients, credential routing, and host-wide admission are shared across apps
+using the same configuration; an app launch never creates its own provider
+concurrency budget.
 A cryptographically random 256-bit token binds requests to that launched app.
 The host delivers address and token over stdin, consumed before app import;
 neither is supplied in command arguments or inherited environment variables.
 The adapter grants network access only to the app listener and capability port.
 Apps without `ai` receive no AI interface or capability listener.
 
-This is a private transport, not the planned OpenAI-compatible HTTP endpoint.
+This is the private transport used by `context.ai`; the loopback
+OpenAI-compatible HTTP endpoint is described below.
 Each connection carries one JSON request and response, each prefixed by a
 four-byte big-endian length. Frames are limited to 64 KiB. Unknown request
-fields, including caller identity and grants, are rejected. The host uses a
-one-second total read deadline and bounded writes; the adapter closes calls
-after three seconds once connected. Requests are handled serially by the private capability transport. Real-provider
-work has host-owned global and per-deployment semaphores, a bounded admission
-queue, total deadlines, and a 1 MiB response bound. Cancellation or timeout drops
+fields, including caller identity and grants, are rejected. The configured
+provider timeout is also the private transport and adapter deadline (30 seconds
+by default), so a valid provider request is not abandoned by the SDK before the
+host's routing deadline. Requests are handled serially by the private capability
+transport. Real-provider work has an eight-request host-wide semaphore shared
+across every configuration, plus configurable per-service and per-deployment
+semaphores, a bounded admission queue, total deadlines, and a 1 MiB response
+bound. Cancellation or timeout drops
 its permits. The real transport accepts HTTPS only, rejects URL userinfo and
 fragments, disables redirects and ambient proxies, and redacts transport failures.
 The listener is stopped and joined on normal exit, failed startup, and Ctrl+C.
@@ -111,10 +131,11 @@ not accepted in config, arguments, browser storage, or logs. They remain in
 host-owned files outside application permissions.
 
 Rust/unit coverage observes policy, decoder, credential-redaction, URL
-validation, frame-bound, and listener-cleanup paths. Actual TypeScript/Deno
-calls, stale-token renewal, cross-deployment HTTP, and external-provider
-fixtures remain pending because this workspace has no Deno runtime; they are
-not inferred from the local unit suite.
+validation, frame-bound, and listener-cleanup paths. The local HTTPS fixture
+exercises real Reqwest completion and SSE through the capability transport;
+Deno integration tests exercise standalone and hosted grants and lifecycle
+renewal. See [current status](status.md) for observed results. Paid-provider
+compatibility and production workload measurements remain unverified.
 
 Provider SSE is decoded incrementally at byte boundaries (including split UTF-8)
 and must terminate with `[DONE]`; malformed or truncated upstream events do not

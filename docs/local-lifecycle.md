@@ -42,7 +42,8 @@ The read-only gateway dashboard continues refreshing every five seconds.
 
 Desired state is `running` or `stopped`. Observed state is `starting`, `running`,
 `stopping`, `stopped`, `backoff`, or `failed`. Apps deliberately stopped stay
-stopped for this server session. Automatic retries are opt-in per app.
+stopped across server restarts. Desired state is stored durably for the
+canonical configured app source; automatic retries are opt-in per app.
 
 Commands for an app are serialized. A newer request supersedes a pending request;
 several quick restarts may coalesce. There is never more than one supervised
@@ -163,8 +164,11 @@ works on platforms without Unix sockets; only Linux is verified so far.
 
 ## Scope and verification
 
-Desired state is in memory. Restarting the server starts all configured apps;
-persisting stopped state across server restarts is future work. Bounded persistent
+Desired state is committed before it is published to lifecycle controls. Restarting the server
+reconciles the current configuration: configured canonical sources retain their
+identity and desired state, removed sources are retired, and newly configured
+sources receive new identities. Restarting the server starts only configured apps whose
+desired state is running. Bounded persistent
 logs are available through the [log CLI and dashboard](local-logs.md).
 ## User-service definitions
 
@@ -185,8 +189,8 @@ Crash tests kill the runtime during startup and with a blocked app event loop,
 restart immediately with multiple apps, verify Deno reaping and temporary-directory
 cleanup, and preserve live or unexpected control endpoints. These tests run in the
 Unix suite for Linux and macOS when its Deno prerequisite is available. The
-current pinned target is Deno 2.2.5; this workspace has no Deno, so no local
-Deno-process verification is claimed. Native macOS evidence remains pending.
+current pinned target is Deno 2.2.5. See [current status](status.md) for the
+observed Linux process and browser checks. Native macOS evidence remains pending.
 
 ```sh
 cargo fmt --check
@@ -200,5 +204,5 @@ Tests require Deno on `PATH`, local sockets, and subprocess signals.
 Dashboard integration tests exercise authorization, cross-origin rejection, invalid
 commands, process replacement, independent apps, and listener cleanup. JavaScript
 tests use Node.js and a simulated DOM to check token handling, button requests,
-polling, keyboard focus, and safe text rendering. A graphical browser was not
-available for visual verification in the development environment.
+polling, keyboard focus, and safe text rendering. The Chromium smoke test clicks dashboard app links and checks separate browser
+origins. See [current status](status.md) for observed results.

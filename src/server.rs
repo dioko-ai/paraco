@@ -98,6 +98,7 @@ enum DesiredState {
 
 struct AppRecord {
     deployment_id: String,
+    source: PathBuf,
     root: PathBuf,
     desired: DesiredState,
     state: AppState,
@@ -143,7 +144,7 @@ fn load(path: &Path) -> Result<Vec<PreparedApp>, String> {
     let config: Config =
         serde_json::from_slice(&bytes).map_err(|e| format!("invalid server configuration: {e}"))?;
     if config.max_apps == 0 || config.max_apps > 50 || config.apps.len() > config.max_apps {
-        return Err("maxApps must be 1–50 and cover the configured applications".into());
+        return Err("max_apps must be 1–50 and cover the configured applications".into());
     }
     let root = path.parent().unwrap();
     let mut names = BTreeSet::new();
@@ -174,11 +175,8 @@ pub fn serve(config: &Path, port: u16, log_dir: &Path) -> Result<(), String> {
         return Err("port must be from 1 through 65535".into());
     }
     let apps = load(config)?;
-    let state_root = log_dir.with_file_name("state");
-    let mut durable = state::Store::open(&state_root)?;
-    for app in &apps {
-        durable.install(&app.app.name)?;
-    }
+    let state_root = state_root(config, log_dir)?;
+    let durable = open_state(&state_root)?;
     let store = logs::Store::open(log_dir)?;
     for prepared in &apps {
         store.outside(&prepared.app.root)?;
@@ -196,6 +194,33 @@ pub fn serve(config: &Path, port: u16, log_dir: &Path) -> Result<(), String> {
     result
 }
 
+fn open_state(root: &Path) -> Result<state::Store, String> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(8);
+    loop {
+        match state::Store::open(root) {
+            Ok(store) => return Ok(store),
+            Err(error)
+                if error == "state root is already owned by another runtime"
+                    && std::time::Instant::now() < deadline =>
+            {
+                thread::sleep(Duration::from_millis(25));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn state_root(config: &Path, log_dir: &Path) -> Result<PathBuf, String> {
+    use sha2::{Digest, Sha256};
+    let config = config
+        .canonicalize()
+        .map_err(|e| format!("cannot canonicalize server configuration: {e}"))?;
+    let digest = Sha256::digest(config.as_os_str().as_encoded_bytes());
+    Ok(log_dir
+        .with_file_name("state")
+        .join(format!("{:x}", digest)))
+}
+
 async fn host(
     apps: Vec<PreparedApp>,
     port: u16,
@@ -208,13 +233,18 @@ async fn host(
         .await
         .map_err(|e| format!("cannot bind gateway: {e}"))?;
     let durable = Arc::new(Mutex::new(durable));
+    durable
+        .lock()
+        .unwrap()
+        .reconcile(apps.iter().map(|prepared| prepared.app.root.clone()))?;
     let mut initial = BTreeMap::new();
     for prepared in &apps {
-        let deployment = durable.lock().unwrap().install(&prepared.app.name)?;
+        let deployment = durable.lock().unwrap().install(&prepared.app.root)?;
         initial.insert(
             prepared.app.name.clone(),
             AppRecord {
                 deployment_id: deployment.id,
+                source: prepared.app.root.clone(),
                 root: prepared.app.root.clone(),
                 desired: if deployment.desired_running {
                     DesiredState::Running
@@ -314,7 +344,7 @@ async fn dispatch(State(gateway): State<Gateway>, request: Request) -> Response 
         .read()
         .unwrap()
         .iter()
-        .find(|(name, app)| host == app_host(&app.deployment_id, gateway.port))
+        .find(|(_, app)| host == app_host(&app.deployment_id, gateway.port))
         .map(|(name, _)| name.clone());
     if !gateway_hosts.contains(&host) && app_name.is_none() {
         return (
@@ -360,7 +390,7 @@ async fn dispatch(State(gateway): State<Gateway>, request: Request) -> Response 
         .unwrap()
         .get(name)
         .map(|app| app.root.clone());
-    let Some(root) = app else {
+    let Some(_root) = app else {
         return StatusCode::NOT_FOUND.into_response();
     };
     // The shared host is a migration-only surface. It cannot proxy app content.
@@ -397,7 +427,7 @@ async fn dispatch(State(gateway): State<Gateway>, request: Request) -> Response 
 }
 
 async fn proxy_app(gateway: &Gateway, request: Request, name: &str, suffix: &str) -> Response {
-    let root = match gateway.apps.read().unwrap().get(name) {
+    let _root = match gateway.apps.read().unwrap().get(name) {
         Some(app) => app.root.clone(),
         None => return StatusCode::NOT_FOUND.into_response(),
     };
@@ -414,27 +444,7 @@ async fn proxy_app(gateway: &Gateway, request: Request, name: &str, suffix: &str
             gateway.port
         )
     );
-    // A hosted browser request must be same-origin. We deliberately do not emit
-    // CORS headers: this is a browser boundary, not local-process authentication.
-    if let Some(value) = request
-        .headers()
-        .get(header::ORIGIN)
-        .and_then(|v| v.to_str().ok())
-        && value != origin
-    {
-        return StatusCode::FORBIDDEN.into_response();
-    }
-    // Fetch Metadata covers requests (notably navigations and no-cors loads)
-    // that do not carry Origin.  `none` is a user-initiated navigation; absent
-    // metadata remains available to ordinary loopback HTTP clients, which are
-    // explicitly outside this browser-only boundary.
-    if let Some(site) = request
-        .headers()
-        .get("sec-fetch-site")
-        .and_then(|v| v.to_str().ok())
-        && site != "same-origin"
-        && site != "none"
-    {
+    if !permitted_browser_request(request.headers(), request.method(), &origin) {
         return StatusCode::FORBIDDEN.into_response();
     }
     let state = gateway
@@ -601,6 +611,27 @@ async fn proxy_app(gateway: &Gateway, request: Request, name: &str, suffix: &str
 
 fn app_host(deployment_id: &str, port: u16) -> String {
     format!("app-{deployment_id}.localhost:{port}")
+}
+
+/// Cross-origin applications may be followed as top-level documents. They may
+/// not issue cross-origin fetches, submit forms, or load each other's assets.
+fn permitted_browser_request(headers: &HeaderMap, method: &Method, origin: &str) -> bool {
+    let navigation = matches!(*method, Method::GET | Method::HEAD)
+        && headers
+            .get("sec-fetch-mode")
+            .is_some_and(|v| v == "navigate")
+        && headers
+            .get("sec-fetch-dest")
+            .is_some_and(|v| v == "document");
+    if navigation {
+        return true;
+    }
+    if headers.get(header::ORIGIN).is_some_and(|v| v != origin) {
+        return false;
+    }
+    !headers
+        .get("sec-fetch-site")
+        .is_some_and(|v| v != "same-origin" && v != "none")
 }
 
 fn strip_hop_headers(headers: &mut HeaderMap) {
@@ -860,12 +891,30 @@ fn publish(apps: &Inventory, name: &str, generation: u64, state: AppState) {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)] // lifecycle control follows gateway helpers.
 mod origin_tests {
-    use super::app_host;
+    use super::{app_host, permitted_browser_request};
+    use axum::http::{HeaderMap, HeaderValue, Method};
     #[test]
     fn origin_uses_only_deployment_identity() {
         assert_eq!(app_host("d123", 8787), "app-d123.localhost:8787");
         assert_ne!(app_host("d123", 8787), app_host("d456", 8787));
+    }
+    #[test]
+    fn allows_only_document_cross_origin_navigation() {
+        let origin = "http://app-d123.localhost:8787";
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "origin",
+            HeaderValue::from_static("http://app-d456.localhost:8787"),
+        );
+        headers.insert("sec-fetch-site", HeaderValue::from_static("same-site"));
+        headers.insert("sec-fetch-mode", HeaderValue::from_static("navigate"));
+        headers.insert("sec-fetch-dest", HeaderValue::from_static("document"));
+        assert!(permitted_browser_request(&headers, &Method::GET, origin));
+        assert!(!permitted_browser_request(&headers, &Method::POST, origin));
+        headers.insert("sec-fetch-mode", HeaderValue::from_static("cors"));
+        assert!(!permitted_browser_request(&headers, &Method::GET, origin));
     }
 }
 
@@ -894,9 +943,9 @@ fn manage(
         if let Some(desired) = desired {
             // Persist lifecycle intent before an acknowledged response can cause a restart.
             if desired == DesiredState::Stopped {
-                durable.lock().unwrap().stop(name)?;
+                durable.lock().unwrap().stop(&app.source)?;
             } else {
-                durable.lock().unwrap().start(name)?;
+                durable.lock().unwrap().start(&app.source)?;
             }
             app.cancel.store(true, Ordering::Relaxed);
             app.cancel = Arc::new(AtomicBool::new(false));
@@ -929,6 +978,7 @@ fn manage(
             };
             control::Status {
                 name: name.clone(),
+                deployment_id: app.deployment_id.clone(),
                 desired: if app.desired == DesiredState::Running {
                     "running"
                 } else {

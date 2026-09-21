@@ -12,10 +12,20 @@ npx playwright install chromium
 npm run check
 ```
 
-`npm run check` is the authoritative local and CI verification entry point. It
-fails before testing if Deno 2.2.5, Node 22, npm dependencies, or Playwright's
-Chromium setup are unavailable; `cargo test` launches real Deno applications
-and therefore cannot be treated as a skipped success when Deno is absent.
+`npm run check:rust` runs formatting, strict Clippy for every target, and Rust
+unit tests without requiring Deno, Node pins, or Chromium. The local HTTPS
+provider fixture uses Python 3 and OpenSSL to serve a temporary trusted test
+certificate; it contacts no external provider. `npm run check:core`
+also runs schema, TypeScript declarations, and management DOM checks. The
+Node-based core checks require `npm ci`. Linux archive checks run separately
+with `npm run test:installer` and `tests/bundle-smoke.sh` (see its required
+trusted-input arguments); CI runs these on Linux.
+
+`npm run check` runs those independent checks first, then verifies prerequisites
+and runs every integration test and the browser smoke test. Full verification
+requires Deno 2.2.5 and Playwright Chromium. Local Node versions may be 22 or
+newer; CI enforces exactly 22.14.0. `cargo test` launches real Deno applications,
+so absent Deno is a failure, not a skipped success.
 `browser-smoke.cjs` builds on the management DOM test with a real headless
 Chromium session: it opens the private management URL, observes the app, requests
 a restart, and opens retained logs. It uses a temporary app, log directory, and
@@ -30,25 +40,8 @@ macOS 13. Configuration is not observed evidence. Until successful native runs
 are retained for both OS families, the M0 native-support acceptance gate remains
 pending.
 
-## M0/M1 evidence matrix
+## Current evidence
 
-| Gate | Current status | Command or artifact |
-| --- | --- | --- |
-| Linux static Rust checks | observed pass | `cargo fmt --check`, `cargo check`, and `cargo test --test server --no-run` on Linux x86_64/Rust 1.96.1. |
-| Complete pinned Linux check | pending | `npm run check`; this machine deliberately fails preflight because Deno 2.2.5/Chromium are absent and Node is 22.22.3. |
-| Browser origin and management tests | configured-only | CI artifact `verification-<OS>-<arch>` from `node tests/browser-smoke.cjs`; a retained passing native artifact is required. |
-| macOS guardian/crash recovery | pending | Native macOS 13 `npm run check` artifact; Linux or emulation does not substitute. |
-| Output-loss and admission paths | implemented / compile-checked | Run `cargo test` under the pinned Deno toolchain to observe subprocess paths. |
-| Workload measurements | pending | Run the 1/10/50 probe in `scripts/probe-hosted-workload.cjs` and retain its JSON; do not invent budgets. |
-| Other browsers/architectures | pending | Record native command, OS/browser identity, and retained result. |
-
-## Final local reconciliation (2026-09)
-
-Observed on this Linux workspace: `cargo fmt --check`, `cargo check`,
-`cargo test --bin paraco` (34 unit/bin tests), `tests/install-archive.sh`,
-shell syntax checks for release tooling, and `git diff --check` passed. These
-checks do not run Deno application, browser, native service-manager,
-clean-machine, workload, signing, notarization, release, or package-manager
-smoke tests. `npm run check` remains blocked before suites by absent Deno and
-the Node 22.22.3 versus required 22.14.0 mismatch. Retain a 1/10/50/noisy-output
-probe JSON and OS/tool identities before marking that workload gate observed.
+See [current status](status.md) for observed checks and remaining platform
+validation. Historical audits and milestone plans retain their original context;
+they are not current verification records.

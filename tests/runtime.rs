@@ -41,6 +41,27 @@ impl App {
         fs::write(dir.path().join("main.ts"), source).unwrap();
         fs::write(dir.path().join("paraco.json"), manifest).unwrap();
         let log_dir = tempfile::tempdir().unwrap();
+        if let Some(config) = config {
+            let contents = fs::read_to_string(config).unwrap();
+            if contents.contains("REPLACE_WITH_PARACO_IDENTITY_OUTPUT") {
+                let identity = Command::new(env!("CARGO_BIN_EXE_paraco"))
+                    .arg("--log-dir")
+                    .arg(log_dir.path().join("logs"))
+                    .arg("identity")
+                    .arg(dir.path())
+                    .output()
+                    .unwrap();
+                assert!(identity.status.success());
+                fs::write(
+                    config,
+                    contents.replace(
+                        "REPLACE_WITH_PARACO_IDENTITY_OUTPUT",
+                        std::str::from_utf8(&identity.stdout).unwrap().trim(),
+                    ),
+                )
+                .unwrap();
+            }
+        }
         let mut command = Command::new(env!("CARGO_BIN_EXE_paraco"));
         command.arg("--log-dir").arg(log_dir.path().join("logs"));
         command
@@ -385,6 +406,70 @@ fn repository_hello_example_serves_expected_response() {
     assert!(app.wait().success());
 }
 
+#[test]
+fn prepare_accepts_resolved_contained_parent_imports_and_ordinary_source_text() {
+    let deno = std::env::var_os("PATH")
+        .into_iter()
+        .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+        .map(|directory| directory.join("deno"))
+        .find(|candidate| candidate.is_file())
+        .expect("runtime integration tests require Deno on PATH")
+        .canonicalize()
+        .unwrap();
+    let source = tempfile::tempdir().unwrap();
+    let nested = source.path().join("src");
+    fs::create_dir(&nested).unwrap();
+    fs::write(
+        source.path().join("paraco.json"),
+        r#"{"name":"prepared-graph","entrypoint":"src/main.ts","capabilities":[]}"#,
+    )
+    .unwrap();
+    fs::write(
+        source.path().join("util.ts"),
+        "export const message = 'ok';",
+    )
+    .unwrap();
+    fs::write(
+        nested.join("main.ts"),
+        "// Documentation example: ../assets\nimport { message } from '../util.ts';\nexport default { fetch(){ return new Response(message); } };",
+    )
+    .unwrap();
+    let destination = tempfile::tempdir().unwrap();
+    let artifact = destination.path().join("artifact");
+    let status = Command::new(env!("CARGO_BIN_EXE_paraco"))
+        .args(["prepare", source.path().to_str().unwrap(), "--output"])
+        .arg(&artifact)
+        .arg("--deno")
+        .arg(deno)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert!(artifact.join("paraco-artifact.json").is_file());
+
+    let port = free_port();
+    let stdout = destination.path().join("stdout");
+    let stderr = destination.path().join("stderr");
+    let child = Command::new(env!("CARGO_BIN_EXE_paraco"))
+        .args(["run-prepared", artifact.to_str().unwrap(), "--port"])
+        .arg(port.to_string())
+        .stdout(File::create(&stdout).unwrap())
+        .stderr(File::create(&stderr).unwrap())
+        .stdin(Stdio::null())
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    let mut app = App {
+        child,
+        dir: destination,
+        port,
+        _log_dir: tempfile::tempdir().unwrap(),
+    };
+    app.ready();
+    assert!(app.request("/").ends_with("ok"));
+    app.interrupt();
+    assert!(app.wait().success());
+}
+
 const AI_MANIFEST: &str = r#"{"name":"test","entrypoint":"main.ts","capabilities":["ai"]}"#;
 const AI_APP: &str = r#"
 export default { async fetch(request, context) {
@@ -405,7 +490,7 @@ fn ai_capability_works_end_to_end_with_explicit_host_grant() {
         r#"{
       "credentials":{"test-key":"fake"},
       "routes":[{"selection":{"provider":"fake","model":"small"},"credential":"test-key"}],
-      "apps":{"test":{"credential_grants":["test-key"]}}
+      "apps":{"REPLACE_WITH_PARACO_IDENTITY_OUTPUT":{"credential_grants":["test-key"]}}
     }"#,
     )
     .unwrap();
@@ -462,7 +547,13 @@ fn app_without_ai_has_no_capability() {
 
 #[test]
 fn repository_ai_example_uses_runtime_default() {
-    let config = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/ai-config.json");
+    let config_dir = tempfile::tempdir().unwrap();
+    let config = config_dir.path().join("ai-config.json");
+    fs::copy(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/ai-config.json"),
+        &config,
+    )
+    .unwrap();
     let mut app = App::start_config(
         include_str!("../examples/ai/main.ts"),
         free_port(),

@@ -32,29 +32,34 @@ if [[ $cmd == rollback ]]; then
   # explicitly re-prepare if an older binary cannot read current host state.
   [[ ! -e "$root/state/format" ]] || [[ $(cat "$root/state/format") == 1 ]] || { echo 'rollback refused: newer state format requires recovery' >&2; exit 1; }
   printf 'paraco-channel-v1\n' > "$owner"
-  tmp="$active.new.$$"; ln -s "../../releases/$version" "$tmp"; mv -Tf "$tmp" "$active"
+  tmp="$active.new.$$"; ln -s "../releases/$version" "$tmp"; mv -Tf "$tmp" "$active"
   echo "rolled back $channel -> $version"; exit 0
 fi
 [[ -f $archive && $checksum =~ ^[A-Fa-f0-9]{64}$ ]] || { echo 'local archive and explicit SHA-256 are required trust inputs' >&2; exit 2; }
 [[ $(hash "$archive") == "$checksum" ]] || { echo 'archive checksum mismatch' >&2; exit 1; }
-# Reject unsafe member names before extraction. Archives must have exactly one
-# versioned top-level directory; no links or special files survive staging.
+# Reject unsafe member names before extraction. The builder owns the exact root
+# name: paraco-<version>-<target>. The installer maps that immutable bundle to
+# its versioned release slot.
 mapfile -t members < <(tar -tzf "$archive")
 ((${#members[@]} > 0 && ${#members[@]} <= 10000)) || { echo 'archive entry count rejected' >&2; exit 1; }
 declare -A seen=()
+archive_root=
 for p in "${members[@]}"; do
- [[ $p != /* && $p != *'..'* && ( $p == "paraco-$version/" || $p == "paraco-$version"/* ) ]] || { echo "unsafe archive path: $p" >&2; exit 1; }
+ [[ $p != /* && $p != *'..'* ]] || { echo "unsafe archive path: $p" >&2; exit 1; }
+ top=${p%%/*}
+ [[ $top =~ ^paraco-${version}-[A-Za-z0-9._-]+$ ]] || { echo "unsafe archive path: $p" >&2; exit 1; }
+ [[ -z $archive_root || $archive_root == "$top" ]] || { echo "archive has multiple roots" >&2; exit 1; }; archive_root=$top
  [[ -z ${seen[$p]+x} ]] || { echo "duplicate archive path: $p" >&2; exit 1; }; seen[$p]=1
 done
 stage=$(mktemp -d "$root/.stage.XXXXXX"); trap 'rm -rf "$stage"; rmdir "$lock"' EXIT
 tar -xzf "$archive" -C "$stage" --no-same-owner --no-same-permissions
-[[ ! -L "$stage/paraco-$version" ]] && ! find "$stage" -type l -o -type b -o -type c -o -type p -o -type s | grep -q . || { echo 'links or special files rejected' >&2; exit 1; }
-[[ -x "$stage/paraco-$version/bin/paraco" ]] || { echo 'archive lacks executable' >&2; exit 1; }
+[[ ! -L "$stage/$archive_root" ]] && ! find "$stage" -type l -o -type b -o -type c -o -type p -o -type s | grep -q . || { echo 'links or special files rejected' >&2; exit 1; }
+[[ -x "$stage/$archive_root/bin/paraco" && -x "$stage/$archive_root/libexec/paraco/deno" && -f "$stage/$archive_root/bundle.json" ]] || { echo 'archive lacks the Paraco bundle contract' >&2; exit 1; }
 [[ $(du -sk "$stage" | awk '{print $1}') -le 1048576 ]] || { echo 'extraction size rejected' >&2; exit 1; }
 target="$releases/$version"
 [[ ! -e $target ]] || { echo 'release version already exists (immutable)' >&2; exit 1; }
-mv "$stage/paraco-$version" "$target"
+mv "$stage/$archive_root" "$target"
 # Atomic pointer replacement. Old release remains for processes and rollback.
-tmp="$active.new.$$"; ln -s "../../releases/$version" "$tmp"; mv -Tf "$tmp" "$active"
+tmp="$active.new.$$"; ln -s "../releases/$version" "$tmp"; mv -Tf "$tmp" "$active"
 printf 'paraco-channel-v1\n' > "$owner"
 echo "activated $channel -> $version"

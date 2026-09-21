@@ -63,6 +63,7 @@ fn config() -> Config {
             ("beta".into(), "large".into()),
         ]
         .into(),
+        ..Config::default()
     }
 }
 

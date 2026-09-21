@@ -37,6 +37,14 @@ jobs:
           status=${PIPESTATUS[0]}
           printf 'npm run check exit status: %s\n' "$status" > verification-artifacts/result.txt
           exit "$status"
+      - name: Verify Linux archive composition
+        if: runner.os == 'Linux'
+        run: |
+          npm run test:installer
+          fixture_dir=$(mktemp -d)
+          trap 'rm -rf "$fixture_dir"' EXIT
+          echo 'TEST FIXTURE ONLY: not a distributable third-party notice.' > "$fixture_dir/notice"
+          bash tests/bundle-smoke.sh --deno "$(command -v deno)" --deno-notice "$fixture_dir/notice" --third-party-notice "$fixture_dir/notice" --target x86_64-unknown-linux-gnu
       - name: Retain verification environment
         if: always()
         run: |

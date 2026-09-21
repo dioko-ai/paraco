@@ -1,12 +1,19 @@
 //! Resolution of the Deno executable used by a packaged Paraco release.
 use serde::Deserialize;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct BundleMetadata {
+    paraco_version: String,
     deno_version: String,
+    target: String,
+    source_revision: String,
+    notices: Vec<String>,
+    checksums: BTreeMap<String, String>,
+    trusted_input_provenance: String,
 }
 
 pub fn command_for_host() -> Result<PathBuf, String> {
@@ -22,9 +29,11 @@ fn resolve_from_executable(executable: &Path) -> Result<PathBuf, String> {
     let release = executable.parent().and_then(Path::parent);
     let bundled = release.map(|root| root.join("libexec/paraco/deno"));
     let metadata = release.map(|root| root.join("bundle.json"));
+    // A bundle is identified by its metadata, never by the directory name of
+    // the launcher. Source installs commonly also put the binary in `bin`.
     let expected = metadata
         .as_deref()
-        .filter(|p| p.is_file())
+        .filter(|p| p.exists())
         .map(read_version)
         .transpose()?;
     if let Some(override_path) = std::env::var_os("PARACO_DENO") {
@@ -40,27 +49,55 @@ fn resolve_from_executable(executable: &Path) -> Result<PathBuf, String> {
     if let (Some(path), Some(expected)) = (bundled, expected) {
         return validate(path, &expected, "private bundled Deno");
     }
-    if executable
-        .parent()
-        .and_then(Path::file_name)
-        .is_some_and(|name| name == "bin")
-    {
-        return Err(
-            "packaged Paraco is missing valid bundle.json; refusing PATH Deno fallback".into(),
-        );
+    resolve_path_runtime()
+}
+
+fn resolve_path_runtime() -> Result<PathBuf, String> {
+    let path =
+        std::env::var_os("PATH").ok_or("Deno was not found on PATH; install Deno and try again")?;
+    resolve_path_runtime_from(&path)
+}
+
+fn resolve_path_runtime_from(path: &std::ffi::OsStr) -> Result<PathBuf, String> {
+    for directory in std::env::split_paths(path) {
+        let candidate = directory.join("deno");
+        if executable_file(&candidate) {
+            return candidate.canonicalize().map_err(|e| {
+                format!(
+                    "cannot resolve Deno found on PATH at {}: {e}",
+                    candidate.display()
+                )
+            });
+        }
     }
-    Ok(PathBuf::from("deno")) // source/development builds only
+    Err("Deno was not found on PATH; install Deno and try again".into())
 }
 
 fn read_version(path: &Path) -> Result<String, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("cannot read release metadata: {e}"))?;
     let metadata: BundleMetadata =
         serde_json::from_slice(&bytes).map_err(|e| format!("invalid release metadata: {e}"))?;
+    // Deserialize the whole release contract. The fields besides the Deno pin
+    // are release provenance, but accepting only a hand-written subset lets
+    // builder and launcher silently drift.
+    if metadata.paraco_version.is_empty()
+        || metadata.target.is_empty()
+        || metadata.source_revision.is_empty()
+        || metadata.notices.is_empty()
+        || !metadata.checksums.contains_key("bin/paraco")
+        || !metadata.checksums.contains_key("libexec/paraco/deno")
+        || metadata.trusted_input_provenance.is_empty()
+    {
+        return Err("release metadata is incomplete".into());
+    }
     parse_version(&metadata.deno_version)
         .ok_or_else(|| "release metadata has an invalid Deno version".to_owned())
 }
 fn validate(path: PathBuf, expected: &str, description: &str) -> Result<PathBuf, String> {
-    if !path.is_file() {
+    let path = path
+        .canonicalize()
+        .map_err(|e| format!("cannot resolve {description}: {e}"))?;
+    if !executable_file(&path) {
         return Err(format!(
             "{description} is not an executable file: {}",
             path.display()
@@ -78,6 +115,7 @@ fn validate(path: PathBuf, expected: &str, description: &str) -> Result<PathBuf,
                 .lines()
                 .next()
                 .and_then(|line| line.strip_prefix("deno "))
+                .and_then(|version| version.split_whitespace().next())
                 .and_then(parse_version)
         })
         .flatten()
@@ -88,6 +126,22 @@ fn validate(path: PathBuf, expected: &str, description: &str) -> Result<PathBuf,
         ));
     }
     Ok(path)
+}
+
+fn executable_file(path: &Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        path.metadata()
+            .is_ok_and(|metadata| metadata.permissions().mode() & 0o111 != 0)
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
 }
 fn parse_version(value: &str) -> Option<String> {
     let parts: Vec<_> = value.split('.').collect();
@@ -116,7 +170,7 @@ mod tests {
         let lib = release.join("libexec/paraco");
         std::fs::create_dir_all(&bin).unwrap();
         std::fs::create_dir_all(&lib).unwrap();
-        std::fs::write(release.join("bundle.json"), r#"{"denoVersion":"1.2.3"}"#).unwrap();
+        std::fs::write(release.join("bundle.json"), metadata("1.2.3")).unwrap();
         std::fs::write(bin.join("paraco"), "stub").unwrap();
         fake_deno(&lib.join("deno"), "1.2.3");
         let launcher = root.path().join("launcher");
@@ -133,5 +187,23 @@ mod tests {
         let deno = root.path().join("deno");
         fake_deno(&deno, "1.2.2");
         assert!(validate(deno, "1.2.3", "test").is_err());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn source_install_in_bin_resolves_path_to_an_absolute_runtime() {
+        let root = tempfile::tempdir().unwrap();
+        let bin = root.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let deno = bin.join("deno");
+        fake_deno(&deno, "1.2.3");
+        let result = resolve_path_runtime_from(bin.as_os_str()).unwrap();
+        assert_eq!(result, deno.canonicalize().unwrap());
+    }
+
+    fn metadata(version: &str) -> String {
+        format!(
+            r#"{{"paracoVersion":"0.1.0","denoVersion":"{version}","target":"x86_64-unknown-linux-gnu","sourceRevision":"abc","notices":["notices/LICENSE"],"checksums":{{"bin/paraco":"x","libexec/paraco/deno":"y"}},"trustedInputProvenance":"test"}}"#
+        )
     }
 }

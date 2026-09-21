@@ -75,11 +75,27 @@ async function freePort() {
       const origins = await page.locator('a[href^="http://app-"]').evaluateAll(links => links.map(link => link.href));
       assert.equal(origins.length, 2);
       assert.notEqual(new URL(origins[0]).origin, new URL(origins[1]).origin);
-      await page.goto(origins[0]);
-      await page.evaluate(() => { localStorage.setItem("isolation", "one"); document.cookie = "hostonly=one"; });
-      await page.goto(origins[1]);
-      assert.equal(await page.evaluate(() => localStorage.getItem("isolation")), null);
-      assert.doesNotMatch(await page.evaluate(() => document.cookie), /hostonly=one/);
+      const [first] = await Promise.all([
+        page.context().waitForEvent('page'),
+        page.locator('a[href^="http://app-"]').first().click()
+      ]);
+      await first.waitForLoadState();
+      assert.equal(new URL(first.url()).origin, new URL(origins[0]).origin);
+      await first.getByRole('heading', { name: 'hello' }).waitFor({ timeout });
+      await first.evaluate(() => { localStorage.setItem("isolation", "one"); document.cookie = "hostonly=one"; });
+      const [second] = await Promise.all([
+        page.context().waitForEvent('page'),
+        page.locator('a[href^="http://app-"]').nth(1).click()
+      ]);
+      await second.waitForLoadState();
+      assert.equal(new URL(second.url()).origin, new URL(origins[1]).origin);
+      await second.getByRole('heading', { name: 'other' }).waitFor({ timeout });
+      assert.equal(await second.evaluate(() => localStorage.getItem("isolation")), null);
+      assert.doesNotMatch(await second.evaluate(() => document.cookie), /hostonly=one/);
+      const gateway = `http://127.0.0.1:${new URL(origins[0]).port}/`;
+      await page.goto(gateway);
+      await page.locator('a[href^="http://app-"]').first().click();
+      await page.getByRole('heading', { name: 'hello' }).waitFor({ timeout });
       await page.goto(url);
       await page.getByRole("button", { name: "logs hello" }).click();
       await page.getByText("Logs: hello").waitFor({ timeout });

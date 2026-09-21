@@ -28,18 +28,19 @@ cargo run -- serve --config ./examples/server.json
 Open <http://127.0.0.1:3000/> for the dashboard. The example hosts:
 
 - Hello and Fake AI at the distinct canonical `.localhost` URLs shown by the
-  dashboard (the old `/apps/<name>/` links redirect only for GET/HEAD).
+  dashboard (the old `/apps/<name>/` links redirect only for GET/HEAD). AI calls
+  are denied until you configure the hosted deployment grant described below.
 
 Use `--port 8787` for another loopback port. This runs in the foreground;
 Ctrl+C stops all apps. Configuration paths resolve relative to the configuration
-file, and the manifest name determines each app's URL. The dashboard refreshes
-app statuses every five seconds. To start, stop, or restart apps in the browser,
+file, and a host-owned deployment ID determines each app's URL. The dashboard
+refreshes app statuses every five seconds. To start, stop, or restart apps in the browser,
 open the separate `management dashboard` URL printed in the terminal. That page
 refreshes status every two seconds; its private access link changes each server session.
 
 See [local hosting](docs/local-hosting.md) for the configuration, app base-path
-contract, and limits. [TODO.md](TODO.md) tracks completed work and the next
-increment: background service operation.
+contract, and limits. [Current status](docs/status.md) records implementation
+and verification evidence.
 
 ## Manage running apps
 
@@ -57,7 +58,7 @@ Commands print JSON status and acknowledge lifecycle requests immediately. Use
 3000. CLI management uses a private local socket. Browser controls use the separate
 authorized management dashboard; the gateway dashboard stays read-only.
 See [local lifecycle](docs/local-lifecycle.md) for state, security, and recovery
-semantics. Desired state is currently kept only for the running server session.
+semantics. Deployment identity and desired state persist across server sessions.
 On Unix, app guardians clean up Deno after a runtime crash, and restarting `serve`
 waits for cleanup before safely recovering its stale control socket.
 
@@ -140,7 +141,7 @@ fresh-checkout checks, browser-smoke setup, and the distinction between configur
 CI and observed native evidence.
 
 See [installation and release planning](docs/installation-and-release.md) for
-the future bundled runtime, CLI installers, and platform packaging plan.
+the archive bundle workflow, CLI installer, and platform packaging plan.
 
 ## Current scope
 
@@ -148,7 +149,7 @@ The runtime supports foreground single-app and multi-app hosting, authenticated
 browser lifecycle controls, Unix CLI lifecycle controls, and a local fake AI
 capability, plus bounded persistent logs and CLI log queries. Authenticated dashboard logs and opt-in bounded automatic recovery are available.
 Hosted apps use distinct canonical `.localhost` browser origins. They cannot use
-shared-domain cookies; cross-origin browser requests are rejected, while the
+shared-domain cookies; cross-origin subresource requests are rejected, while the
 separate management origin remains authenticated. Output-loss counters in the
 management log view distinguish storage and console loss. Hosted admission is
 bounded (50 apps, 64 gateway responses, 8 per app, and 4 log reads); these are
@@ -164,10 +165,23 @@ cloud account nor paid AI; the fake provider remains available.
 
 ## Try the local AI capability
 
+First allocate the app's stable host identity:
+
 ```sh
-cargo run -- run ./examples/ai --ai-config ./examples/ai-config.json
+cargo run -- identity ./examples/ai
+```
+
+Copy `examples/ai-config.json` to a host-owned location outside the app directory
+and replace `REPLACE_WITH_PARACO_IDENTITY_OUTPUT` with that output. Then:
+
+```sh
+cargo run -- run ./examples/ai --ai-config /path/to/ai-config.json
 curl http://127.0.0.1:3000
 ```
+
+Use the same `--log-dir` for identity discovery and launch if you override it.
+Hosted deployments have separate IDs; discover them with `paraco status` after
+starting the server, configure their grants, and restart the affected app.
 
 The response contains `Fake AI response` and the selected provider/model. This
 example needs no account, provider secret, or external network request. The app

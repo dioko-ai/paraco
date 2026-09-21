@@ -7,7 +7,7 @@ while [ "$#" -gt 0 ]; do case "$1" in --deno) DENO=${2:-}; shift 2;; --deno-noti
 [ -n "$DENO" ] && [ -n "$DENO_NOTICE" ] && [ -n "$THIRD_PARTY_NOTICE" ] && [ -n "$TARGET" ] && [ -n "$OUTPUT" ] || usage
 [ -x "$DENO" ] || { echo "trusted Deno input is not executable" >&2; exit 1; }
 [ -s "$DENO_NOTICE" ] && [ -s "$THIRD_PARTY_NOTICE" ] || { echo "complete Deno and Rust third-party notices are required" >&2; exit 1; }
-DENO_VERSION=$($DENO --version | sed -n '1s/^deno //p')
+DENO_VERSION=$($DENO --version | sed -n '1s/^deno \([0-9][0-9.]*\).*/\1/p')
 printf '%s' "$DENO_VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || { echo "invalid Deno version" >&2; exit 1; }
 REVISION=$(git rev-parse --verify HEAD)
 VERSION=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)

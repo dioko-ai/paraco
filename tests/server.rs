@@ -137,11 +137,13 @@ impl Server {
         let (host, path) = path
             .strip_prefix("/apps/")
             .and_then(|tail| tail.split_once('/'))
-            .map(|(name, suffix)| {
-                (
-                    app_host(name, &self.dir.path().join(name), self.port),
-                    format!("/{suffix}"),
-                )
+            .and_then(|(name, suffix)| {
+                self.maybe_app_url(name).map(|url| {
+                    (
+                        url.strip_prefix("http://").unwrap().to_owned(),
+                        format!("/{suffix}"),
+                    )
+                })
             })
             .unwrap_or_else(|| (format!("127.0.0.1:{}", self.port), path.to_owned()));
         let mut stream = TcpStream::connect(("127.0.0.1", self.port)).unwrap();
@@ -248,6 +250,25 @@ impl Server {
             token.into(),
         )
     }
+    fn app_url(&self, name: &str) -> String {
+        self.maybe_app_url(name).unwrap()
+    }
+    fn maybe_app_url(&self, name: &str) -> Option<String> {
+        let (port, token) = self.management();
+        let headers = format!(
+            "Authorization: Bearer {token}\r\nOrigin: http://127.0.0.1:{port}\r\nSec-Fetch-Site: same-origin\r\n"
+        );
+        let response = self.browser_request("GET", "/api/apps", &headers, "");
+        let body = response.split_once("\r\n\r\n").unwrap().1;
+        let apps: serde_json::Value = serde_json::from_str(body).unwrap();
+        apps["apps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|app| app["name"] == name)
+            .and_then(|app| app["url"].as_str())
+            .map(str::to_owned)
+    }
     fn browser_request(&self, method: &str, path: &str, headers: &str, body: &str) -> String {
         let port = self.management().0;
         let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
@@ -281,13 +302,6 @@ impl Server {
         assert!(self.wait_exit().success(), "{}", self.logs());
         TcpListener::bind(("127.0.0.1", self.port)).expect("gateway port not released");
     }
-}
-fn app_host(name: &str, root: &Path, port: u16) -> String {
-    let mut hash = 0xcbf29ce484222325u64;
-    for byte in format!("{}:{name}:{port}", root.display()).bytes() {
-        hash = (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3);
-    }
-    format!("app-{hash:016x}.localhost:{port}")
 }
 impl Drop for Server {
     fn drop(&mut self) {
@@ -323,12 +337,12 @@ fn routes_two_apps_assets_bodies_queries_and_redirects() {
     assert_eq!(two["base"], "/");
     let root = server.wait_for("/", "2 of 2 apps running");
     assert!(root.contains(&format!(
-        "href=\"http://{}/\"",
-        app_host("one", &server.dir.path().join("one"), server.port)
+        "href=\"http://{}\"",
+        server.app_url("one").strip_prefix("http://").unwrap()
     )));
     assert!(root.contains(&format!(
-        "href=\"http://{}/\"",
-        app_host("two", &server.dir.path().join("two"), server.port)
+        "href=\"http://{}\"",
+        server.app_url("two").strip_prefix("http://").unwrap()
     )));
     assert!(root.contains("no-store"));
     assert!(
@@ -347,7 +361,7 @@ fn routes_two_apps_assets_bodies_queries_and_redirects() {
     assert_eq!(value["method"], "POST");
     assert_eq!(
         value["host"],
-        app_host("one", &server.dir.path().join("one"), server.port)
+        server.app_url("one").strip_prefix("http://").unwrap()
     );
     assert_eq!(value["header"], "preserved");
     assert!(value["forwarded"].is_null());
@@ -365,14 +379,15 @@ fn routes_two_apps_assets_bodies_queries_and_redirects() {
             .contains("location: next")
     );
     let slash = server.request("POST", "/apps/one?q=yes", "body");
-    assert!(slash.contains("404"));
+    assert!(slash.contains("405"));
     for path in [
         "/missing",
         "/apps/missing/",
         "/apps/one-more/",
         "/apps/one/missing",
     ] {
-        assert!(server.request("GET", path, "").contains("404"));
+        let response = server.request("GET", path, "");
+        assert!(response.contains("404"), "{path}: {response}");
     }
     assert!(server.request("POST", "/", "").contains("405"));
     assert!(server.request("HEAD", "/", "").ends_with("\r\n\r\n"));
@@ -455,10 +470,35 @@ fn empty_dashboard_and_repository_ai_example() {
     assert!(empty.request("GET", "/", "").contains("No apps configured"));
     empty.stop(libc::SIGINT);
     let dir = tempfile::tempdir().unwrap();
-    let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/server.json");
+    let examples = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
+    let config = dir.path().join("server.json");
+    fs::write(
+        &config,
+        serde_json::json!({"apps": [
+            {"path": examples.join("hello")},
+            {"path": examples.join("ai"), "aiConfig": "ai.json"}
+        ]})
+        .to_string(),
+    )
+    .unwrap();
+    let ai_config = dir.path().join("ai.json");
+    fs::write(&ai_config, r#"{"credentials":{"demo-grant":"fake"},"routes":[{"selection":{"provider":"fake","model":"small"},"credential":"demo-grant"}],"apps":{},"default":{"provider":"fake","model":"small"},"provider_default_models":{"fake":"small"}}"#).unwrap();
     let mut server = Server::start(dir, &config, free_port());
     server.ready();
+    server.state("ai-example", "running");
     server.wait_for("/apps/hello/", "Hello from Paraco");
+    assert!(
+        server
+            .request("GET", "/apps/ai-example/", "")
+            .contains("500")
+    );
+    let deployment_id = server.control("status", Some("ai-example"))[0]["deployment_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    fs::write(&ai_config, format!(r#"{{"credentials":{{"demo-grant":"fake"}},"routes":[{{"selection":{{"provider":"fake","model":"small"}},"credential":"demo-grant"}}],"apps":{{"{deployment_id}":{{"credential_grants":["demo-grant"]}}}},"default":{{"provider":"fake","model":"small"}},"provider_default_models":{{"fake":"small"}}}}"#)).unwrap();
+    server.control("restart", Some("ai-example"));
+    server.state("ai-example", "running");
     server.wait_for("/apps/ai-example/", "Fake AI response");
     server.wait_for("/", "2 of 2 apps running");
     server.stop(libc::SIGINT);
@@ -494,7 +534,11 @@ fn gateway_rejects_foreign_hosts_upgrades_and_oversized_bodies() {
     for (host, extra, status) in [
         ("foreign.example".to_string(), "", "400"),
         (
-            format!("127.0.0.1:{}", server.port),
+            server
+                .app_url("one")
+                .strip_prefix("http://")
+                .unwrap()
+                .to_owned(),
             "Upgrade: websocket\r\n",
             "501",
         ),
@@ -711,11 +755,22 @@ export default { async fetch(_request, context) {
 "#,
     )
     .unwrap();
-    fs::write(dir.path().join("ai.json"), r#"{"credentials":{"fake":"fake"},"routes":[{"selection":{"provider":"fake","model":"test"},"credential":"fake"}],"apps":{"ai":{"credential_grants":["fake"]}},"default":{"provider":"fake","model":"test"}}"#).unwrap();
+    fs::write(dir.path().join("ai.json"), r#"{"credentials":{"fake":"fake"},"routes":[{"selection":{"provider":"fake","model":"test"},"credential":"fake"}],"apps":{},"default":{"provider":"fake","model":"test"}}"#).unwrap();
     let config = dir.path().join("server.json");
     fs::write(&config, r#"{"apps":[{"path":"ai","aiConfig":"ai.json"}]}"#).unwrap();
     let mut server = Server::start(dir, &config, free_port());
     server.ready();
+    server.state("ai", "running");
+    // A configured route alone is insufficient. Discover the host deployment
+    // identity, grant it explicitly, then restart into the new immutable config.
+    assert!(server.request("GET", "/apps/ai/", "").contains("500"));
+    let deployment_id = server.control("status", Some("ai"))[0]["deployment_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    fs::write(server.dir.path().join("ai.json"), format!(r#"{{"credentials":{{"fake":"fake"}},"routes":[{{"selection":{{"provider":"fake","model":"test"}},"credential":"fake"}}],"apps":{{"{deployment_id}":{{"credential_grants":["fake"]}}}},"default":{{"provider":"fake","model":"test"}}}}"#)).unwrap();
+    server.control("restart", Some("ai"));
+    server.state("ai", "running");
     let first = server.wait_for("/apps/ai/", "Fake AI response");
     let first: serde_json::Value =
         serde_json::from_str(first.split_once("\r\n\r\n").unwrap().1).unwrap();
@@ -729,7 +784,11 @@ export default { async fetch(_request, context) {
     server.state("ai", "stopped");
     #[cfg(target_os = "linux")]
     {
-        assert_eq!(ports.len(), 1, "expected one host-owned AI listener");
+        assert_eq!(
+            ports.len(),
+            2,
+            "expected private AI and OpenAI-compatible listeners"
+        );
         assert!(server.capability_ports().is_empty());
         for port in ports {
             TcpListener::bind(("127.0.0.1", port)).expect("AI listener not released");
@@ -937,6 +996,13 @@ fn browser_management_controls_apps_and_releases_listener() {
     assert!(script.contains("text/javascript"));
     let status = server.browser_request("GET", "/api/apps", &headers, "");
     assert!(status.contains("\"desired\":\"running\""), "{status}");
+    let apps: serde_json::Value =
+        serde_json::from_str(status.split_once("\r\n\r\n").unwrap().1).unwrap();
+    assert!(apps["apps"].as_array().unwrap().iter().all(|app| {
+        app["deployment_id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with('d'))
+    }));
     for (action, state) in [
         ("stop", "stopped"),
         ("start", "running"),
@@ -1037,12 +1103,12 @@ fn persistent_logs_identify_apps_and_launches_and_survive_server_exit() {
         ("broken", "throw new Error('startup-failure-detail');"),
     ]);
     server.ready();
-    let first = server.inspect("hello")["pid"].as_u64().unwrap();
+    server.inspect("hello");
     server.state("broken", "failed");
     server.request("GET", "/apps/hello/throw", "");
     server.control("restart", Some("hello"));
     server.state("hello", "running");
-    let second = server.inspect("hello")["pid"].as_u64().unwrap();
+    server.inspect("hello");
     server.stop(libc::SIGTERM);
     let output = Command::new(env!("CARGO_BIN_EXE_paraco"))
         .args(["logs", "hello", "--tail", "100", "--log-dir"])
@@ -1079,13 +1145,15 @@ fn persistent_logs_identify_apps_and_launches_and_survive_server_exit() {
             .iter()
             .any(|r| r["message"].as_str().unwrap().contains("request failure"))
     );
-    let run_id = |pid| records.iter().find(|r| r["pid"] == pid).unwrap()["run_id"].clone();
-    assert_ne!(run_id(first), run_id(second));
+    let run_ids: std::collections::BTreeSet<_> = records
+        .iter()
+        .filter_map(|record| record["run_id"].as_str())
+        .collect();
     assert!(
-        records
-            .iter()
-            .any(|r| r["event"] == "stopped" && r["pid"] == second)
+        run_ids.len() >= 2,
+        "expected records from both launches: {records:?}"
     );
+    assert!(records.iter().any(|r| r["event"] == "stopped"));
     let raw = fs::read_to_string(server.dir.path().join("logs/current.jsonl")).unwrap();
     assert!(raw.contains("startup-failure-detail"));
     assert!(!raw.contains("PARACO_READY:"));

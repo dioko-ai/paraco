@@ -5,6 +5,7 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::sync::OnceLock;
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicUsize, Ordering},
@@ -342,8 +343,7 @@ impl FakeProxy {
 
 /// A real, narrowly scoped OpenAI-compatible provider. It shares FakeProxy's
 /// authorization path, so a rejected caller cannot cause credential reads or
-/// network traffic. This is intentionally non-streaming; streaming is a later
-/// capability.
+/// network traffic. Completion and normalized SSE streaming share its limits.
 pub struct OpenAiProxy {
     policy: FakeProxy,
     config: Config,
@@ -353,8 +353,30 @@ pub struct OpenAiProxy {
     queued: AtomicUsize,
 }
 
+// This is an explicit host operating bound, shared even when an administrator
+// uses more than one AI configuration file. Per-service `Limits` can narrow it
+// further but cannot mint a second host-wide provider budget.
+static HOST_PROVIDER_SEMAPHORE: OnceLock<Arc<Semaphore>> = OnceLock::new();
+
+fn host_provider_semaphore() -> Arc<Semaphore> {
+    HOST_PROVIDER_SEMAPHORE
+        .get_or_init(|| Arc::new(Semaphore::new(Limits::default().global_concurrency)))
+        .clone()
+}
+
 impl OpenAiProxy {
     pub fn new(config: Config) -> Result<Self, Error> {
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
+            .build()
+            .map_err(|_| Error::InvalidProvider)?;
+        Self::with_client(config, client)
+    }
+
+    /// Construct the provider with a host-supplied HTTP client. Application
+    /// configuration never controls the client, proxy policy, or trust roots.
+    pub fn with_client(config: Config, client: reqwest::Client) -> Result<Self, Error> {
         for (provider, endpoint) in &config.provider_endpoints {
             if provider.trim().is_empty() || !valid_endpoint(endpoint) {
                 return Err(Error::InvalidProvider);
@@ -366,11 +388,6 @@ impl OpenAiProxy {
             }
         }
         let policy = FakeProxy::new(config.clone())?;
-        let client = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .no_proxy()
-            .build()
-            .map_err(|_| Error::InvalidProvider)?;
         Ok(Self {
             global: Arc::new(Semaphore::new(config.limits.global_concurrency)),
             policy,
@@ -383,6 +400,7 @@ impl OpenAiProxy {
 
     /// The caller is a host-assigned deployment ID, not an app-supplied name.
     pub async fn complete(&self, deployment: &str, request: &Request) -> Result<Response, Error> {
+        let deadline = std::time::Instant::now() + self.config.limits.timeout;
         // Authorization is deliberately first; this preserves the no-network
         // guarantee for denied routes.
         let selected = self.policy.complete(deployment, request)?;
@@ -409,7 +427,8 @@ impl OpenAiProxy {
             .ok_or(Error::CredentialUnavailable)?;
         let secret = read_secret(secret_path)?;
         let _queue = QueueSlot::acquire(&self.queued, self.config.limits.queued_requests)?;
-        let global = acquire(self.global.clone(), self.config.limits.timeout).await?;
+        let host_global = acquire(host_provider_semaphore(), deadline).await?;
+        let global = acquire(self.global.clone(), deadline).await?;
         let deployment_semaphore = {
             let mut deployments = self.deployments.lock().map_err(|_| Error::Busy)?;
             deployments
@@ -421,15 +440,15 @@ impl OpenAiProxy {
                 })
                 .clone()
         };
-        let per_deployment = acquire(deployment_semaphore, self.config.limits.timeout).await?;
+        let per_deployment = acquire(deployment_semaphore, deadline).await?;
         let text = self
             .request(
                 endpoint,
                 &route.selection.model,
                 &request.prompt,
                 &secret,
-                global,
-                per_deployment,
+                (host_global, global, per_deployment),
+                deadline,
             )
             .await?;
         Ok(Response {
@@ -450,6 +469,7 @@ impl OpenAiProxy {
     where
         F: FnMut(&str) -> Result<(), Error>,
     {
+        let deadline = std::time::Instant::now() + self.config.limits.timeout;
         let selected = self.policy.complete(deployment, request)?;
         let route =
             self.config
@@ -474,7 +494,8 @@ impl OpenAiProxy {
                 .ok_or(Error::CredentialUnavailable)?,
         )?;
         let _queue = QueueSlot::acquire(&self.queued, self.config.limits.queued_requests)?;
-        let _global = acquire(self.global.clone(), self.config.limits.timeout).await?;
+        let _host_global = acquire(host_provider_semaphore(), deadline).await?;
+        let _global = acquire(self.global.clone(), deadline).await?;
         let deployment_semaphore = self
             .deployments
             .lock()
@@ -486,9 +507,9 @@ impl OpenAiProxy {
                 ))
             })
             .clone();
-        let _deployment = acquire(deployment_semaphore, self.config.limits.timeout).await?;
+        let _deployment = acquire(deployment_semaphore, deadline).await?;
         let maximum = self.config.limits.response_bytes;
-        tokio::time::timeout(self.config.limits.timeout, async {
+        tokio::time::timeout(remaining(deadline)?, async {
             let response = self.client.post(endpoint).bearer_auth(secret).json(&serde_json::json!({
                 "model": route.selection.model, "messages": [{"role":"user", "content": request.prompt}], "stream": true
             })).send().await.map_err(|_| Error::ProviderFailed)?;
@@ -511,10 +532,14 @@ impl OpenAiProxy {
         model: &str,
         prompt: &str,
         secret: &str,
-        _global: OwnedSemaphorePermit,
-        _per_deployment: OwnedSemaphorePermit,
+        _permits: (
+            OwnedSemaphorePermit,
+            OwnedSemaphorePermit,
+            OwnedSemaphorePermit,
+        ),
+        deadline: std::time::Instant,
     ) -> Result<String, Error> {
-        let body = tokio::time::timeout(self.config.limits.timeout, async {
+        let body = tokio::time::timeout(remaining(deadline)?, async {
             let response = self
                 .client
                 .post(endpoint)
@@ -607,12 +632,29 @@ impl Drop for QueueSlot<'_> {
 
 async fn acquire(
     semaphore: Arc<Semaphore>,
-    timeout: std::time::Duration,
+    deadline: std::time::Instant,
 ) -> Result<OwnedSemaphorePermit, Error> {
-    tokio::time::timeout(timeout, semaphore.acquire_owned())
-        .await
-        .map_err(|_| Error::Busy)?
-        .map_err(|_| Error::Busy)
+    tokio::time::timeout(
+        remaining(deadline).map_err(|_| Error::Busy)?,
+        semaphore.acquire_owned(),
+    )
+    .await
+    .map_err(|_| Error::Busy)?
+    .map_err(|_| Error::Busy)
+}
+
+fn remaining(deadline: std::time::Instant) -> Result<std::time::Duration, Error> {
+    deadline
+        .checked_duration_since(std::time::Instant::now())
+        .ok_or(Error::ProviderFailed)
+}
+
+fn fake_complete(route: &Route, _request: &Request) -> Response {
+    // Do not echo prompts, credential identifiers, or any host configuration.
+    Response {
+        selection: route.selection.clone(),
+        text: "Fake AI response".into(),
+    }
 }
 
 #[cfg(test)]
@@ -742,13 +784,5 @@ mod tests {
             )
             .unwrap();
         assert!(decoder.finish().is_err());
-    }
-}
-
-fn fake_complete(route: &Route, _request: &Request) -> Response {
-    // Do not echo prompts, credential identifiers, or any host configuration.
-    Response {
-        selection: route.selection.clone(),
-        text: "Fake AI response".into(),
     }
 }

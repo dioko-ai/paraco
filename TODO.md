@@ -83,7 +83,9 @@ is recorded below without declaring an entire milestone complete.
 - [x] Implement the documented bounded loopback OpenAI-compatible HTTP subset.
 - [x] Implement the bounded provider/HTTP SSE streaming foundation.
 - [x] Add a real-provider adapter and host-owned credential-file handling.
-- [x] Add bounded deployment-scoped state groundwork (not yet app-exposed).
+- [x] Persist host deployment identity and desired state.
+- [ ] Add app storage only with a concrete app-facing use case; unused storage
+      scaffolding was removed during the 2026-09-21 audit repair.
 - [x] Define deferred bounded scheduling, notifications, and health increments.
 - [ ] Verify Deno SDK streaming, provider saturation/cancellation, and native
       end-to-end HTTP behavior with deterministic fixtures.
