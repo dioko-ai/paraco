@@ -41,3 +41,14 @@ pending.
 | Output-loss and admission paths | implemented / compile-checked | Run `cargo test` under the pinned Deno toolchain to observe subprocess paths. |
 | Workload measurements | pending | Run the 1/10/50 probe in `scripts/probe-hosted-workload.cjs` and retain its JSON; do not invent budgets. |
 | Other browsers/architectures | pending | Record native command, OS/browser identity, and retained result. |
+
+## Final local reconciliation (2026-09)
+
+Observed on this Linux workspace: `cargo fmt --check`, `cargo check`,
+`cargo test --bin paraco` (34 unit/bin tests), `tests/install-archive.sh`,
+shell syntax checks for release tooling, and `git diff --check` passed. These
+checks do not run Deno application, browser, native service-manager,
+clean-machine, workload, signing, notarization, release, or package-manager
+smoke tests. `npm run check` remains blocked before suites by absent Deno and
+the Node 22.22.3 versus required 22.14.0 mismatch. Retain a 1/10/50/noisy-output
+probe JSON and OS/tool identities before marking that workload gate observed.

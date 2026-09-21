@@ -132,13 +132,22 @@ fn supervise() -> Result<i32, String> {
     let host_path = temporary.path().join("paraco-deno-host.ts");
     std::fs::write(&host_path, include_str!("../runtime/deno_host.ts"))
         .map_err(|e| format!("cannot write Deno host adapter: {e}"))?;
+    let deno = std::env::var_os("PARACO_GUARDIAN_DENO")
+        .map(std::path::PathBuf::from)
+        .ok_or("missing pinned guardian Deno runtime")?;
+    if !deno.is_absolute() || !deno.is_file() {
+        return Err("invalid pinned guardian Deno runtime".into());
+    }
+    let cache = std::env::var_os("PARACO_GUARDIAN_DENO_DIR")
+        .map(std::path::PathBuf::from)
+        .ok_or("missing pinned guardian Deno cache")?;
     let mut child = AppChild(
-        Command::new("deno")
+        Command::new(deno)
             .args(deno_options)
             .arg(&host_path)
             .args(adapter_args)
             .env_remove("TMPDIR")
-            .env("DENO_DIR", temporary.path().join("deno-cache"))
+            .env("DENO_DIR", cache)
             .stdin(Stdio::piped())
             .spawn()
             .map_err(|error| {

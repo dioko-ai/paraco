@@ -1,4 +1,4 @@
-use crate::{control, logs, manifest, runner};
+use crate::{control, logs, manifest, runner, state};
 use futures_util::StreamExt;
 mod management;
 use axum::{
@@ -13,7 +13,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
     sync::{
-        Arc, RwLock,
+        Arc, Mutex, RwLock,
         atomic::{AtomicBool, Ordering},
     },
     thread,
@@ -97,6 +97,7 @@ enum DesiredState {
 }
 
 struct AppRecord {
+    deployment_id: String,
     root: PathBuf,
     desired: DesiredState,
     state: AppState,
@@ -173,6 +174,11 @@ pub fn serve(config: &Path, port: u16, log_dir: &Path) -> Result<(), String> {
         return Err("port must be from 1 through 65535".into());
     }
     let apps = load(config)?;
+    let state_root = log_dir.with_file_name("state");
+    let mut durable = state::Store::open(&state_root)?;
+    for app in &apps {
+        durable.install(&app.app.name)?;
+    }
     let store = logs::Store::open(log_dir)?;
     for prepared in &apps {
         store.outside(&prepared.app.root)?;
@@ -183,7 +189,7 @@ pub fn serve(config: &Path, port: u16, log_dir: &Path) -> Result<(), String> {
         .enable_all()
         .build()
         .map_err(|e| e.to_string())?;
-    let result = runtime.block_on(host(apps, port, stop, store));
+    let result = runtime.block_on(host(apps, port, stop, store, durable));
     // spawn_blocking work is intentionally bounded but may be waiting on a
     // filesystem. Never let it turn process shutdown into an unbounded wait.
     runtime.shutdown_timeout(Duration::from_secs(2));
@@ -195,28 +201,34 @@ async fn host(
     port: u16,
     stop: Arc<AtomicBool>,
     store: logs::Store,
+    durable: state::Store,
 ) -> Result<(), String> {
     // Bind the gateway before launching apps: an occupied public port starts none.
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
         .await
         .map_err(|e| format!("cannot bind gateway: {e}"))?;
-    let inventory: Inventory = Arc::new(RwLock::new(
-        apps.iter()
-            .map(|a| {
-                (
-                    a.app.name.clone(),
-                    AppRecord {
-                        root: a.app.root.clone(),
-                        desired: DesiredState::Running,
-                        state: AppState::Starting,
-                        generation: 0,
-                        cancel: Arc::new(AtomicBool::new(false)),
-                        admission: Arc::new(Semaphore::new(8)),
-                    },
-                )
-            })
-            .collect(),
-    ));
+    let durable = Arc::new(Mutex::new(durable));
+    let mut initial = BTreeMap::new();
+    for prepared in &apps {
+        let deployment = durable.lock().unwrap().install(&prepared.app.name)?;
+        initial.insert(
+            prepared.app.name.clone(),
+            AppRecord {
+                deployment_id: deployment.id,
+                root: prepared.app.root.clone(),
+                desired: if deployment.desired_running {
+                    DesiredState::Running
+                } else {
+                    DesiredState::Stopped
+                },
+                state: AppState::Starting,
+                generation: 0,
+                cancel: Arc::new(AtomicBool::new(false)),
+                admission: Arc::new(Semaphore::new(8)),
+            },
+        );
+    }
+    let inventory: Inventory = Arc::new(RwLock::new(initial));
     let client = reqwest::Client::builder()
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
@@ -231,16 +243,27 @@ async fn host(
     };
     // Bind management before starting children; a conflicting endpoint starts none.
     let control_apps = inventory.clone();
-    let control = control::Server::start(port, move |command| manage(&control_apps, command))?;
+    let control_durable = durable.clone();
+    let control = control::Server::start(port, move |command| {
+        manage(&control_apps, &control_durable, command)
+    })?;
     let (management_listener, management_router, management_url) =
-        management::bind(inventory.clone(), port, store.clone()).await?;
+        management::bind(inventory.clone(), durable.clone(), port, store.clone()).await?;
+    let state_lease = durable.lock().unwrap().guardian_lease()?;
     for prepared in apps {
         let states = inventory.clone();
+        let state_lease = state_lease.try_clone().map_err(|e| e.to_string())?;
         let app_stop = stop.clone();
         let app_store = store.clone();
-        let lease = control.lease();
         supervisors.threads.push(thread::spawn(move || {
-            supervise(prepared, states, app_stop, app_store, port, lease);
+            supervise(
+                prepared,
+                states,
+                app_stop,
+                app_store,
+                port,
+                Some(Arc::new(state_lease)),
+            );
         }));
     }
     let gateway = Gateway {
@@ -291,7 +314,7 @@ async fn dispatch(State(gateway): State<Gateway>, request: Request) -> Response 
         .read()
         .unwrap()
         .iter()
-        .find(|(name, app)| host == app_host(name, &app.root, gateway.port))
+        .find(|(name, app)| host == app_host(&app.deployment_id, gateway.port))
         .map(|(name, _)| name.clone());
     if !gateway_hosts.contains(&host) && app_name.is_none() {
         return (
@@ -356,7 +379,16 @@ async fn dispatch(State(gateway): State<Gateway>, request: Request) -> Response 
             header::LOCATION,
             format!(
                 "http://{}/{}{query}",
-                app_host(name, &root, gateway.port),
+                app_host(
+                    &gateway
+                        .apps
+                        .read()
+                        .unwrap()
+                        .get(name)
+                        .unwrap()
+                        .deployment_id,
+                    gateway.port
+                ),
                 suffix
             ),
         )],
@@ -369,7 +401,19 @@ async fn proxy_app(gateway: &Gateway, request: Request, name: &str, suffix: &str
         Some(app) => app.root.clone(),
         None => return StatusCode::NOT_FOUND.into_response(),
     };
-    let origin = format!("http://{}", app_host(name, &root, gateway.port));
+    let origin = format!(
+        "http://{}",
+        app_host(
+            &gateway
+                .apps
+                .read()
+                .unwrap()
+                .get(name)
+                .unwrap()
+                .deployment_id,
+            gateway.port
+        )
+    );
     // A hosted browser request must be same-origin. We deliberately do not emit
     // CORS headers: this is a browser boundary, not local-process authentication.
     if let Some(value) = request
@@ -466,7 +510,17 @@ async fn proxy_app(gateway: &Gateway, request: Request, name: &str, suffix: &str
     }
     parts.headers.insert(
         header::HOST,
-        HeaderValue::from_str(&app_host(name, &root, gateway.port)).unwrap(),
+        HeaderValue::from_str(&app_host(
+            &gateway
+                .apps
+                .read()
+                .unwrap()
+                .get(name)
+                .unwrap()
+                .deployment_id,
+            gateway.port,
+        ))
+        .unwrap(),
     );
     parts
         .headers
@@ -545,14 +599,8 @@ async fn proxy_app(gateway: &Gateway, request: Request, name: &str, suffix: &str
     response
 }
 
-fn app_host(name: &str, root: &Path, port: u16) -> String {
-    // FNV-1a gives a single DNS-safe, stable label and avoids name normalization
-    // collisions until durable deployment IDs are introduced.
-    let mut hash = 0xcbf29ce484222325u64;
-    for byte in format!("{}:{name}:{port}", root.display()).bytes() {
-        hash = (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3);
-    }
-    format!("app-{hash:016x}.localhost:{port}")
+fn app_host(deployment_id: &str, port: u16) -> String {
+    format!("app-{deployment_id}.localhost:{port}")
 }
 
 fn strip_hop_headers(headers: &mut HeaderMap) {
@@ -598,7 +646,7 @@ fn dashboard(apps: &Inventory, port: u16) -> Html<String> {
             AppState::Stopping => ("stopping", "Stopping application".into()),
             AppState::Stopped => ("stopped", "Application is stopped".into()),
         };
-        let url = format!("http://{}", app_host(name, &app.root, port));
+        let url = format!("http://{}", app_host(&app.deployment_id, port));
         format!("<li class=\"app\"><div><h2>{name}</h2><a class=\"path\" href=\"{url}\">{url}</a></div><span class=\"status {label}\">{label}</span><div class=\"detail\">{detail}</div></li>")
     }).collect();
     let running = apps
@@ -629,7 +677,7 @@ fn supervise(
     stop: Arc<AtomicBool>,
     store: logs::Store,
     port: u16,
-    _lease: Option<Arc<std::fs::File>>,
+    lease: Option<Arc<std::fs::File>>,
 ) {
     let name = prepared.app.name;
     let root = prepared.app.root;
@@ -638,10 +686,15 @@ fn supervise(
     let mut retry_generation = None;
     let mut retries = 0;
     while !stop.load(Ordering::Relaxed) {
-        let (generation, desired, cancel) = {
+        let (generation, desired, cancel, deployment_id) = {
             let records = apps.read().unwrap();
             let app = &records[&name];
-            (app.generation, app.desired, app.cancel.clone())
+            (
+                app.generation,
+                app.desired,
+                app.cancel.clone(),
+                app.deployment_id.clone(),
+            )
         };
         if handled == Some(generation) {
             thread::sleep(Duration::from_millis(25));
@@ -680,7 +733,7 @@ fn supervise(
             if app.name != name {
                 return Err("manifest name changed; restore it or restart the server with updated configuration".into());
             }
-            runner::RunningApp::start(app, 0, prepared.ai_config.as_deref(), &base, Some(&backend_token), &cancel, log.clone())
+            runner::RunningApp::start(app, &deployment_id, 0, prepared.ai_config.as_deref(), &base, Some(&backend_token), &cancel, log.clone(), lease.as_deref())
         });
         let mut running = match result {
             Ok(running) => running,
@@ -807,26 +860,20 @@ fn publish(apps: &Inventory, name: &str, generation: u64, state: AppState) {
 }
 
 #[cfg(test)]
-#[allow(clippy::items_after_test_module)] // Keep focused origin tests near app_host helpers.
 mod origin_tests {
     use super::app_host;
-    use std::path::Path;
-
     #[test]
-    fn application_hosts_are_stable_and_distinct() {
-        assert_eq!(
-            app_host("alpha", Path::new("/a"), 8787),
-            app_host("alpha", Path::new("/a"), 8787)
-        );
-        assert_ne!(
-            app_host("alpha", Path::new("/a"), 8787),
-            app_host("alpha", Path::new("/b"), 8787)
-        );
-        assert!(app_host("alpha", Path::new("/a"), 8787).ends_with(".localhost:8787"));
+    fn origin_uses_only_deployment_identity() {
+        assert_eq!(app_host("d123", 8787), "app-d123.localhost:8787");
+        assert_ne!(app_host("d123", 8787), app_host("d456", 8787));
     }
 }
 
-fn manage(apps: &Inventory, command: control::Command) -> Result<Vec<control::Status>, String> {
+fn manage(
+    apps: &Inventory,
+    durable: &Arc<Mutex<state::Store>>,
+    command: control::Command,
+) -> Result<Vec<control::Status>, String> {
     let mut records = apps.write().unwrap();
     if let Some(name) = &command.app {
         let app = records
@@ -845,6 +892,12 @@ fn manage(apps: &Inventory, command: control::Command) -> Result<Vec<control::St
             control::Action::Stop => Some(DesiredState::Stopped),
         };
         if let Some(desired) = desired {
+            // Persist lifecycle intent before an acknowledged response can cause a restart.
+            if desired == DesiredState::Stopped {
+                durable.lock().unwrap().stop(name)?;
+            } else {
+                durable.lock().unwrap().start(name)?;
+            }
             app.cancel.store(true, Ordering::Relaxed);
             app.cancel = Arc::new(AtomicBool::new(false));
             app.generation += 1;

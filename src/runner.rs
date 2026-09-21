@@ -1,7 +1,7 @@
-use crate::{capability::Capability, logs, manifest};
+use crate::{artifact, capability::Capability, guardian, logs, manifest, runtime};
 use std::io::Write;
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::{
     Arc, OnceLock,
     atomic::{AtomicBool, Ordering},
@@ -13,7 +13,6 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const CONSOLE_QUEUE_RECORDS: usize = 256;
-const HOST_SOURCE: &str = include_str!("../runtime/deno_host.ts");
 #[derive(Clone, Copy, serde::Serialize)]
 pub struct ConsoleLossCounters {
     pub queue_drops: u64,
@@ -44,7 +43,18 @@ pub fn run(
     let log = store.app(&app.name, "run", port)?;
     let stop = install_interrupt_handler()?;
     let name = app.name.clone();
-    let mut running = RunningApp::start(app, port, ai_config, "/", None, &stop, log)?;
+    let deployment_id = standalone_deployment_id();
+    let mut running = RunningApp::start(
+        app,
+        &deployment_id,
+        port,
+        ai_config,
+        "/",
+        None,
+        &stop,
+        log,
+        None,
+    )?;
     announce(
         false,
         format!(
@@ -59,9 +69,72 @@ pub fn run(
     Ok(())
 }
 
+pub fn run_prepared(
+    artifact_path: &Path,
+    port: u16,
+    ai_config: Option<&Path>,
+    log_dir: &Path,
+) -> Result<(), String> {
+    if port == 0 {
+        return Err("port must be from 1 through 65535".into());
+    }
+    let artifact = artifact::open(artifact_path)?;
+    let store = logs::Store::open(log_dir)?;
+    store.outside(&artifact.app.root)?;
+    let log = store.app(&artifact.app.name, "run", port)?;
+    let stop = install_interrupt_handler()?;
+    let name = artifact.app.name.clone();
+    let deployment_id = standalone_deployment_id();
+    let mut running = RunningApp::start_prepared(
+        artifact,
+        &deployment_id,
+        port,
+        ai_config,
+        "/",
+        None,
+        &stop,
+        log,
+    )?;
+    announce(
+        false,
+        format!(
+            "paraco: {name} listening on http://127.0.0.1:{}",
+            running.port
+        ),
+    );
+    while !stop.load(Ordering::Relaxed) {
+        running.check()?;
+        thread::sleep(Duration::from_millis(25));
+    }
+    Ok(())
+}
+
+// Even one-shot hosts must not share an authorization identity merely because
+// their manifests reuse a name. Durable server deployments receive their IDs
+// from state.rs; this transient ID intentionally has no configured grants.
+fn standalone_deployment_id() -> String {
+    format!(
+        "standalone-{:x}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    )
+}
+
+struct PreparedRuntime {
+    runtime: std::path::PathBuf,
+    cache: std::path::PathBuf,
+    lock: std::path::PathBuf,
+    config: Option<std::path::PathBuf>,
+}
+
 /// Owns every resource of one app. Dropping it always stops and reaps Deno.
 pub struct RunningApp {
     child: Child,
+    // Kept open for a guardian-managed process. EOF is the guardian's proof
+    // that this host disappeared and it must reap Deno.
+    _guardian_lifetime: Option<ChildStdin>,
     pub port: u16,
     output: Option<thread::JoinHandle<()>>,
     errors: Option<thread::JoinHandle<()>>,
@@ -73,6 +146,37 @@ pub struct RunningApp {
 impl RunningApp {
     pub fn start(
         app: manifest::App,
+        deployment_id: &str,
+        port: u16,
+        ai_config: Option<&Path>,
+        base_path: &str,
+        backend_token: Option<&str>,
+        stop: &AtomicBool,
+        log: logs::AppLog,
+        guardian_lease: Option<&std::fs::File>,
+    ) -> Result<Self, String> {
+        log.event("starting", "Starting application");
+        let result = Self::launch(
+            app,
+            deployment_id,
+            port,
+            ai_config,
+            base_path,
+            backend_token,
+            stop,
+            log.clone(),
+            None,
+            guardian_lease,
+        );
+        if let Err(error) = &result {
+            log.event("failed", error);
+        }
+        result
+    }
+
+    pub fn start_prepared(
+        prepared: artifact::PreparedApp,
+        deployment_id: &str,
         port: u16,
         ai_config: Option<&Path>,
         base_path: &str,
@@ -80,15 +184,30 @@ impl RunningApp {
         stop: &AtomicBool,
         log: logs::AppLog,
     ) -> Result<Self, String> {
-        log.event("starting", "Starting application");
+        let artifact::PreparedApp {
+            app,
+            runtime,
+            cache,
+            lock,
+            config,
+        } = prepared;
+        log.event("starting", "Starting prepared application");
         let result = Self::launch(
             app,
+            deployment_id,
             port,
             ai_config,
             base_path,
             backend_token,
             stop,
             log.clone(),
+            Some(PreparedRuntime {
+                runtime,
+                cache,
+                lock,
+                config,
+            }),
+            None,
         );
         if let Err(error) = &result {
             log.event("failed", error);
@@ -98,15 +217,18 @@ impl RunningApp {
 
     fn launch(
         app: manifest::App,
+        deployment_id: &str,
         port: u16,
         ai_config: Option<&Path>,
         base_path: &str,
         backend_token: Option<&str>,
         stop: &AtomicBool,
         log: logs::AppLog,
+        prepared: Option<PreparedRuntime>,
+        guardian_lease: Option<&std::fs::File>,
     ) -> Result<Self, String> {
         let capability = if app.requests_ai {
-            Some(Capability::start(&app, ai_config)?)
+            Some(Capability::start(&app, deployment_id, ai_config)?)
         } else {
             if ai_config.is_some() {
                 return Err("AI configuration requires an app requesting ai".into());
@@ -115,21 +237,41 @@ impl RunningApp {
         };
         let temporary = tempfile::tempdir()
             .map_err(|error| format!("cannot create runtime temporary directory: {error}"))?;
-        let host_path = temporary.path().join("paraco-deno-host.ts");
-        std::fs::write(&host_path, HOST_SOURCE)
-            .map_err(|error| format!("cannot write Deno host adapter: {error}"))?;
         let nonce = readiness_nonce();
         let entrypoint_url = url::Url::from_file_path(&app.entrypoint)
             .map_err(|_| "cannot create entrypoint file URL")?;
         let bootstrap = serde_json::json!({
             "basePath": base_path,
             "backendToken": backend_token,
-            "ai": capability.as_ref().map(|c| serde_json::json!({"address": c.address, "token": c.token}))
+            "ai": capability.as_ref().map(|c| serde_json::json!({"address": c.address, "token": c.token, "http": {"address": c.http_address, "token": c.http_token}}))
         });
         let input = serde_json::to_vec(&bootstrap).map_err(|_| "cannot encode host bootstrap")?;
-        let mut command = Command::new("deno");
+        let deno = match &prepared {
+            Some(p) => p.runtime.clone(),
+            None => runtime::command_for_host()?,
+        };
+        // The guardian owns the adapter and Deno after the host dies. Pass the
+        // already selected absolute runtime/cache so activation cannot swap it.
+        let executable = std::env::current_exe()
+            .map_err(|e| format!("cannot locate Paraco guardian executable: {e}"))?
+            .canonicalize()
+            .map_err(|e| format!("cannot resolve immutable Paraco guardian executable: {e}"))?;
+        let mut command = Command::new(executable);
+        command.arg("__paraco_guardian");
+        guardian::inherit_lease(&mut command, guardian_lease)?;
+        command.arg("run");
+        if let Some(prepared) = &prepared {
+            command
+                .arg("--cached-only")
+                .arg("--lock")
+                .arg(&prepared.lock);
+            if let Some(config) = &prepared.config {
+                command.arg("--config").arg(config);
+            } else {
+                command.arg("--no-config");
+            }
+        }
         command
-            .arg("run")
             .arg("--quiet")
             .arg("--no-prompt")
             .arg(format!("--allow-read={}", app.root.display()))
@@ -137,16 +279,22 @@ impl RunningApp {
                 "--allow-net=127.0.0.1:{port}{}",
                 capability
                     .as_ref()
-                    .map(|c| format!(",{}", c.address))
+                    .map(|c| format!(",{},{}", c.address, c.http_address))
                     .unwrap_or_default()
             ))
-            .arg(&host_path)
             .arg(entrypoint_url.as_str())
             .arg(port.to_string())
             .arg(&nonce)
             .current_dir(&app.root)
             .env_clear()
-            .env("DENO_DIR", temporary.path().join("deno-cache"))
+            .env(
+                "PARACO_GUARDIAN_DENO_DIR",
+                prepared
+                    .as_ref()
+                    .map(|p| p.cache.clone())
+                    .unwrap_or_else(|| temporary.path().join("deno-cache")),
+            )
+            .env("PARACO_GUARDIAN_DENO", deno)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -163,6 +311,7 @@ impl RunningApp {
         log.pid(child.id());
         let mut running = Self {
             child,
+            _guardian_lifetime: None,
             port,
             output: None,
             errors: None,
@@ -170,13 +319,15 @@ impl RunningApp {
             _temporary: temporary,
             log: log.clone(),
         };
-        running
+        let mut stdin = running
             .child
             .stdin
             .take()
-            .unwrap()
+            .ok_or("cannot initialize guardian")?;
+        stdin
             .write_all(&input)
             .map_err(|_| "cannot initialize Deno host")?;
+        running._guardian_lifetime = Some(stdin);
         let (ready_tx, ready_rx) = mpsc::sync_channel(1);
         running.output = Some(forward_stdout(
             running.child.stdout.take().unwrap(),

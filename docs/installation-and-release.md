@@ -1,5 +1,39 @@
 # Installation and release plan
 
+## Local archive installer (unpublished)
+
+`scripts/install-archive.sh` is an intentionally local, unpublished installer
+for a user-supplied archive and explicit SHA-256. It requires an absolute
+prefix, channel, and version, serializes ownership with a prefix lock, rejects
+traversal, duplicates, links, special files and oversized extraction, stages
+before an atomic channel-pointer switch, and retains old releases. Failed
+validation therefore cannot change the active channel. `uninstall` removes only
+the channel pointer and refuses a state-marked running runtime; it preserves
+state, configuration, credentials and releases. The script does not download,
+publish, register services, or claim health-checked service rollback.
+
+A checksum establishes integrity of the selected bytes, **not publisher
+authenticity**. The user must supply trusted local provenance. Signing,
+notarization, remote release provenance, native upgrade/rollback/service smoke
+tests, prepared-artifact compatibility checks, and schema-downgrade recovery
+remain release gates rather than claimed support.
+
+## Package recipe tooling (unpublished)
+
+`scripts/generate-package-recipes.sh` generates a Homebrew formula and package
+metadata only when given concrete version, HTTPS artifact URL, SHA-256, and
+target values **and a local bundle whose SHA-256 matches those inputs**. It does
+not supply placeholder release metadata, publish a tap, download an artifact,
+or change a package manager. Generated formulas install
+the bundle's private Deno runtime and do not depend on system Deno; package
+installation does not register a service and removal must preserve user data.
+
+`scripts/verify-macos-package.sh` fails closed unless running on macOS with a
+final package, signing identity, and notarization keychain profile. It verifies
+both bundled executables and the final package/notarization. Authenticity,
+dependency-vulnerability review, signing/notarization, and native package
+evidence remain required release acceptance gates; none is claimed here.
+
 This document records the installation direction discussed for Paraco and guides
 future implementation. It is a plan, not documentation of a shipped installer.
 Use it alongside [the product spec](../spec.md) and

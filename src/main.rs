@@ -1,13 +1,18 @@
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
+mod artifact;
 mod capability;
 mod control;
 mod guardian;
 mod logs;
 mod manifest;
 mod runner;
+mod runtime;
 mod server;
+mod service;
+mod state;
+mod storage;
 
 #[derive(Parser)]
 #[command(name = "paraco", version, about = "Run local Paraco applications")]
@@ -21,6 +26,17 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Copy, lock, and cache an application into an immutable offline artifact.
+    Prepare {
+        /// Source application directory.
+        app: PathBuf,
+        /// New host-owned artifact directory to create.
+        #[arg(long)]
+        output: PathBuf,
+        /// Explicit Deno executable used to cache and later run this artifact.
+        #[arg(long)]
+        deno: PathBuf,
+    },
     /// Read retained JSONL records, even when the runtime is stopped.
     Logs {
         app: Option<String>,
@@ -53,6 +69,11 @@ enum Command {
         #[arg(long, default_value_t = 3000)]
         port: u16,
     },
+    /// Render, install, or remove an explicitly opt-in user-service definition.
+    Service {
+        #[command(subcommand)]
+        command: ServiceCommand,
+    },
     /// Host configured applications and a dashboard on loopback.
     Serve {
         /// Local server configuration; app paths are relative to this file.
@@ -68,10 +89,70 @@ enum Command {
         /// Loopback TCP port for the application.
         #[arg(long, default_value_t = 3000)]
         port: u16,
-        /// Host-owned fake AI routing and grants configuration.
+        /// Host-owned AI routing, grants, and optional provider configuration.
         #[arg(long)]
         ai_config: Option<PathBuf>,
     },
+    /// Run a verified prepared artifact without dependency downloads.
+    RunPrepared {
+        /// Prepared artifact directory created by `paraco prepare`.
+        artifact: PathBuf,
+        #[arg(long, default_value_t = 3000)]
+        port: u16,
+        #[arg(long)]
+        ai_config: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum ServiceCommand {
+    /// Print a private user-service definition.
+    Render {
+        #[arg(long)]
+        platform: ServicePlatform,
+        #[arg(long)]
+        entry: PathBuf,
+        #[arg(long)]
+        config: PathBuf,
+        #[arg(long)]
+        state: PathBuf,
+    },
+    /// Explicitly register and start an owned user service. Never uses sudo.
+    Setup {
+        #[arg(long)]
+        platform: ServicePlatform,
+        #[arg(long)]
+        config: PathBuf,
+    },
+    /// Stop and unregister an owned user service; preserves config and data.
+    Remove {
+        #[arg(long)]
+        platform: ServicePlatform,
+        #[arg(long)]
+        config: PathBuf,
+    },
+    /// Query an owned user service through its native user-service manager.
+    Status {
+        #[arg(long)]
+        platform: ServicePlatform,
+        #[arg(long)]
+        config: PathBuf,
+    },
+}
+
+#[derive(Clone, clap::ValueEnum)]
+enum ServicePlatform {
+    Linux,
+    Macos,
+}
+
+impl From<ServicePlatform> for service::Platform {
+    fn from(value: ServicePlatform) -> Self {
+        match value {
+            ServicePlatform::Linux => service::Platform::Linux,
+            ServicePlatform::Macos => service::Platform::Macos,
+        }
+    }
 }
 
 fn main() {
@@ -88,6 +169,32 @@ fn main() {
 
 fn execute(cli: Cli) -> Result<(), String> {
     match cli.command {
+        Command::Prepare { app, output, deno } => artifact::prepare(&app, &output, &deno),
+        Command::Service {
+            command:
+                ServiceCommand::Render {
+                    platform,
+                    entry,
+                    config,
+                    state,
+                },
+        } => {
+            let rendered = match platform {
+                ServicePlatform::Linux => service::render_systemd(&entry, &config, &state),
+                ServicePlatform::Macos => service::render_launch_agent(&entry, &config, &state),
+            }?;
+            print!("{rendered}");
+            Ok(())
+        }
+        Command::Service {
+            command: ServiceCommand::Setup { platform, config },
+        } => service::operate(platform.into(), "setup", &config),
+        Command::Service {
+            command: ServiceCommand::Remove { platform, config },
+        } => service::operate(platform.into(), "remove", &config),
+        Command::Service {
+            command: ServiceCommand::Status { platform, config },
+        } => service::operate(platform.into(), "status", &config),
         Command::Logs { app, tail, port } => logs::print(
             &logs::directory(cli.log_dir.as_deref())?,
             app.as_deref(),
@@ -109,6 +216,16 @@ fn execute(cli: Cli) -> Result<(), String> {
             ai_config,
         } => runner::run(
             &app,
+            port,
+            ai_config.as_deref(),
+            &logs::directory(cli.log_dir.as_deref())?,
+        ),
+        Command::RunPrepared {
+            artifact,
+            port,
+            ai_config,
+        } => runner::run_prepared(
+            &artifact,
             port,
             ai_config.as_deref(),
             &logs::directory(cli.log_dir.as_deref())?,

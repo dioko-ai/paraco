@@ -41,7 +41,9 @@ is recorded below without declaring an entire milestone complete.
 - [x] Verify startup errors, request failures, logs, and bounded process cleanup.
 - [x] Implement offline AI routing and grant enforcement with a fake provider.
 - [x] Connect `context.ai.complete` through authenticated local transport.
-- [x] Verify AI calls, denied grants, authentication, and cleanup end to end.
+- [x] Unit-test AI policy, authentication framing, and cleanup behavior.
+- [ ] Retain pinned-Deno end-to-end evidence for AI calls, denied grants,
+      authentication, and cleanup (blocked locally: Deno is unavailable).
 
 ## Foreground multi-app hosting — completed
 
@@ -70,27 +72,31 @@ is recorded below without declaring an entire milestone complete.
 
 ## Background service operation
 
-- [ ] Run the foreground server under the Linux service manager.
-- [ ] Verify terminal independence and graceful service shutdown.
-- [ ] Restore configured apps after service restart and machine restart.
-- [ ] Document development service setup; integrate it with installers later.
-- [ ] Add and verify service support for other target platforms later.
+- [x] Generate explicit, user-scoped systemd/launchd definitions and document
+      opt-in setup/removal/status behavior.
+- [ ] Retain observed native manager, terminal-independence, reboot, and graceful
+      shutdown evidence (generated definitions are not native verification).
+- [ ] Retain restart/machine-restart restoration evidence on supported targets.
 
 ## Further local capabilities
 
-- [ ] Add the documented OpenAI-compatible HTTP subset.
-- [ ] Add and verify streaming separately.
-- [ ] Add a real AI provider and host-owned secret storage.
-- [ ] Add local application configuration and persistence.
-- [ ] Define subsequent scheduling, notifications, and health increments.
+- [x] Implement the documented bounded loopback OpenAI-compatible HTTP subset.
+- [x] Implement the bounded provider/HTTP SSE streaming foundation.
+- [x] Add a real-provider adapter and host-owned credential-file handling.
+- [x] Add bounded deployment-scoped state groundwork (not yet app-exposed).
+- [x] Define deferred bounded scheduling, notifications, and health increments.
+- [ ] Verify Deno SDK streaming, provider saturation/cancellation, and native
+      end-to-end HTTP behavior with deterministic fixtures.
 
 ## Bundling and installation
 
-- [ ] Define and build the pinned private Deno release bundle.
-- [ ] Verify clean-machine execution and supported platform targets.
-- [ ] Add portable archives, then the shell installer and Homebrew channel.
-- [ ] Verify upgrade, rollback, removal, and preservation of application data.
-- [ ] Add signing, native packages, and optional service installation.
+- [x] Define local unsigned private-Deno bundle, archive installer, and generated
+      unpublished Homebrew/Debian/macOS-package recipe tooling.
+- [x] Test hostile archive-path rejection and local installer pointer/data safety.
+- [ ] Verify actual archives on clean machines, offline dependencies, HTTP, and
+      shutdown across supported native targets.
+- [ ] Execute authenticity, dependency review, signing/notarization, publication,
+      native package, service, upgrade/rollback, and health-recovery gates.
 
 See `docs/installation-and-release.md` for the detailed release plan.
 

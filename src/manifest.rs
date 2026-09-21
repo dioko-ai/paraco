@@ -122,17 +122,23 @@ pub fn load(app_dir: &Path) -> Result<App, Error> {
     if !valid_name(&manifest.name) {
         return Err(Error::InvalidName);
     }
-    if let Some(capability) = manifest.capabilities.iter().find(|c| c.as_str() != "ai") {
-        return Err(Error::UnsupportedCapability(capability.clone()));
-    }
-    if manifest
+    if let Some(capability) = manifest
         .capabilities
         .iter()
-        .filter(|c| c.as_str() == "ai")
-        .count()
-        > 1
+        .find(|c| c.as_str() != "ai" && c.as_str() != "storage")
     {
-        return Err(Error::DuplicateCapability("ai".into()));
+        return Err(Error::UnsupportedCapability(capability.clone()));
+    }
+    for capability in ["ai", "storage"] {
+        if manifest
+            .capabilities
+            .iter()
+            .filter(|c| c.as_str() == capability)
+            .count()
+            > 1
+        {
+            return Err(Error::DuplicateCapability(capability.into()));
+        }
     }
 
     let requested = Path::new(&manifest.entrypoint);
@@ -237,11 +243,11 @@ mod tests {
         assert!(matches!(load(directory.path()), Err(Error::InvalidName)));
         std::fs::write(
             directory.path().join("paraco.json"),
-            r#"{"name":"hello","entrypoint":"main.ts","capabilities":["storage"]}"#,
+            r#"{"name":"hello","entrypoint":"main.ts","capabilities":["unknown"]}"#,
         )
         .unwrap();
         assert!(
-            matches!(load(directory.path()), Err(Error::UnsupportedCapability(capability)) if capability == "storage")
+            matches!(load(directory.path()), Err(Error::UnsupportedCapability(capability)) if capability == "unknown")
         );
         std::fs::write(
             directory.path().join("paraco.json"),

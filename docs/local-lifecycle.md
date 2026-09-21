@@ -121,8 +121,9 @@ parent-death cleanup applies to standalone `run`.
 This adds one guardian process per running app. It covers termination of the
 main runtime while its guardians remain operational; killing a guardian itself
 or failure of the OS is outside this mechanism. Apps remain trusted local code,
-and arbitrary app-created subprocess trees are not supported. OS service
-registration and durable desired state remain future work.
+and arbitrary app-created subprocess trees are not supported. Durable desired
+state and opt-in owned user-service definitions are available, but retained
+native service-manager/reboot evidence remains pending.
 
 ## Browser management
 
@@ -165,18 +166,27 @@ works on platforms without Unix sockets; only Linux is verified so far.
 Desired state is in memory. Restarting the server starts all configured apps;
 persisting stopped state across server restarts is future work. Bounded persistent
 logs are available through the [log CLI and dashboard](local-logs.md).
-Background services, cloud integration, and bundling/installers remain future work.
+## User-service definitions
+
+`paraco service render --platform linux|macos --entry /absolute/paraco --config /absolute/config.json --state /absolute/state` renders a private user-service definition using absolute paths and a ten-second graceful-stop bound. `paraco service setup|remove|status --platform linux|macos --config /absolute/config.json` explicitly operates an owned user registration; setup atomically installs the stable `~/.paraco/service/paraco` launcher pointing to the current immutable executable and uses `~/.paraco/state`, so future service launches do not depend on PATH, terminal CWD, or a release-specific definition. Replacing that launcher does not affect a process already running its immutable executable. It never invokes `sudo`, refuses foreign definitions or launcher files, and removal preserves configuration and state. Native-manager invocations are bounded to ten seconds and report an actionable error when unavailable. There is no `paraco open` command: the current private management entry is intentionally printed only by a running server, rather than recovering or logging its rotating bearer token.
+
+A Linux systemd user unit normally starts when the user session is available; unattended boot requires user-controlled `loginctl enable-linger` and is not enabled by Paraco. A macOS LaunchAgent runs at user login, not before login. Native manager, reboot, terminal, and shutdown behavior has not been verified on either platform.
+
+Cloud integration, scheduling, notifications, health monitoring, and published
+bundling/installers remain future work. The local service and installer tooling
+is unpublished and does not establish native release support.
 
 Integration tests cover independent app control, repeated requests, changed
 process identities, process reaping, failure repair, startup cancellation, rapid
 command changes, slow shutdown, management access restrictions, malformed and
-stalled clients, occupied sockets, and AI across restarts. On Linux, the AI test
-also inspects host-owned listeners and verifies their release after stopping.
+stalled clients, occupied sockets, and AI policy/restart paths. The Rust/unit
+suite does not itself establish Deno-process integration evidence.
 Crash tests kill the runtime during startup and with a blocked app event loop,
 restart immediately with multiple apps, verify Deno reaping and temporary-directory
 cleanup, and preserve live or unexpected control endpoints. These tests run in the
-Unix suite for Linux and macOS; local verification of this change is Linux x86-64
-with Deno 2.9.7. Native macOS evidence remains pending.
+Unix suite for Linux and macOS when its Deno prerequisite is available. The
+current pinned target is Deno 2.2.5; this workspace has no Deno, so no local
+Deno-process verification is claimed. Native macOS evidence remains pending.
 
 ```sh
 cargo fmt --check

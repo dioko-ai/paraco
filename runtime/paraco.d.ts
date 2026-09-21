@@ -18,6 +18,7 @@ export interface AiCompletionResponse {
   text: string;
 }
 
+
 export interface AppContext {
   /** The public mount prefix; it always begins and ends with '/'. */
   basePath: string;

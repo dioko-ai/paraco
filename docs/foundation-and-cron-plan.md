@@ -360,3 +360,16 @@ No calendar estimate is assigned without execution evidence and team/CI capacity
 The first implementation slice is M0 plus the isolated blocked-output regression
 and fix from M1. License selection, native CI availability, and the origin prototype
 are early decisions to resolve; they do not block unrelated lifecycle fixes.
+
+### Deferred health increment (after M5)
+
+Health monitoring is not implemented by the current host and is not a scheduler
+admission signal. A follow-on increment must assign the host ownership of
+bounded liveness/readiness observations, with per-deployment timeouts, a capped
+sample history, and explicit `unknown`, `healthy`, and `unhealthy` outcomes.
+A failed probe must neither restart an app nor replay a task by itself;
+recovery remains an explicit lifecycle policy. Tests must cover timeout,
+malformed response, stopped runtime, restart reconciliation, retention, and
+that an unhealthy deployment cannot block unrelated management or jobs.
+Notifications report the observation with a separate, deduplicated delivery
+outcome; notification failure must not change the health outcome.

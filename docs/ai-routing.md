@@ -1,9 +1,10 @@
 # Local AI routing core
 
-This increment adds `paraco::ai`, an in-memory Rust policy core with a deterministic
-fake backend. It makes no network requests and needs no credentials or accounts.
-The CLI and Deno host connect this core to apps requesting `ai` through
-`context.ai.complete({ prompt, provider?, model? })`.
+This increment retains the deterministic fake backend and adds an opt-in,
+non-streaming OpenAI-compatible provider. The fake backend makes no network
+requests and needs no credentials or accounts. A real provider is enabled only
+by host configuration; the CLI and Deno host connect either backend to apps
+requesting `ai` through `context.ai.complete({ prompt, provider?, model? })`.
 
 The trusted host constructs `Config` and supplies the caller identity separately
 from `Request`. An app request contains only optional provider/model selection
@@ -12,9 +13,13 @@ host-issued token and supplies the launched app identity, never an app claim.
 
 Configuration contains credential identities and their owning providers, allowed
 routes, per-app capability requests and credential grants, app/runtime defaults,
-and provider default models. It contains no real secret values. Unknown credential
-references and routes referencing another provider's credential are rejected at
-construction. Configuration is immutable once the proxy is constructed.
+and provider default models. It contains no real secret values. Real-provider
+configuration additionally maps a credential identity to an absolute, host-owned
+secret file and a provider to an HTTPS OpenAI-compatible completion endpoint.
+Secret files must be outside the app directory and are read only after capability
+and grant authorization succeeds. Unknown credential references and routes
+referencing another provider's credential are rejected at construction.
+Configuration is immutable once the proxy is constructed.
 
 Requesting AI and receiving a credential grant are separate requirements. A grant
 allows that app to use configured routes referencing that credential. Apps cannot
@@ -73,9 +78,26 @@ Each connection carries one JSON request and response, each prefixed by a
 four-byte big-endian length. Frames are limited to 64 KiB. Unknown request
 fields, including caller identity and grants, are rejected. The host uses a
 one-second total read deadline and bounded writes; the adapter closes calls
-after three seconds once connected. Requests are handled serially for this fake
-backend. Concurrency and real-provider timeouts belong to a later increment.
+after three seconds once connected. Requests are handled serially by the private capability transport. Real-provider
+work has host-owned global and per-deployment semaphores, a bounded admission
+queue, total deadlines, and a 1 MiB response bound. Cancellation or timeout drops
+its permits. The real transport accepts HTTPS only, rejects URL userinfo and
+fragments, disables redirects and ambient proxies, and redacts transport failures.
 The listener is stopped and joined on normal exit, failed startup, and Ctrl+C.
+
+## Loopback OpenAI-compatible HTTP subset
+
+Each AI-capable launch also receives a separate loopback address and fresh
+launch token in its private bootstrap (`ai.http`). It is not a management token,
+provider credential, or deployment name. Clients send `Authorization: Bearer
+<token>` to `POST /v1/chat/completions`. Only a single `user` message, optional
+`model`, and `stream: false` (or omitted) are accepted. The response has the
+non-streaming `choices[0].message.content` shape. `stream: true` returns
+`text/event-stream` content-only deltas followed by `[DONE]`. All other paths, origins
+(CORS is intentionally disabled), multiple messages, tools, caller
+identity, provider URLs, and credential references are rejected. Requests are
+limited to 64 KiB and use the same deployment-bound policy and provider bounds
+as `context.ai.complete`; errors are sanitized JSON error objects.
 
 Success is `{ selection: { provider, model }, text }`. Policy or transport
 failures reject the promise. The transport does not log requests, responses,
@@ -84,12 +106,21 @@ mechanism does not prevent them from doing so.
 
 The token represents the whole application process. This supervised Deno setup
 is not a complete sandbox against malicious same-user processes or untrusted
-apps. The capability does not contain provider secrets, and host configuration
-files contain only fake credential identities in this milestone.
+apps. The capability does not contain provider secrets; real secret values are
+not accepted in config, arguments, browser storage, or logs. They remain in
+host-owned files outside application permissions.
 
-Verification includes actual TypeScript calls, absent and cross-app grants,
-absent capability, invalid authentication, forged identity, token renewal,
-frame bounds, and listener cleanup alongside the existing policy/runtime suite.
+Rust/unit coverage observes policy, decoder, credential-redaction, URL
+validation, frame-bound, and listener-cleanup paths. Actual TypeScript/Deno
+calls, stale-token renewal, cross-deployment HTTP, and external-provider
+fixtures remain pending because this workspace has no Deno runtime; they are
+not inferred from the local unit suite.
 
-Real providers, secret storage, HTTP compatibility, streaming, cloud integration,
-and packaging remain later increments.
+Provider SSE is decoded incrementally at byte boundaries (including split UTF-8)
+and must terminate with `[DONE]`; malformed or truncated upstream events do not
+produce a successful terminal event. Output and total duration use the existing
+provider bounds; a client write failure aborts the upstream future and releases
+its permits. TLS-provider integration against an external service is not
+exercised in this repository; deterministic policy, decoder, credential
+redaction, and URL validation tests are local. Multi-deployment saturation and
+remote TLS fixture tests remain pending.

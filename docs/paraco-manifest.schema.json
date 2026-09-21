@@ -12,7 +12,7 @@
     "capabilities": {
       "type": "array",
       "uniqueItems": true,
-      "items": { "const": "ai" }
+      "items": { "enum": ["ai"] }
     }
   }
 }

@@ -4,6 +4,7 @@ use super::*;
 #[derive(Clone)]
 pub(super) struct Management {
     apps: Inventory,
+    durable: Arc<Mutex<state::Store>>,
     origin: String,
     authorization: String,
     gateway_port: u16,
@@ -16,6 +17,7 @@ pub(super) struct Management {
 
 pub(super) async fn bind(
     apps: Inventory,
+    durable: Arc<Mutex<state::Store>>,
     gateway_port: u16,
     store: logs::Store,
 ) -> Result<(tokio::net::TcpListener, Router, String), String> {
@@ -30,6 +32,7 @@ pub(super) async fn bind(
     let url = format!("{origin}/#{token}");
     let state = Management {
         apps,
+        durable,
         origin,
         authorization: format!("Bearer {token}"),
         gateway_port,
@@ -206,17 +209,17 @@ async fn handle(state: &Management, request: Request) -> Response {
         )
             .into_response();
     };
-    match manage(&state.apps, command) {
+    match manage(&state.apps, &state.durable, command) {
         Ok(apps) => {
             let roots = state.apps.read().unwrap();
             let apps: Vec<_> = apps
                 .into_iter()
                 .map(|app| {
                     let mut value = serde_json::to_value(&app).unwrap();
-                    if let Some(root) = roots.get(&app.name).map(|record| &record.root) {
+                    if let Some(record) = roots.get(&app.name) {
                         value["url"] = serde_json::Value::String(format!(
                             "http://{}",
-                            app_host(&app.name, root, state.gateway_port)
+                            app_host(&record.deployment_id, state.gateway_port)
                         ));
                     }
                     value

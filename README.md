@@ -153,9 +153,14 @@ separate management origin remains authenticated. Output-loss counters in the
 management log view distinguish storage and console loss. Hosted admission is
 bounded (50 apps, 64 gateway responses, 8 per app, and 4 log reads); these are
 safety limits rather than CPU/RSS quotas.
-Background service operation,
-persistence, real AI providers, and AI HTTP compatibility/streaming
-remain future work. Cloud integration and bundling/installers are deferred.
+Opt-in user-service definitions, deployment-scoped durable state, a bounded
+host-owned OpenAI-compatible provider, and a loopback OpenAI-compatible HTTP
+subset (including the documented SSE foundation) now have implementation
+scaffolding. They are not native-release evidence: Deno-dependent integration,
+clean-machine, restart, signing, publication, and native package checks remain
+pending. Scheduling, notifications, health monitoring, cloud integration, and
+the proposed cron product remain deferred. Local operation needs neither a
+cloud account nor paid AI; the fake provider remains available.
 
 ## Try the local AI capability
 
