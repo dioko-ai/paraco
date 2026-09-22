@@ -1,0 +1,1 @@
+{"storage": "persisted after SIGKILL and restart", "isolation": "app1 cannot read app0 draft", "desired_state": "stopped intent and identity restored", "open": "private URL rotates after restart"}

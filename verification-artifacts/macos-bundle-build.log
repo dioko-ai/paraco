@@ -1,0 +1,3 @@
+   Compiling paraco v0.1.0 (/Users/alecdibble/repos/paraco)
+    Finished `release` profile [optimized] target(s) in 9.28s
+unsigned bundle created at /private/tmp/paraco-macos-final; signing, provenance and native smoke tests remain publication gates

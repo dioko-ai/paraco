@@ -1,0 +1,1 @@
+{"relocation": "pass", "dependency": "pinned HTTPS std/path basename", "PATH": "/nonexistent", "cwd": "/", "launches": 2, "failed_preparation": "installed revision preserved", "shutdown": "pass", "network_isolation": "separate clean-machine gate"}

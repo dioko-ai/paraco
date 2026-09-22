@@ -12,6 +12,7 @@ mod runtime;
 mod server;
 mod service;
 mod state;
+mod storage;
 
 #[derive(Parser)]
 #[command(name = "paraco", version, about = "Run local Paraco applications")]
@@ -25,6 +26,20 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Open the authenticated dashboard through the private local control socket.
+    Open {
+        #[arg(long, default_value_t = 3000)]
+        port: u16,
+        #[arg(long)]
+        print: bool,
+    },
+    /// Export a stopped runtime's state as a consistent SQLite database.
+    Backup {
+        #[arg(long)]
+        state: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+    },
     /// Copy, lock, and cache an application into an immutable offline artifact.
     Prepare {
         /// Source application directory.
@@ -173,6 +188,8 @@ fn main() {
 
 fn execute(cli: Cli) -> Result<(), String> {
     match cli.command {
+        Command::Open { port, print } => control::open(port, print),
+        Command::Backup { state, output } => state::Store::open(&state)?.backup(&output),
         Command::Prepare { app, output, deno } => artifact::prepare(&app, &output, &deno),
         Command::Service {
             command:

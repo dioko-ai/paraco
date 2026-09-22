@@ -37,7 +37,7 @@ fn systemd_quote(path: &Path) -> Result<String, String> {
     absolute(path, "service path")?;
     // systemd's ExecStart parser treats a quoted argument as one argv item.
     let value = path.to_string_lossy();
-    if value.contains('"') || value.contains('\\') {
+    if value.contains('"') || value.contains('\\') || value.contains('%') || value.contains('$') {
         return Err("service paths cannot contain quotes or backslashes".into());
     }
     Ok(format!("\"{value}\""))
@@ -56,18 +56,21 @@ fn xml(value: &Path) -> Result<String, String> {
 pub fn render_systemd(entry: &Path, config: &Path, state: &Path) -> Result<String, String> {
     let entry = systemd_quote(entry)?;
     let config = systemd_quote(config)?;
+    let logs = systemd_quote(&state.join("logs"))?;
     let state = systemd_quote(state)?;
     Ok(format!(
-        "{MARKER}[Unit]\nDescription=Paraco local host\n\n[Service]\nType=simple\nExecStart={entry} serve --config {config}\nWorkingDirectory={state}\nRestart=on-failure\nRestartSec=2\nTimeoutStopSec=10\n\n[Install]\nWantedBy=default.target\n"
+        "{MARKER}[Unit]\nDescription=Paraco local host\n\n[Service]\nType=simple\nExecStart={entry} serve --config {config} --log-dir {logs}\nWorkingDirectory={state}\nRestart=on-failure\nRestartSec=2\nTimeoutStopSec=10\n\n[Install]\nWantedBy=default.target\n"
     ))
 }
 
 pub fn render_launch_agent(entry: &Path, config: &Path, state: &Path) -> Result<String, String> {
     let entry = xml(entry)?;
     let config = xml(config)?;
+    let logs = xml(&state.join("logs"))?;
+    let temporary = xml(&std::env::temp_dir())?;
     let state = xml(state)?;
     Ok(format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n{LAUNCH_MARKER}\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict>\n<key>Label</key><string>dev.paraco.host</string>\n<key>ProgramArguments</key><array><string>{entry}</string><string>serve</string><string>--config</string><string>{config}</string></array>\n<key>WorkingDirectory</key><string>{state}</string>\n<key>RunAtLoad</key><true/>\n<key>ProcessType</key><string>Background</string>\n<key>ExitTimeOut</key><integer>10</integer>\n</dict></plist>\n"
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n{LAUNCH_MARKER}\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict>\n<key>Label</key><string>dev.paraco.host</string>\n<key>ProgramArguments</key><array><string>{entry}</string><string>serve</string><string>--config</string><string>{config}</string><string>--log-dir</string><string>{logs}</string></array>\n<key>EnvironmentVariables</key><dict><key>TMPDIR</key><string>{temporary}</string></dict>\n<key>WorkingDirectory</key><string>{state}</string>\n<key>RunAtLoad</key><true/>\n<key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>\n<key>ThrottleInterval</key><integer>2</integer>\n<key>ProcessType</key><string>Background</string>\n<key>ExitTimeOut</key><integer>10</integer>\n</dict></plist>\n"
     ))
 }
 
@@ -251,8 +254,7 @@ fn manager(platform: Platform, action: &str, definition: &Path) -> Result<(), St
             "launchctl",
             vec![
                 "bootout".into(),
-                format!("gui/{}", unsafe { libc::geteuid() }),
-                "dev.paraco.host".into(),
+                format!("gui/{}/dev.paraco.host", unsafe { libc::geteuid() }),
             ],
         ),
         (Platform::Macos, "status") => (
@@ -285,18 +287,55 @@ fn manager(platform: Platform, action: &str, definition: &Path) -> Result<(), St
     Ok(())
 }
 
+fn setup(
+    paths: &Paths,
+    platform: Platform,
+    activate: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    fs::create_dir_all(&paths.state).map_err(|e| format!("cannot create state directory: {e}"))?;
+    if paths.definition.exists() && !is_owned(&paths.definition)? {
+        return Err("refusing to replace foreign service registration".into());
+    }
+    let definition = render(platform, paths)?;
+    let previous_definition = fs::read_to_string(&paths.definition).ok();
+    let previous_entry = fs::read_link(&paths.entry).ok();
+    install_entry(&paths.entry)?;
+    let result = write_owned(&paths.definition, &definition).and_then(|()| activate());
+    if let Err(error) = result {
+        let restore = (|| -> Result<(), String> {
+            if let Some(previous) = previous_definition {
+                write_owned(&paths.definition, &previous)?;
+            } else {
+                remove_owned(&paths.definition)?;
+            }
+            fs::remove_file(&paths.entry).map_err(|e| e.to_string())?;
+            #[cfg(unix)]
+            if let Some(previous) = previous_entry {
+                std::os::unix::fs::symlink(previous, &paths.entry).map_err(|e| e.to_string())?;
+            }
+            Ok(())
+        })();
+        return match restore {
+            Ok(()) => Err(format!("{error}; previous service files restored")),
+            Err(rollback) => Err(format!("{error}; service rollback failed: {rollback}")),
+        };
+    }
+    Ok(())
+}
+
 /// Explicit setup/removal/status operations. They never invoke sudo, never delete
 /// state/configuration, and reject a foreign registration before manager calls.
 pub fn operate(platform: Platform, action: &str, config: &Path) -> Result<(), String> {
+    if (platform == Platform::Linux && !cfg!(target_os = "linux"))
+        || (platform == Platform::Macos && !cfg!(target_os = "macos"))
+    {
+        return Err("service operations require the matching native operating system".into());
+    }
     let paths = paths(platform, config)?;
     match action {
-        "setup" => {
-            fs::create_dir_all(&paths.state)
-                .map_err(|e| format!("cannot create state directory: {e}"))?;
-            install_entry(&paths.entry)?;
-            write_owned(&paths.definition, &render(platform, &paths)?)?;
+        "setup" => setup(&paths, platform, || {
             manager(platform, action, &paths.definition)
-        }
+        }),
         "remove" => {
             if paths.definition.exists() && !is_owned(&paths.definition)? {
                 return Err(format!(
@@ -321,6 +360,31 @@ pub fn operate(platform: Platform, action: &str, config: &Path) -> Result<(), St
 mod tests {
     use super::*;
     use tempfile::tempdir;
+    #[cfg(unix)]
+    #[test]
+    fn failed_activation_restores_previous_definition_and_launcher() {
+        let root = tempdir().unwrap();
+        let paths = Paths {
+            entry: root.path().join("paraco"),
+            config: root.path().join("config"),
+            state: root.path().join("state"),
+            definition: root.path().join("service"),
+        };
+        std::os::unix::fs::symlink("/old/paraco", &paths.entry).unwrap();
+        let previous = render(Platform::Macos, &paths).unwrap();
+        fs::write(&paths.definition, &previous).unwrap();
+        assert!(
+            setup(&paths, Platform::Macos, || Err("fixture failure".into()))
+                .unwrap_err()
+                .contains("previous service files restored")
+        );
+        assert_eq!(
+            fs::read_link(&paths.entry).unwrap(),
+            Path::new("/old/paraco")
+        );
+        assert_eq!(fs::read_to_string(&paths.definition).unwrap(), previous);
+    }
+
     #[test]
     fn renders_paths_as_single_arguments() {
         let s = render_systemd(

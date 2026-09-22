@@ -3,6 +3,16 @@
 Work in small increments and check items off only after implementation and
 verification. Cloud work remains deferred.
 
+## M0–M3 follow-up
+
+See [current verification evidence](docs/verification-2026-09-21.md) and the
+[Linux-agent handoff](docs/linux-agent-handoff.md). SQLite migration, scoped
+cron-draft storage, backup export, authenticated `open`, and relocatable private
+Deno artifacts are implemented with regression checks. Historical pending labels
+below are superseded only where that evidence explicitly records a pass. Native
+Linux systemd, clean macOS, and machine reboot gates remain separate acceptance
+work; scheduling is not implemented.
+
 ## Proposed foundation pivot
 
 See [the foundation and cron plan](docs/foundation-and-cron-plan.md) for the
@@ -22,7 +32,7 @@ execution order; completed work remains recorded as historical milestones.
 The detailed plan defines the acceptance gates; partial implementation progress
 is recorded below without declaring an entire milestone complete.
 
-## M1 crash recovery — implemented, native macOS verification pending
+## M1 crash recovery — Linux/macOS ARM64 evidence retained
 
 - [x] Add per-app Rust guardians that terminate and reap Deno after runtime death,
       including blocked JavaScript and incomplete startup.
@@ -30,7 +40,7 @@ is recorded below without declaring an entire milestone complete.
       recover verified stale sockets without replacing live endpoints.
 - [x] Verify immediate multi-app restart, temporary-directory cleanup, and
       protection of unexpected endpoint files on Linux.
-- [ ] Retain successful native macOS crash-recovery test results.
+- [x] Retain successful native macOS ARM64 crash-recovery test results.
 - [x] Implement browser-origin isolation, output-loss reporting, and bounded
       workload admission; retain environment-specific measurement evidence before
       claiming the workload gate observed.
@@ -42,8 +52,8 @@ is recorded below without declaring an entire milestone complete.
 - [x] Implement offline AI routing and grant enforcement with a fake provider.
 - [x] Connect `context.ai.complete` through authenticated local transport.
 - [x] Unit-test AI policy, authentication framing, and cleanup behavior.
-- [ ] Retain pinned-Deno end-to-end evidence for AI calls, denied grants,
-      authentication, and cleanup (blocked locally: Deno is unavailable).
+- [x] Retain pinned-Deno end-to-end evidence for AI calls, denied grants,
+      authentication, and cleanup on Linux/macOS ARM64.
 
 ## Foreground multi-app hosting — completed
 
@@ -84,8 +94,8 @@ is recorded below without declaring an entire milestone complete.
 - [x] Implement the bounded provider/HTTP SSE streaming foundation.
 - [x] Add a real-provider adapter and host-owned credential-file handling.
 - [x] Persist host deployment identity and desired state.
-- [ ] Add app storage only with a concrete app-facing use case; unused storage
-      scaffolding was removed during the 2026-09-21 audit repair.
+- [x] Add deployment-scoped SQLite configuration/data storage for cron drafts,
+      with backup/export and migration/restore checks.
 - [x] Define deferred bounded scheduling, notifications, and health increments.
 - [ ] Verify Deno SDK streaming, provider saturation/cancellation, and native
       end-to-end HTTP behavior with deterministic fixtures.
@@ -107,14 +117,17 @@ See `docs/installation-and-release.md` for the detailed release plan.
 - [ ] Revisit public control protocols, cloud connectivity, and remote deployment
       only after the standalone local foundation is useful and verified.
 
-## M0/M1 verification status (2026-09)
+## M0/M1 verification status (2026-09 follow-up)
+
+See [retained evidence](docs/verification-2026-09-21.md) for commands, logs,
+source fingerprints, failures repaired, and platform limitations.
 
 | Gate | Status | Evidence / required follow-up |
 | --- | --- | --- |
-| Rust format, check, server-test compilation | observed pass | Linux x86_64, Rust 1.96.1; run `cargo fmt --check && cargo check && cargo test --test server --no-run`. |
-| Pinned complete check | pending | `npm run check` correctly fails locally before suites: Deno 2.2.5 and Playwright Chromium are absent; local Node is 22.22.3, not 22.14.0. |
-| Browser isolation and management | configured-only | CI installs Chromium and runs `node tests/browser-smoke.cjs`; retain a successful native artifact before claiming observed browser support. |
-| Guardian/crash recovery | pending native macOS | Run the Rust suite on macOS 13 with Deno 2.2.5; CI configuration is not evidence. |
-| Output-loss and admission regressions | implemented / compile-checked | Included in Rust tests; execute `cargo test` with pinned Deno to observe launch and blocked-output paths. |
-| 1/10/50 workload budget | pending observation | Run `PARACO_BIN=... node scripts/probe-hosted-workload.cjs one.json ten.json fifty.json` on the target host; retain its JSON, including optional noisy endpoint results. |
-| Other architectures and browsers | pending | No emulation or YAML configuration closes native architecture/browser gates. |
+| Pinned complete checks | observed pass | Rust 1.96.1, Deno 2.2.5, Node 22.14.0, Playwright 1.52.0 on macOS ARM64 and Linux ARM64 container. |
+| Browser isolation, management, AI authorization | observed pass | Complete Rust/Chromium suites; see retained platform logs. |
+| Guardian/crash recovery | observed pass on tested targets | Includes blocked import/event loop and immediate restart. |
+| 1/10/50 workload | observed pass | Readiness, noisy output, 72 successful requests per workload, management latency, host/tree RSS recorded. |
+| Native service | launchd observed; systemd pending | Linux agent handoff covers actual systemd session, terminal independence, and reboot. |
+| Clean offline bundle | Linux observed; clean macOS pending | Linux network-disabled container, no SDK tools, relocated artifact, symlinked private-Deno launcher. |
+| Machine restart / other targets | pending | No active Mac reboot or unobserved architecture/browser support claim. |

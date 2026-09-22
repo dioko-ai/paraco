@@ -96,8 +96,7 @@ manifest schema is intentionally explicit:
 `schemaVersion` may be omitted for the existing v1 manifest or set to `1`.
 `name` is 1–63 lowercase ASCII letters, digits, or hyphens, starts with a
 letter, and ends with a letter or digit. `entrypoint` must be a relative file contained in the application
-directory. `capabilities` is required and may be empty or contain `"ai"` for the
-local fake AI capability. Unknown fields and unsupported capabilities fail
+directory. `capabilities` is required and may be empty or contain `"ai"` for AI routing and `"storage"` for scoped configuration/data. Unknown fields and unsupported capabilities fail
 validation. The machine-readable draft schema is
 [`docs/paraco-manifest.schema.json`](docs/paraco-manifest.schema.json), and the
 matching handler types are in [`runtime/paraco.d.ts`](runtime/paraco.d.ts).
@@ -159,9 +158,9 @@ safety limits rather than CPU/RSS quotas.
 Opt-in user-service definitions, deployment-scoped durable state, a bounded
 host-owned OpenAI-compatible provider, and a loopback OpenAI-compatible HTTP
 subset (including the documented SSE foundation) now have implementation
-scaffolding. They are not native-release evidence: Deno-dependent integration,
-clean-machine, restart, signing, publication, and native package checks remain
-pending. Scheduling, notifications, health monitoring, cloud integration, and
+scaffolding. The retained verification record distinguishes observed Linux/macOS integration
+and launchd checks from remaining native Linux service, clean macOS, machine
+reboot, signing, publication, and native package gates. Scheduling, notifications, health monitoring, cloud integration, and
 the proposed cron product remain deferred. Local operation needs neither a
 cloud account nor paid AI; the fake provider remains available.
 
@@ -192,3 +191,8 @@ fields select a route. Apps requesting `ai` receive the interface, but calls are
 only permitted by grants in the explicitly selected host configuration. There
 are no automatic grants. The configuration must live outside the app directory.
 See [AI routing and transport](docs/ai-routing.md) for the contract and limits.
+
+SQLite migration, scoped cron-draft storage, backup/export, and authenticated
+`paraco open` are described in [durable state and services](docs/durable-state.md).
+See [retained verification evidence](docs/verification-2026-09-21.md) for the
+observed platform checks and gates that still require native machines.

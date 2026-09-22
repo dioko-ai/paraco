@@ -1,0 +1,4 @@
+Rust/cargo, Node, and system Deno absent
+prepared: HTTP 200, dependency-ok, clean exit; PATH=/missing; cwd=/; symlinked launcher
+prepared: HTTP 200, dependency-ok, clean exit; PATH=/missing; cwd=/; symlinked launcher
+source: HTTP 200, Hello from Paraco, clean exit; PATH=/missing; cwd=/; symlinked launcher

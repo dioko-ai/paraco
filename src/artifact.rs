@@ -12,7 +12,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const FORMAT: u32 = 1;
+const FORMAT: u32 = 2;
 const METADATA: &str = "paraco-artifact.json";
 
 pub struct PreparedApp {
@@ -32,6 +32,7 @@ struct Metadata {
     cache_digest: String,
     runtime: PathBuf,
     runtime_version: String,
+    runtime_digest: String,
     has_config: bool,
 }
 
@@ -91,13 +92,18 @@ pub fn prepare(source: &Path, output: &Path, deno: &Path) -> Result<(), String> 
     }
     validate_resolved_graph(&runtime, &app, config.as_deref(), &cache)?;
     let digest = tree_digest(&app_dir)?;
+    let private_runtime = root.join("runtime");
+    fs::create_dir(&private_runtime).map_err(|e| e.to_string())?;
+    fs::copy(&runtime, private_runtime.join("deno"))
+        .map_err(|e| format!("cannot copy private Deno: {e}"))?;
     let metadata = Metadata {
         format: FORMAT,
         source_digest: digest,
         lock_digest: file_digest(&lock)?,
         cache_digest: tree_digest(&cache)?,
-        runtime,
+        runtime: PathBuf::from("runtime/deno"),
         runtime_version: version,
+        runtime_digest: file_digest(&private_runtime.join("deno"))?,
         has_config: config.is_some(),
     };
     fs::write(
@@ -126,10 +132,13 @@ pub fn open(path: &Path) -> Result<PreparedApp, String> {
         return Err("prepared artifact source digest does not match metadata".into());
     }
     let app = manifest::load(&app_dir).map_err(|e| e.to_string())?;
-    let runtime = metadata
-        .runtime
+    let runtime = root
+        .join(&metadata.runtime)
         .canonicalize()
         .map_err(|e| format!("prepared Deno executable is unavailable: {e}"))?;
+    if file_digest(&runtime)? != metadata.runtime_digest {
+        return Err("prepared Deno digest no longer matches artifact metadata".into());
+    }
     if deno_version(&runtime)? != metadata.runtime_version {
         return Err("prepared Deno version no longer matches artifact metadata".into());
     }
@@ -278,7 +287,7 @@ fn file_digest(path: &Path) -> Result<String, String> {
     Ok(format!("{:x}", hash.finalize()))
 }
 
-fn copy_tree(from: &Path, to: &Path) -> Result<(), String> {
+pub(crate) fn copy_tree(from: &Path, to: &Path) -> Result<(), String> {
     fs::create_dir(to).map_err(|e| format!("cannot create artifact source directory: {e}"))?;
     for entry in fs::read_dir(from).map_err(|e| format!("cannot read app source: {e}"))? {
         let entry = entry.map_err(|e| format!("cannot read source entry: {e}"))?;

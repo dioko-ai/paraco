@@ -1,0 +1,20 @@
+   Compiling paraco v0.1.0 (/Users/alecdibble/repos/paraco)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.49s
+     Running tests/server.rs (target/debug/deps/server-6b588b7cd8e72986)
+
+running 1 test
+
+thread 'automatic_recovery_is_bounded_cancellable_and_isolated' (41537158) panicked at tests/server.rs:193:9:
+paraco: cannot read control message: Resource temporarily unavailable (os error 35)
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test automatic_recovery_is_bounded_cancellable_and_isolated ... FAILED
+
+failures:
+
+failures:
+    automatic_recovery_is_bounded_cancellable_and_isolated
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 33 filtered out; finished in 1.42s
+
+error: test failed, to rerun pass `--test server`

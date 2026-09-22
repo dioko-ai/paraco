@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "lowercase")]
 pub enum Action {
     Status,
+    Open,
     Start,
     Stop,
     Restart,
@@ -28,10 +29,12 @@ pub struct Status {
 }
 
 #[derive(Deserialize, Serialize)]
-struct Reply {
-    apps: Vec<Status>,
+pub struct Reply {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    pub apps: Vec<Status>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
+    pub error: Option<String>,
 }
 
 pub fn execute(port: u16, action: Action, app: Option<String>) -> Result<(), String> {
@@ -41,8 +44,40 @@ pub fn execute(port: u16, action: Action, app: Option<String>) -> Result<(), Str
     }
     println!(
         "{}",
-        serde_json::to_string_pretty(&reply.apps).map_err(|e| e.to_string())?
+        serde_json::to_string_pretty(&reply.apps)
+            .map_err(|e| format!("control socket operation failed: {e}"))?
     );
+    Ok(())
+}
+
+pub fn open(port: u16, print: bool) -> Result<(), String> {
+    let reply = transport::request(
+        port,
+        Command {
+            action: Action::Open,
+            app: None,
+        },
+    )?;
+    if let Some(error) = reply.error {
+        return Err(error);
+    }
+    let url = reply.url.ok_or("server did not return a management URL")?;
+    if print {
+        println!("{url}");
+        return Ok(());
+    }
+    let program = if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    let status = std::process::Command::new(program)
+        .arg(&url)
+        .status()
+        .map_err(|e| format!("cannot open browser: {e}; use --print"))?;
+    if !status.success() {
+        return Err("browser opener failed; use --print".into());
+    }
     Ok(())
 }
 
@@ -79,7 +114,8 @@ mod transport {
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(error) => return Err(format!("cannot create control directory: {error}")),
         }
-        let metadata = fs::symlink_metadata(&directory).map_err(|e| e.to_string())?;
+        let metadata = fs::symlink_metadata(&directory)
+            .map_err(|e| format!("control socket operation failed: {e}"))?;
         if !metadata.is_dir() || metadata.uid() != uid || metadata.mode() & 0o777 != 0o700 {
             return Err(format!(
                 "control directory {} must be owned by the current user with permissions 0700 and must not be a symlink",
@@ -101,7 +137,9 @@ mod transport {
             .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
             .open(path.with_extension("lock"))
             .map_err(|e| format!("cannot open control ownership lock: {e}"))?;
-        let metadata = file.metadata().map_err(|e| e.to_string())?;
+        let metadata = file
+            .metadata()
+            .map_err(|e| format!("control socket operation failed: {e}"))?;
         if !metadata.is_file()
             || metadata.uid() != unsafe { libc::geteuid() }
             || metadata.mode() & 0o777 != 0o600
@@ -160,7 +198,7 @@ mod transport {
     impl Server {
         pub fn start(
             port: u16,
-            handler: impl Fn(Command) -> Result<Vec<Status>, String> + Send + 'static,
+            handler: impl Fn(Command) -> Result<Reply, String> + Send + 'static,
         ) -> Result<Self, String> {
             let path = endpoint(port)?;
             let lease = Arc::new(acquire_lease(&path)?);
@@ -175,13 +213,21 @@ mod transport {
                 _lease: lease,
             };
             fs::set_permissions(&server.path, fs::Permissions::from_mode(0o600))
-                .map_err(|e| e.to_string())?;
-            listener.set_nonblocking(true).map_err(|e| e.to_string())?;
+                .map_err(|e| format!("control socket operation failed: {e}"))?;
+            listener
+                .set_nonblocking(true)
+                .map_err(|e| format!("control socket operation failed: {e}"))?;
             let stop = server.stop.clone();
             server.worker = Some(thread::spawn(move || {
                 while !stop.load(Ordering::Relaxed) {
                     match listener.accept() {
                         Ok((mut stream, _)) => {
+                            // macOS inherits O_NONBLOCK from the listening socket.
+                            // Normalize accepted sockets before configuring their deadlines.
+                            // Framed IO switches to nonblocking reads/writes guarded by poll.
+                            if stream.set_nonblocking(false).is_err() {
+                                continue;
+                            }
                             let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
                             let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));
                             let result = read_frame(&mut stream, 4096)
@@ -191,8 +237,9 @@ mod transport {
                                 })
                                 .and_then(&handler);
                             let reply = match result {
-                                Ok(apps) => Reply { apps, error: None },
+                                Ok(reply) => reply,
                                 Err(error) => Reply {
+                                    url: None,
                                     apps: vec![],
                                     error: Some(error),
                                 },
@@ -220,11 +267,37 @@ mod transport {
         }
     }
 
+    fn ready(stream: &UnixStream, events: libc::c_short, timeout: Duration) -> Result<(), String> {
+        let mut descriptor = libc::pollfd {
+            fd: stream.as_raw_fd(),
+            events,
+            revents: 0,
+        };
+        let result = unsafe {
+            libc::poll(
+                &mut descriptor,
+                1,
+                timeout.as_millis().max(1).min(i32::MAX as u128) as i32,
+            )
+        };
+        if result == 0 {
+            return Err("control message deadline exceeded".into());
+        }
+        if result < 0 {
+            return Err(format!(
+                "cannot poll control socket: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        Ok(())
+    }
+
     fn read_frame(stream: &mut UnixStream, limit: usize) -> Result<Vec<u8>, String> {
         let timeout = stream
             .read_timeout()
-            .map_err(|e| e.to_string())?
+            .map_err(|e| format!("control socket operation failed: {e}"))?
             .unwrap_or(Duration::from_secs(1));
+        stream.set_nonblocking(true).map_err(|e| e.to_string())?;
         let deadline = Instant::now() + timeout;
         let mut bytes = Vec::new();
         loop {
@@ -232,13 +305,20 @@ mod transport {
                 .checked_duration_since(Instant::now())
                 .filter(|duration| !duration.is_zero())
                 .ok_or("control message read timed out")?;
-            stream
-                .set_read_timeout(Some(remaining))
-                .map_err(|e| e.to_string())?;
+            ready(stream, libc::POLLIN, remaining)?;
             let mut buffer = [0u8; 4096];
-            let count = stream
-                .read(&mut buffer)
-                .map_err(|e| format!("cannot read control message: {e}"))?;
+            let count = match stream.read(&mut buffer) {
+                Ok(count) => count,
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                    ) =>
+                {
+                    continue;
+                }
+                Err(e) => return Err(format!("cannot read control message: {e}")),
+            };
             if count == 0 {
                 return Err("incomplete control message".into());
             }
@@ -255,12 +335,14 @@ mod transport {
     }
 
     fn write_frame(stream: &mut UnixStream, value: &impl Serialize) -> Result<(), String> {
-        let mut bytes = serde_json::to_vec(value).map_err(|e| e.to_string())?;
+        let mut bytes = serde_json::to_vec(value)
+            .map_err(|e| format!("control socket operation failed: {e}"))?;
         bytes.push(b'\n');
         let timeout = stream
             .write_timeout()
-            .map_err(|e| e.to_string())?
+            .map_err(|e| format!("control socket operation failed: {e}"))?
             .unwrap_or(Duration::from_secs(1));
+        stream.set_nonblocking(true).map_err(|e| e.to_string())?;
         let deadline = Instant::now() + timeout;
         let mut remaining = bytes.as_slice();
         while !remaining.is_empty() {
@@ -268,12 +350,19 @@ mod transport {
                 .checked_duration_since(Instant::now())
                 .filter(|duration| !duration.is_zero())
                 .ok_or("control message write timed out")?;
-            stream
-                .set_write_timeout(Some(timeout))
-                .map_err(|e| e.to_string())?;
-            let count = stream
-                .write(remaining)
-                .map_err(|e| format!("cannot write control message: {e}"))?;
+            ready(stream, libc::POLLOUT, timeout)?;
+            let count = match stream.write(remaining) {
+                Ok(count) => count,
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                    ) =>
+                {
+                    continue;
+                }
+                Err(e) => return Err(format!("cannot write control message: {e}")),
+            };
             if count == 0 {
                 return Err("control connection closed".into());
             }
@@ -303,10 +392,10 @@ mod transport {
             .map_err(|e| format!("cannot connect to local server: {e}"))?;
         stream
             .set_read_timeout(Some(Duration::from_secs(3)))
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| format!("control socket operation failed: {e}"))?;
         stream
             .set_write_timeout(Some(Duration::from_secs(3)))
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| format!("control socket operation failed: {e}"))?;
         write_frame(&mut stream, &command)?;
         serde_json::from_slice(&read_frame(&mut stream, 1024 * 1024)?)
             .map_err(|_| "invalid control response".into())
@@ -314,6 +403,21 @@ mod transport {
     #[cfg(test)]
     mod ownership_tests {
         use super::*;
+
+        #[test]
+        fn reads_large_reply_after_peer_closes() {
+            let (mut reader, mut writer) = UnixStream::pair().unwrap();
+            reader
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let message = format!("{}\n", "x".repeat(16000));
+            let expected = message.clone();
+            let worker = thread::spawn(move || {
+                writer.write_all(message.as_bytes()).unwrap();
+            });
+            assert_eq!(read_frame(&mut reader, 20000).unwrap(), expected.as_bytes());
+            worker.join().unwrap();
+        }
 
         #[test]
         fn ownership_survives_until_the_last_guardian_duplicate_closes() {
@@ -358,7 +462,7 @@ mod transport {
     impl Server {
         pub fn start(
             _port: u16,
-            _handler: impl Fn(Command) -> Result<Vec<Status>, String> + Send + 'static,
+            _handler: impl Fn(Command) -> Result<Reply, String> + Send + 'static,
         ) -> Result<Self, String> {
             // Preserve foreground hosting on platforms without this transport.
             Ok(Self)

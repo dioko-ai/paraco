@@ -1,0 +1,51 @@
+{
+  "platform": "darwin",
+  "results": [
+    {
+      "apps": 1,
+      "startupMs": 307,
+      "managementLatencyMs": 15,
+      "treeRssAtReadyKiB": 73600,
+      "treeRssAfterLoadKiB": 86176,
+      "requests": 64,
+      "noisyRequests": 8,
+      "elapsedMs": 415,
+      "rssAtReadyKiB": 15088,
+      "rssAfterLoadKiB": 20848,
+      "statusCounts": {
+        "200": 72
+      }
+    },
+    {
+      "apps": 10,
+      "startupMs": 208,
+      "managementLatencyMs": 17,
+      "treeRssAtReadyKiB": 603968,
+      "treeRssAfterLoadKiB": 621280,
+      "requests": 64,
+      "noisyRequests": 8,
+      "elapsedMs": 171,
+      "rssAtReadyKiB": 18496,
+      "rssAfterLoadKiB": 24768,
+      "statusCounts": {
+        "200": 72
+      }
+    },
+    {
+      "apps": 50,
+      "startupMs": 829,
+      "managementLatencyMs": 14,
+      "treeRssAtReadyKiB": 2622784,
+      "treeRssAfterLoadKiB": 2647760,
+      "requests": 64,
+      "noisyRequests": 8,
+      "elapsedMs": 204,
+      "rssAtReadyKiB": 19632,
+      "rssAfterLoadKiB": 26384,
+      "statusCounts": {
+        "200": 72
+      }
+    }
+  ]
+}
+{"storage": "persisted after SIGKILL and restart", "isolation": "app1 cannot read app0 draft", "desired_state": "stopped intent and identity restored", "open": "private URL rotates after restart"}

@@ -279,20 +279,34 @@ async fn host(
     // Bind management before starting children; a conflicting endpoint starts none.
     let control_apps = inventory.clone();
     let control_durable = durable.clone();
-    let control = control::Server::start(port, move |command| {
-        manage(&control_apps, &control_durable, command)
-    })?;
     let (management_listener, management_router, management_url) =
         management::bind(inventory.clone(), durable.clone(), port, store.clone()).await?;
+    let private_url = management_url.clone();
+    let control = control::Server::start(port, move |command| {
+        if matches!(command.action, control::Action::Open) {
+            return Ok(control::Reply {
+                apps: vec![],
+                error: None,
+                url: Some(private_url.clone()),
+            });
+        }
+        manage(&control_apps, &control_durable, command).map(|apps| control::Reply {
+            apps,
+            error: None,
+            url: None,
+        })
+    })?;
     let state_lease = durable.lock().unwrap().guardian_lease()?;
     for prepared in apps {
         let states = inventory.clone();
         let state_lease = state_lease.try_clone().map_err(|e| e.to_string())?;
         let app_stop = stop.clone();
         let app_store = store.clone();
+        let app_durable = durable.clone();
         supervisors.threads.push(thread::spawn(move || {
             supervise(
                 prepared,
+                app_durable,
                 states,
                 app_stop,
                 app_store,
@@ -679,6 +693,7 @@ fn dashboard(apps: &Inventory, port: u16) -> Html<String> {
 // up their resources before the worker can launch another generation.
 fn supervise(
     prepared: PreparedApp,
+    durable: Arc<Mutex<state::Store>>,
     apps: Inventory,
     stop: Arc<AtomicBool>,
     store: logs::Store,
@@ -739,7 +754,7 @@ fn supervise(
             if app.name != name {
                 return Err("manifest name changed; restore it or restart the server with updated configuration".into());
             }
-            runner::RunningApp::start(app, &deployment_id, 0, prepared.ai_config.as_deref(), &base, Some(&backend_token), &cancel, log.clone(), lease.as_deref())
+            runner::RunningApp::start(app, &deployment_id, durable.clone(), 0, prepared.ai_config.as_deref(), &base, Some(&backend_token), &cancel, log.clone(), lease.as_deref())
         });
         let mut running = match result {
             Ok(running) => running,
@@ -904,7 +919,7 @@ fn manage(
             .get_mut(name)
             .ok_or_else(|| format!("unknown application `{name}`"))?;
         let desired = match command.action {
-            control::Action::Status => None,
+            control::Action::Status | control::Action::Open => None,
             control::Action::Start
                 if app.desired == DesiredState::Running
                     && !matches!(app.state, AppState::Failed(_)) =>

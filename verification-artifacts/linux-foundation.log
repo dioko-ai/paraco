@@ -1,0 +1,59 @@
+{
+  "platform": "linux",
+  "results": [
+    {
+      "apps": 1,
+      "startupMs": 174,
+      "managementLatencyMs": 12,
+      "treeRssAtReadyKiB": 79292,
+      "treeRssAfterLoadKiB": 81112,
+      "requests": 64,
+      "noisyRequests": 8,
+      "elapsedMs": 112,
+      "rssAtReadyKiB": 13296,
+      "rssAfterLoadKiB": 15116,
+      "statusCounts": {
+        "200": 64,
+        "404": 8
+      }
+    },
+    {
+      "apps": 10,
+      "startupMs": 298,
+      "managementLatencyMs": 8,
+      "treeRssAtReadyKiB": 671384,
+      "treeRssAfterLoadKiB": 673720,
+      "requests": 64,
+      "noisyRequests": 8,
+      "elapsedMs": 42,
+      "rssAtReadyKiB": 14364,
+      "rssAfterLoadKiB": 16700,
+      "statusCounts": {
+        "200": 64,
+        "404": 8
+      }
+    },
+    {
+      "apps": 50,
+      "startupMs": 862,
+      "managementLatencyMs": 15,
+      "treeRssAtReadyKiB": 3322856,
+      "treeRssAfterLoadKiB": 3329552,
+      "requests": 64,
+      "noisyRequests": 8,
+      "elapsedMs": 70,
+      "rssAtReadyKiB": 18676,
+      "rssAfterLoadKiB": 21256,
+      "statusCounts": {
+        "200": 64,
+        "404": 8
+      }
+    }
+  ]
+}
+{"storage": "persisted after SIGKILL and restart", "isolation": "app1 cannot read app0 draft", "desired_state": "stopped intent and identity restored", "open": "private URL rotates after restart"}
+Traceback (most recent call last):
+  File "/source/scripts/verify-prepared.py", line 35, in <module>
+    assert child.returncode==0
+           ^^^^^^^^^^^^^^^^^^^
+AssertionError

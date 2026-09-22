@@ -3,7 +3,7 @@ use std::io::Write;
 use std::path::Path;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::{
-    Arc, OnceLock,
+    Arc, Mutex, OnceLock,
     atomic::{AtomicBool, Ordering},
     mpsc,
 };
@@ -49,6 +49,7 @@ pub fn run(
     let mut running = RunningApp::start(
         app,
         &deployment_id,
+        Arc::new(Mutex::new(_state)),
         port,
         ai_config,
         "/",
@@ -90,6 +91,7 @@ pub fn run_prepared(
     let mut running = RunningApp::start_prepared(
         artifact,
         &deployment_id,
+        Arc::new(Mutex::new(_state)),
         port,
         ai_config,
         "/",
@@ -153,6 +155,7 @@ pub struct RunningApp {
     output: Option<thread::JoinHandle<()>>,
     errors: Option<thread::JoinHandle<()>>,
     _capability: Option<Capability>,
+    _storage: Option<crate::storage::Service>,
     _temporary: tempfile::TempDir,
     log: logs::AppLog,
 }
@@ -162,6 +165,7 @@ impl RunningApp {
     pub fn start(
         app: manifest::App,
         deployment_id: &str,
+        durable: Arc<Mutex<state::Store>>,
         port: u16,
         ai_config: Option<&Path>,
         base_path: &str,
@@ -174,6 +178,7 @@ impl RunningApp {
         let result = Self::launch(
             app,
             deployment_id,
+            durable,
             port,
             ai_config,
             base_path,
@@ -193,6 +198,7 @@ impl RunningApp {
     pub fn start_prepared(
         prepared: artifact::PreparedApp,
         deployment_id: &str,
+        durable: Arc<Mutex<state::Store>>,
         port: u16,
         ai_config: Option<&Path>,
         base_path: &str,
@@ -211,6 +217,7 @@ impl RunningApp {
         let result = Self::launch(
             app,
             deployment_id,
+            durable,
             port,
             ai_config,
             base_path,
@@ -235,6 +242,7 @@ impl RunningApp {
     fn launch(
         app: manifest::App,
         deployment_id: &str,
+        durable: Arc<Mutex<state::Store>>,
         port: u16,
         ai_config: Option<&Path>,
         base_path: &str,
@@ -252,13 +260,28 @@ impl RunningApp {
             }
             None
         };
+        let storage = if app.requests_storage {
+            Some(crate::storage::Service::start(
+                durable,
+                deployment_id.to_string(),
+            )?)
+        } else {
+            None
+        };
         let temporary = tempfile::tempdir()
             .map_err(|error| format!("cannot create runtime temporary directory: {error}"))?;
+        // Deno writes runtime caches even with --cached-only. Keep immutable
+        // prepared dependencies pristine and discard per-launch cache writes.
+        let launch_cache = temporary.path().join("deno-cache");
+        if let Some(prepared) = &prepared {
+            artifact::copy_tree(&prepared.cache, &launch_cache)?;
+        }
         let nonce = readiness_nonce();
         let entrypoint_url = url::Url::from_file_path(&app.entrypoint)
             .map_err(|_| "cannot create entrypoint file URL")?;
         let bootstrap = serde_json::json!({
             "basePath": base_path,
+            "storage": storage.as_ref().map(|s| serde_json::json!({"address":s.address,"token":s.token})),
             "backendToken": backend_token,
             "ai": capability.as_ref().map(|c| serde_json::json!({"address": c.address, "token": c.token, "timeoutMs": c.timeout.as_millis(), "http": {"address": c.http_address, "token": c.http_token}}))
         });
@@ -284,6 +307,7 @@ impl RunningApp {
         if let Some(prepared) = &prepared {
             command
                 .arg("--cached-only")
+                .arg("--frozen")
                 .arg("--lock")
                 .arg(&prepared.lock);
             if let Some(config) = &prepared.config {
@@ -297,10 +321,14 @@ impl RunningApp {
             .arg("--no-prompt")
             .arg(format!("--allow-read={}", app.root.display()))
             .arg(format!(
-                "--allow-net=127.0.0.1:{port}{}",
+                "--allow-net=127.0.0.1:{port}{}{}",
                 capability
                     .as_ref()
                     .map(|c| format!(",{},{}", c.address, c.http_address))
+                    .unwrap_or_default(),
+                storage
+                    .as_ref()
+                    .map(|s| format!(",{}", s.address))
                     .unwrap_or_default()
             ))
             .arg(entrypoint_url.as_str())
@@ -308,13 +336,7 @@ impl RunningApp {
             .arg(&nonce)
             .current_dir(&app.root)
             .env_clear()
-            .env(
-                "PARACO_GUARDIAN_DENO_DIR",
-                prepared
-                    .as_ref()
-                    .map(|p| p.cache.clone())
-                    .unwrap_or_else(|| temporary.path().join("deno-cache")),
-            )
+            .env("PARACO_GUARDIAN_DENO_DIR", &launch_cache)
             .env("PARACO_GUARDIAN_DENO", deno)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -343,6 +365,7 @@ impl RunningApp {
             output: None,
             errors: None,
             _capability: capability,
+            _storage: storage,
             _temporary: temporary,
             log: log.clone(),
         };

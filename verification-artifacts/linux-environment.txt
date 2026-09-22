@@ -1,0 +1,18 @@
+Linux b87d894c6a76 7.0.12-linuxkit #1 SMP PREEMPT Fri Aug 14 16:27:59 UTC 2026 aarch64 GNU/Linux
+PRETTY_NAME="Debian GNU/Linux 13 (trixie)"
+NAME="Debian GNU/Linux"
+VERSION_ID="13"
+VERSION="13 (trixie)"
+VERSION_CODENAME=trixie
+DEBIAN_VERSION_FULL=13.5
+ID=debian
+HOME_URL="https://www.debian.org/"
+SUPPORT_URL="https://www.debian.org/support"
+BUG_REPORT_URL="https://bugs.debian.org/"
+rustc 1.96.1 (31fca3adb 2026-06-26)
+deno 2.2.5 (stable, release, aarch64-unknown-linux-gnu)
+v8 13.5.212.4-rusty
+typescript 5.7.3
+v22.14.0
+Version 1.52.0
+2ba93c7c10187dda7843d550da81814deb14d3170893ba758f05574d1814026f  /build/bundle-final/paraco-0.1.0-aarch64-unknown-linux-gnu.tar.gz

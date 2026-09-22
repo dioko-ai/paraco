@@ -47,3 +47,18 @@ pending.
 See [current status](status.md) for observed checks and remaining platform
 validation. Historical audits and milestone plans retain their original context;
 they are not current verification records.
+
+## Expanded foundation verification
+
+Run `scripts/verify-foundation.py` with pinned Node/Deno on PATH after building.
+It waits for every app at 1/10/50 scale, measures host and process-tree RSS,
+exercises noisy output, checks management latency, and verifies scoped storage,
+private browser entry, and desired-state restoration after SIGKILL. Set
+`PARACO_BIN` for a non-default build location. Use `scripts/verify-prepared.py`
+for two relocated dependency-bearing launches and failed-preparation preservation.
+
+The complete checks use `RUST_TEST_THREADS=1` in CI to avoid ephemeral-port reuse
+between unrelated integration fixtures. Application concurrency is exercised by
+the multi-app suites and workload probe. `scripts/verify-service.py` operates a
+uniquely named temporary native service; use a private-Deno bundle as `PARACO_BIN`.
+It requires a real systemd user session or macOS GUI login session.

@@ -550,6 +550,7 @@ mod tests {
             root: dir.path().to_path_buf(),
             entrypoint: dir.path().join("main.ts"),
             requests_ai: true,
+            requests_storage: false,
         };
         let capability = Capability::start(&app, "deployment-test", None).unwrap();
         let mut slow = TcpStream::connect(&capability.http_address).unwrap();
@@ -627,6 +628,7 @@ mod tests {
             root: app_root.path().canonicalize().unwrap(),
             entrypoint: app_root.path().join("main.ts"),
             requests_ai: true,
+            requests_storage: false,
         };
         let capability = Capability::start(&app, "deployment-fixture", Some(&config)).unwrap();
         let completed = exchange(
@@ -664,6 +666,7 @@ mod tests {
             root: app_root.path().canonicalize().unwrap(),
             entrypoint: app_root.path().join("main.ts"),
             requests_ai: true,
+            requests_storage: false,
         };
         let one = Capability::start(&app, "deployment-one", Some(&config)).unwrap();
         let two = Capability::start(&app, "deployment-two", Some(&config)).unwrap();
@@ -784,6 +787,7 @@ for _ in range(2):
             root: app_root.path().canonicalize().unwrap(),
             entrypoint: app_root.path().join("main.ts"),
             requests_ai: true,
+            requests_storage: false,
         };
         let capability = Capability::start(&app, "deployment-tls", Some(&config)).unwrap();
         let completed = exchange(
@@ -809,6 +813,7 @@ for _ in range(2):
             root: dir.path().to_path_buf(),
             entrypoint: dir.path().join("main.ts"),
             requests_ai: true,
+            requests_storage: false,
         };
         let capability = Capability::start(&app, "deployment-test", None).unwrap();
         let request = serde_json::json!({"prompt": "private"});
@@ -881,6 +886,7 @@ mod config_tests {
             root: root.path().canonicalize().unwrap(),
             entrypoint: root.path().join("main.ts"),
             requests_ai: true,
+            requests_storage: false,
         };
         let inside = root.path().join("ai.json");
         std::fs::write(&inside, "{}").unwrap();

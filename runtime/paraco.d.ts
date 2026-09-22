@@ -4,7 +4,7 @@ export interface ParacoManifest {
   schemaVersion?: 1;
   name: string;
   entrypoint: string;
-  capabilities: Array<"ai">;
+  capabilities: Array<"ai" | "storage">;
 }
 
 export interface AiCompletionRequest {
@@ -19,7 +19,15 @@ export interface AiCompletionResponse {
 }
 
 
+export interface ScopedStorage {
+  get(key: string): Promise<unknown>;
+  set(key: string, value: unknown): Promise<unknown>;
+  delete(key: string): Promise<unknown>;
+}
 export interface AppContext {
+  /** Deployment-scoped draft configuration and application data; requires storage. */
+  config?: ScopedStorage;
+  data?: ScopedStorage;
   /** The public mount prefix; it always begins and ends with '/'. */
   basePath: string;
   /** Present only when the host grants the app the local AI capability. */

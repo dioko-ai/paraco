@@ -1,0 +1,4 @@
+
+> test:browser
+> node tests/browser-smoke.cjs
+

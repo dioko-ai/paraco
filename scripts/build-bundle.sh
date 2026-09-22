@@ -13,7 +13,7 @@ REVISION=$(git rev-parse --verify HEAD)
 VERSION=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)
 [ -n "$VERSION" ] && [ ! -e "$OUTPUT" ] || { echo "missing version or output already exists" >&2; exit 1; }
 cargo build --release --target "$TARGET"
-BIN="target/$TARGET/release/paraco"; [ -x "$BIN" ] || { echo "missing release executable" >&2; exit 1; }
+BIN="${CARGO_TARGET_DIR:-target}/$TARGET/release/paraco"; [ -x "$BIN" ] || { echo "missing release executable" >&2; exit 1; }
 STAGE=$(mktemp -d); trap 'rm -rf "$STAGE"' EXIT
 ROOT="$STAGE/paraco-$VERSION-$TARGET"; mkdir -p "$ROOT/bin" "$ROOT/libexec/paraco" "$ROOT/notices"
 cp "$BIN" "$ROOT/bin/paraco"; cp "$DENO" "$ROOT/libexec/paraco/deno"; cp LICENSE "$ROOT/notices/LICENSE"; cp "$DENO_NOTICE" "$ROOT/notices/DENO-NOTICE"; cp "$THIRD_PARTY_NOTICE" "$ROOT/notices/RUST-THIRD-PARTY-NOTICES"

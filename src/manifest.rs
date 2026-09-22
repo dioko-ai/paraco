@@ -6,6 +6,7 @@ use std::path::{Component, Path, PathBuf};
 pub struct App {
     pub name: String,
     pub requests_ai: bool,
+    pub requests_storage: bool,
     pub root: PathBuf,
     pub entrypoint: PathBuf,
 }
@@ -172,6 +173,7 @@ pub fn load(app_dir: &Path) -> Result<App, Error> {
 
     Ok(App {
         requests_ai: manifest.capabilities.iter().any(|c| c == "ai"),
+        requests_storage: manifest.capabilities.iter().any(|c| c == "storage"),
         name: manifest.name,
         root: app_dir,
         entrypoint,

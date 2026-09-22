@@ -4,7 +4,16 @@ This is the current status record. `spec.md` describes project intent; dated
 audits record historical findings. Milestone plans describe future work and do
 not establish verification evidence.
 
-## Audit repair scope — 2026-09-21
+## M0–M3 follow-up — 2026-09-21
+
+SQLite migration, scoped cron-draft storage, backup, authenticated browser entry,
+portable prepared artifacts, and native service fixes are implemented. See
+[the retained verification record](verification-2026-09-21.md) for current results
+and [the Linux-agent handoff](linux-agent-handoff.md) for remaining native gates.
+The prior audit observations below are historical, not a claim that every M0–M3
+exit criterion is closed.
+
+## Earlier audit repair scope — 2026-09-21
 
 The repair retains the Rust supervisor, embedded Deno adapter, and plain
 JavaScript dashboard. It adds no account requirements, automatic credential
@@ -23,7 +32,7 @@ grants, feature flags, or cloud services.
 | 9. Failed persistence changes memory | Commit proposed state before publishing it; synchronize writes and remove unused app storage scaffolding. |
 | 10. Source substring import checks | Validate Deno's resolved dependency graph instead of scanning application text. |
 
-Identity state now uses format 2 in separate namespaces: hosted state is keyed
+At the audit-repair stage, identity state used JSON format 2 in separate namespaces: hosted state is keyed
 by canonical server-config location, and standalone state by canonical app
 location. The prior shared name-keyed state is not reused or automatically
 migrated; copying a format-1 file into a new namespace is rejected. Existing
@@ -34,10 +43,9 @@ source within a new namespace preserves its identity. Use a different source
 location, or remove it from a hosted configuration and restart before re-adding
 it, for a fresh installation.
 
-Deployment state currently uses one JSON store. Before scheduling is added,
-migrate that store and scheduling metadata together to SQLite; do not introduce
-more custom stores. Application storage remains deferred until a concrete app
-interface and use case are implemented.
+The follow-up migrates format-2 JSON state to SQLite schema version 1 and adds
+scoped storage for the concrete cron-draft use case. Existing format-2 IDs and
+stopped intent are preserved. See [durable state](durable-state.md).
 
 ## Verification
 

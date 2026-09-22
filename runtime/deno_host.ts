@@ -82,7 +82,35 @@ const aiContext = Object.freeze(
     : {},
 );
 
-const context = Object.freeze({ ...aiContext, basePath: hostConfig.basePath });
+async function storageRequest(namespace: string, key: string, value?: unknown, remove = false) {
+  const storage = hostConfig.storage;
+  const body = encoder.encode(JSON.stringify({ token: storage.token, namespace, key, value, operation: remove ? "delete" : value === undefined ? "get" : "set" }) + "\n");
+  if (body.length > 70000) throw new Error("storage request too large");
+  const conn = await connect({ hostname: "127.0.0.1", port: Number(storage.address.split(":")[1]) });
+  const timer = setTimeout(() => { try { conn.close(); } catch { /* closed */ } }, 4000);
+  try {
+    let offset = 0;
+    while (offset < body.length) offset += await conn.write(body.subarray(offset));
+    const chunks: number[] = [];
+    const buffer = new Uint8Array(4096);
+    while (chunks.length <= 70000) {
+      const n = await conn.read(buffer);
+      if (n === null) break;
+      chunks.push(...buffer.subarray(0, n));
+      if (chunks.includes(10)) break;
+    }
+    if (chunks.length > 70000) throw new Error("storage response too large");
+    const result = JSON.parse(decoder.decode(new Uint8Array(chunks)));
+    if (result.error) throw new Error(result.error);
+    return result.value;
+  } finally { clearTimeout(timer); try { conn.close(); } catch { /* closed */ } }
+}
+const storageContext = hostConfig.storage ? Object.fromEntries(["config", "data"].map(namespace => [namespace, Object.freeze({
+  get: (key: string) => storageRequest(namespace, key),
+  set: (key: string, value: unknown) => storageRequest(namespace, key, value),
+  delete: (key: string) => storageRequest(namespace, key, undefined, true),
+})])) : {};
+const context = Object.freeze({ ...aiContext, ...storageContext, basePath: hostConfig.basePath });
 
 const app = (await import(entrypoint)).default;
 if (!app || typeof app.fetch !== "function") {

@@ -1,0 +1,66 @@
+{
+  "date": "2026-09-21",
+  "macos_complete_check": {
+    "exit": 0,
+    "log": "macos-check.log",
+    "rust_test_threads": 1
+  },
+  "linux_complete_check_prior_final": {
+    "exit": 0,
+    "log": "linux-check.log",
+    "environment": "native ARM64 Linux kernel in Docker Desktop VM; no systemd user session"
+  },
+  "macos_launchd": {
+    "exit": 0,
+    "log": "macos-service.log",
+    "machine_reboot": false
+  },
+  "macos_relocated_prepared_twice": {
+    "exit": 0,
+    "log": "macos-offline.log"
+  },
+  "linux_clean_offline_initial": {
+    "exit": 0,
+    "log": "linux-clean-offline.log",
+    "network": "none",
+    "image": "debian:trixie-slim",
+    "rust_node_system_deno": "absent"
+  },
+  "remaining": [
+    "native Linux systemd session",
+    "machine reboot restoration",
+    "clean macOS machine",
+    "unobserved CPU/OS combinations"
+  ],
+  "macos_foundation": {
+    "exit": 0,
+    "log": "macos-foundation.log",
+    "requests_per_workload": 72,
+    "noisy_requests": 8
+  },
+  "linux_final": {
+    "exit": 0,
+    "log": "linux-final.log",
+    "includes": [
+      "complete pinned checks",
+      "1/10/50 noisy workloads",
+      "storage/crash restoration",
+      "repeated relocated preparation",
+      "installer checks",
+      "release archive fixture build"
+    ]
+  },
+  "linux_clean_final": {
+    "exit": 0,
+    "log": "linux-clean-final.log",
+    "image": "debian:trixie-slim",
+    "network": "none",
+    "artifacts": "read-only",
+    "launches": [
+      "prepared",
+      "prepared",
+      "bundled source"
+    ],
+    "system_rust_node_deno": "absent"
+  }
+}

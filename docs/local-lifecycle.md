@@ -18,7 +18,7 @@ cargo run -- restart hello
 
 Use `--port 8787` on both `serve` and management commands when selecting another
 server. Management commands apply to `serve`, not standalone `run` processes.
-They currently require Unix; verification is on Linux. Foreground hosting remains
+They currently require Unix; Linux/macOS ARM64 checks are retained. Foreground hosting remains
 available on other platforms.
 
 ## Command behavior
@@ -190,7 +190,8 @@ restart immediately with multiple apps, verify Deno reaping and temporary-direct
 cleanup, and preserve live or unexpected control endpoints. These tests run in the
 Unix suite for Linux and macOS when its Deno prerequisite is available. The
 current pinned target is Deno 2.2.5. See [current status](status.md) for the
-observed Linux process and browser checks. Native macOS evidence remains pending.
+observed process and browser checks. Current Linux/macOS evidence and remaining
+native-service/reboot gates are in [the verification record](verification-2026-09-21.md).
 
 ```sh
 cargo fmt --check
