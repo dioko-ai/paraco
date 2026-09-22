@@ -1,0 +1,98 @@
+diff --git a/scripts/verify-prepared.py b/scripts/verify-prepared.py
+index 199867f..af5ce56 100644
+--- a/scripts/verify-prepared.py
++++ b/scripts/verify-prepared.py
+@@ -24,6 +24,13 @@ with tempfile.TemporaryDirectory(prefix='pc-offline-',dir='/tmp') as directory:
+         with open(root/'run.log','w') as log:
+             child=subprocess.Popen([binary,'--log-dir',str(root/'logs'),'run-prepared',str(relocated),'--port',str(port)],env={'PATH':'/nonexistent','TMPDIR':'/tmp'},cwd='/',stdout=log,stderr=log)
+             try:
++                # Deno can serve before the host consumes its readiness message.
++                # Wait for host readiness before testing a normal graceful stop.
++                for _ in range(200):
++                    if 'listening on http://' in (root/'run.log').read_text(): break
++                    if child.poll() is not None: raise RuntimeError((root/'run.log').read_text())
++                    time.sleep(.1)
++                else: raise RuntimeError('host readiness timed out')
+                 for _ in range(200):
+                     try:
+                         with urllib.request.urlopen(f'http://127.0.0.1:{port}',timeout=1) as response: assert response.read()==b'dependency-ok'; break
+diff --git a/scripts/verify-service.py b/scripts/verify-service.py
+index 23478f7..4d3c19d 100644
+--- a/scripts/verify-service.py
++++ b/scripts/verify-service.py
+@@ -12,7 +12,7 @@ def wait(check):
+         time.sleep(.2)
+     raise RuntimeError('native service verification timed out')
+ with tempfile.TemporaryDirectory(prefix='pc-service-',dir='/tmp') as directory:
+-    root=pathlib.Path(directory); state=root/'state'; state.mkdir(); app=root/'app'; app.mkdir()
++    root=pathlib.Path(directory); state=root/'state with spaces'; state.mkdir(); app=root/'app'; app.mkdir()
+     (app/'paraco.json').write_text('{"name":"service-app","entrypoint":"main.ts","capabilities":[]}')
+     (app/'main.ts').write_text('export default {fetch(){return new Response("service-ok")}}')
+     config=root/'server.json'; config.write_text(json.dumps({'apps':[{'path':str(app)}]}))
+@@ -37,7 +37,8 @@ with tempfile.TemporaryDirectory(prefix='pc-service-',dir='/tmp') as directory:
+     def cli(*args): return subprocess.check_output([binary,*args,'--port',str(port)],text=True,stderr=subprocess.DEVNULL)
+     active=False
+     try:
+-        setup(); active=True
++        # Even partial setup can leave a linked unit behind.
++        active=True; setup()
+         wait(lambda: json.loads(cli('status'))[0]['state']=='running')
+         first=json.loads(cli('status'))[0]
+         first_url=cli('open','--print')
+diff --git a/src/service.rs b/src/service.rs
+index 6f9e2e9..ce9af9e 100644
+--- a/src/service.rs
++++ b/src/service.rs
+@@ -33,14 +33,17 @@ fn absolute(path: &Path, label: &str) -> Result<(), String> {
+     Ok(())
+ }
+ 
+-fn systemd_quote(path: &Path) -> Result<String, String> {
++fn systemd_path(path: &Path) -> Result<String, String> {
+     absolute(path, "service path")?;
+-    // systemd's ExecStart parser treats a quoted argument as one argv item.
+     let value = path.to_string_lossy();
+     if value.contains('"') || value.contains('\\') || value.contains('%') || value.contains('$') {
+         return Err("service paths cannot contain quotes or backslashes".into());
+     }
+-    Ok(format!("\"{value}\""))
++    Ok(value.into_owned())
++}
++fn systemd_quote(path: &Path) -> Result<String, String> {
++    // systemd's ExecStart parser treats a quoted argument as one argv item.
++    Ok(format!("\"{}\"", systemd_path(path)?))
+ }
+ fn xml(value: &Path) -> Result<String, String> {
+     absolute(value, "service path")?;
+@@ -57,7 +60,9 @@ pub fn render_systemd(entry: &Path, config: &Path, state: &Path) -> Result<Strin
+     let entry = systemd_quote(entry)?;
+     let config = systemd_quote(config)?;
+     let logs = systemd_quote(&state.join("logs"))?;
+-    let state = systemd_quote(state)?;
++    // WorkingDirectory takes a path, not an ExecStart-style argument list.
++    // Quotes would become literal path characters and make it non-absolute.
++    let state = systemd_path(state)?;
+     Ok(format!(
+         "{MARKER}[Unit]\nDescription=Paraco local host\n\n[Service]\nType=simple\nExecStart={entry} serve --config {config} --log-dir {logs}\nWorkingDirectory={state}\nRestart=on-failure\nRestartSec=2\nTimeoutStopSec=10\n\n[Install]\nWantedBy=default.target\n"
+     ))
+@@ -397,6 +402,7 @@ mod tests {
+             "ExecStart=\"/opt/paraco/bin/paraco\" serve --config \"/tmp/a b/config.json\""
+         ));
+         assert!(s.contains("TimeoutStopSec=10"));
++        assert!(s.contains("\nWorkingDirectory=/tmp/state dir\n"));
+     }
+     #[test]
+     fn escapes_plist_and_rejects_relative_paths() {
+diff --git a/tests/clean-offline.sh b/tests/clean-offline.sh
+index bed3beb..d203119 100644
+--- a/tests/clean-offline.sh
++++ b/tests/clean-offline.sh
+@@ -18,7 +18,7 @@ for mode in prepared prepared source; do
+   PATH=/missing TMPDIR=/tmp /tmp/paraco-offline-launcher --log-dir /tmp/paraco-clean-logs "${args[@]}" --port 18781 >/tmp/paraco-clean.log 2>&1 & child=$!
+   ready=0
+   for ((attempt=0; attempt<200; attempt++)); do
+-    if { exec 3<>/dev/tcp/127.0.0.1/18781; } 2>/dev/null; then ready=1; break; fi
++    if grep -q 'listening on http://' /tmp/paraco-clean.log && { exec 3<>/dev/tcp/127.0.0.1/18781; } 2>/dev/null; then ready=1; break; fi
+     if ! kill -0 "$child" 2>/dev/null; then cat /tmp/paraco-clean.log; exit 1; fi
+     sleep .1
+   done

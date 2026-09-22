@@ -1,0 +1,11 @@
+ M TODO.md
+ M docs/development.md
+ M docs/status.md
+ M docs/verification-2026-09-21.md
+ M scripts/verify-prepared.py
+ M scripts/verify-service.py
+ M src/service.rs
+ M tests/clean-offline.sh
+?? docs/verification-linux-native-2026-09-21.md
+?? scripts/verify-linux-durable.py
+?? verification-artifacts/linux-native/

@@ -1,0 +1,14 @@
+   Compiling paraco v0.1.0 (/home/adibb/repos/paraco)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.50s
+     Running unittests src/main.rs (target/debug/deps/paraco-ddf7b6ea398e8bda)
+
+running 6 tests
+test service::tests::escapes_plist_and_rejects_relative_paths ... ok
+test service::tests::failed_activation_restores_previous_definition_and_launcher ... ok
+test service::tests::launch_agent_has_xml_declaration_before_ownership_marker_and_bounded_shutdown ... ok
+test service::tests::refuses_foreign_and_removes_only_owned ... ok
+test service::tests::renders_paths_as_single_arguments ... ok
+test service::tests::stable_entry_is_absolute_and_independent_of_release ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 38 filtered out; finished in 0.00s
+

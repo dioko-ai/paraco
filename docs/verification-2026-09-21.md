@@ -6,6 +6,11 @@ or blanket completion of every milestone. Evidence is retained under
 and command statuses accompany the logs. The owner requested a
 [Linux-agent handoff](linux-agent-handoff.md) for the remaining native Linux work.
 
+The subsequent [native Linux x86-64 verification](verification-linux-native-2026-09-21.md)
+records systemd, terminal independence, clean offline bundles, and backup restore,
+including a systemd renderer fix. It supersedes the Linux pending items below;
+machine reboot and the dedicated-user public installation workflow remain open.
+
 ## Environments and complete checks
 
 - macOS ARM64: Darwin 25.3.0, actual Mac host.

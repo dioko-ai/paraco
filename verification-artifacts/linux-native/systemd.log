@@ -1,0 +1,1 @@
+{"manager": "systemd", "startup": "pass", "unexpected_death_restart": "pass", "stopped_intent_identity": "preserved", "authenticated_entry": "rotated", "shutdown": "pass", "machine_reboot": "not performed"}

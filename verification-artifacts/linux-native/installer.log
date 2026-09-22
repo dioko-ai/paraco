@@ -1,0 +1,7 @@
+
+> test:installer
+> bash tests/install-archive.sh
+
+activated stable -> 1
+tar: Removing leading `../' from member names
+unsafe archive path: ../evil

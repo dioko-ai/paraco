@@ -1,0 +1,9 @@
+{
+  "paracoVersion": "0.1.0",
+  "denoVersion": "2.2.5",
+  "target": "x86_64-unknown-linux-gnu",
+  "sourceRevision": "c039a810584851ee314e3ffd12339d96663ae46d",
+  "notices": ["notices/LICENSE", "notices/DENO-NOTICE", "notices/RUST-THIRD-PARTY-NOTICES"],
+  "checksums": {"bin/paraco": "f20e01e4dd9ad43ce06ede7606a85c394058e33b75573246d87b9d1309e71442", "libexec/paraco/deno": "033efd1e64b9ef57c52c611f0037802a8d0b322f493d3719b8a2481e44c3d9da", "notices/LICENSE": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30", "notices/DENO-NOTICE": "42abd59a1ea609b5e033d34d67c2c943c43f0f556354c6c247980a1ddb43ab3c", "notices/RUST-THIRD-PARTY-NOTICES": "42abd59a1ea609b5e033d34d67c2c943c43f0f556354c6c247980a1ddb43ab3c"},
+  "trustedInputProvenance": "caller supplied --deno; signing and publisher authenticity are not verified by this tool"
+}

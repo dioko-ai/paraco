@@ -1,0 +1,6 @@
+Traceback (most recent call last):
+  File "/home/adibb/repos/paraco/scripts/verify-prepared.py", line 35, in <module>
+    assert child.returncode==0, f"launch {attempt}: exit {child.returncode}: {(root / 'run.log').read_text()}"
+           ^^^^^^^^^^^^^^^^^^^
+AssertionError: launch 0: exit 1: paraco: interrupted while application was starting
+

@@ -1,0 +1,10 @@
+  UNIT LOAD ACTIVE SUB DESCRIPTION
+
+0 loaded units listed.
+To show all installed unit files use 'systemctl list-unit-files'.
+UNIT FILE STATE PRESET
+
+0 unit files listed.
+State=active
+Linger=no
+Removed this run's /tmp/paraco-native-tools downloads, fixture archives, prepared artifacts, and scripts after retaining evidence.

@@ -33,14 +33,17 @@ fn absolute(path: &Path, label: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn systemd_quote(path: &Path) -> Result<String, String> {
+fn systemd_path(path: &Path) -> Result<String, String> {
     absolute(path, "service path")?;
-    // systemd's ExecStart parser treats a quoted argument as one argv item.
     let value = path.to_string_lossy();
     if value.contains('"') || value.contains('\\') || value.contains('%') || value.contains('$') {
         return Err("service paths cannot contain quotes or backslashes".into());
     }
-    Ok(format!("\"{value}\""))
+    Ok(value.into_owned())
+}
+fn systemd_quote(path: &Path) -> Result<String, String> {
+    // systemd's ExecStart parser treats a quoted argument as one argv item.
+    Ok(format!("\"{}\"", systemd_path(path)?))
 }
 fn xml(value: &Path) -> Result<String, String> {
     absolute(value, "service path")?;
@@ -57,7 +60,9 @@ pub fn render_systemd(entry: &Path, config: &Path, state: &Path) -> Result<Strin
     let entry = systemd_quote(entry)?;
     let config = systemd_quote(config)?;
     let logs = systemd_quote(&state.join("logs"))?;
-    let state = systemd_quote(state)?;
+    // WorkingDirectory takes a path, not an ExecStart-style argument list.
+    // Quotes would become literal path characters and make it non-absolute.
+    let state = systemd_path(state)?;
     Ok(format!(
         "{MARKER}[Unit]\nDescription=Paraco local host\n\n[Service]\nType=simple\nExecStart={entry} serve --config {config} --log-dir {logs}\nWorkingDirectory={state}\nRestart=on-failure\nRestartSec=2\nTimeoutStopSec=10\n\n[Install]\nWantedBy=default.target\n"
     ))
@@ -397,6 +402,7 @@ mod tests {
             "ExecStart=\"/opt/paraco/bin/paraco\" serve --config \"/tmp/a b/config.json\""
         ));
         assert!(s.contains("TimeoutStopSec=10"));
+        assert!(s.contains("\nWorkingDirectory=/tmp/state dir\n"));
     }
     #[test]
     fn escapes_plist_and_rejects_relative_paths() {

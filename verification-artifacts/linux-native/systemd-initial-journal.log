@@ -1,0 +1,3 @@
+Sep 21 19:23:56 dko-box systemd[2439980]: /home/adibb/.config/systemd/user/dev.paraco.verify.3340989.service:8: WorkingDirectory= path is not absolute: "/tmp/pc-service-g2cga63k/state"
+Sep 21 19:23:56 dko-box systemd[2439980]: dev.paraco.verify.3340989.service: Unit configuration has fatal error, unit will not be started.
+Sep 21 19:24:30 dko-box systemd[2439980]: dev.paraco.verify.3340989.service: Failed to open /home/adibb/.config/systemd/user/dev.paraco.verify.3340989.service: No such file or directory

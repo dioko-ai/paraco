@@ -62,3 +62,11 @@ between unrelated integration fixtures. Application concurrency is exercised by
 the multi-app suites and workload probe. `scripts/verify-service.py` operates a
 uniquely named temporary native service; use a private-Deno bundle as `PARACO_BIN`.
 It requires a real systemd user session or macOS GUI login session.
+
+On Linux, `PARACO_BIN=/absolute/bundle/bin/paraco python3 scripts/verify-linux-durable.py`
+checks service survival after a launching pseudo-terminal exits, source updates,
+backup restoration into fresh private state, invalid legacy/future-schema refusal,
+and cgroup/listener cleanup. It uses a unique temporary systemd unit and requires
+`script` from util-linux. It does not exercise machine reboot or the public
+`paraco.service` installation workflow. See the
+[native evidence](verification-linux-native-2026-09-21.md) for exact observations.

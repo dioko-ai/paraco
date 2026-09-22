@@ -1,0 +1,40 @@
+[0m[1m[31merror[0m: Unsupported scheme "unsupported" for module "unsupported:failed-update". Supported schemes:
+ - "blob"
+ - "data"
+ - "file"
+ - "http"
+ - "https"
+ - "jsr"
+ - "npm"
+    at [0m[36mfile:///tmp/paraco-native-tools/.paraco-prepare-RxEONe/app/main.ts[0m:[0m[33m1[0m:[0m[33m8[0m
+paraco: Deno preparation failed with exit status: 1
+24.04: Pulling from library/ubuntu
+edd1ed89f0d4: Pulling fs layer
+afc716ec57df: Download complete
+edd1ed89f0d4: Download complete
+edd1ed89f0d4: Pull complete
+Digest: sha256:008173c23f95b170204355c12626cb5a965d779a7e1283b09e9cffbb1bf33ca3
+Status: Downloaded newer image for ubuntu:24.04
+docker.io/library/ubuntu:24.04
+PRETTY_NAME="Ubuntu 24.04.5 LTS"
+NAME="Ubuntu"
+VERSION_ID="24.04"
+VERSION="24.04.5 LTS (Noble Numbat)"
+VERSION_CODENAME=noble
+ID=ubuntu
+ID_LIKE=debian
+HOME_URL="https://www.ubuntu.com/"
+SUPPORT_URL="https://help.ubuntu.com/"
+BUG_REPORT_URL="https://bugs.launchpad.net/ubuntu/"
+PRIVACY_POLICY_URL="https://www.ubuntu.com/legal/terms-and-policies/privacy-policy"
+UBUNTU_CODENAME=noble
+LOGO=ubuntu-logo
+glibc 2.39
+network_interfaces:
+lo
+paraco-0.1.0-x86_64-unknown-linux-gnu.tar.gz: OK
+Rust/cargo, Node, and system Deno absent
+prepared: HTTP 200, dependency-ok, clean exit; PATH=/missing; cwd=/; symlinked launcher
+prepared: HTTP 200, dependency-ok, clean exit; PATH=/missing; cwd=/; symlinked launcher
+source: HTTP 200, Hello from Paraco, clean exit; PATH=/missing; cwd=/; symlinked launcher
+Failed new revision and offline launches preserved every installed artifact digest.

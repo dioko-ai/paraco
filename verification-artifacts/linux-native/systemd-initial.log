@@ -1,0 +1,13 @@
+Traceback (most recent call last):
+  File "/home/adibb/repos/paraco/scripts/verify-service.py", line 40, in <module>
+    setup(); active=True
+    ^^^^^^^
+  File "/home/adibb/repos/paraco/scripts/verify-service.py", line 34, in setup
+    def setup(): run('systemctl','--user','link',str(definition)); run('systemctl','--user','start',target)
+                                                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/adibb/repos/paraco/scripts/verify-service.py", line 22, in run
+    def run(*args): return subprocess.run(args,check=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '('systemctl', '--user', 'start', 'dev.paraco.verify.3340989.service')' returned non-zero exit status 1.

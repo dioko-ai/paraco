@@ -12,7 +12,7 @@ def wait(check):
         time.sleep(.2)
     raise RuntimeError('native service verification timed out')
 with tempfile.TemporaryDirectory(prefix='pc-service-',dir='/tmp') as directory:
-    root=pathlib.Path(directory); state=root/'state'; state.mkdir(); app=root/'app'; app.mkdir()
+    root=pathlib.Path(directory); state=root/'state with spaces'; state.mkdir(); app=root/'app'; app.mkdir()
     (app/'paraco.json').write_text('{"name":"service-app","entrypoint":"main.ts","capabilities":[]}')
     (app/'main.ts').write_text('export default {fetch(){return new Response("service-ok")}}')
     config=root/'server.json'; config.write_text(json.dumps({'apps':[{'path':str(app)}]}))
@@ -37,7 +37,8 @@ with tempfile.TemporaryDirectory(prefix='pc-service-',dir='/tmp') as directory:
     def cli(*args): return subprocess.check_output([binary,*args,'--port',str(port)],text=True,stderr=subprocess.DEVNULL)
     active=False
     try:
-        setup(); active=True
+        # Even partial setup can leave a linked unit behind.
+        active=True; setup()
         wait(lambda: json.loads(cli('status'))[0]['state']=='running')
         first=json.loads(cli('status'))[0]
         first_url=cli('open','--print')

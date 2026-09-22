@@ -1,0 +1,17 @@
+npm-ci=0
+playwright-install=0
+installer=0
+foundation=0
+prepared=1
+bundle-build=0
+check=0
+bundle-smoke=0
+systemd=1
+prepared-retry=0
+service-regression=0
+bundle-fixed=0
+systemd-fixed=0
+clean-offline=0
+systemd-durable=0
+check-fixed=0
+bundle-smoke-fixed=0

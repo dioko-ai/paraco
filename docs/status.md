@@ -9,7 +9,10 @@ not establish verification evidence.
 SQLite migration, scoped cron-draft storage, backup, authenticated browser entry,
 portable prepared artifacts, and native service fixes are implemented. See
 [the retained verification record](verification-2026-09-21.md) for current results
-and [the Linux-agent handoff](linux-agent-handoff.md) for remaining native gates.
+and [native Linux follow-up](verification-linux-native-2026-09-21.md). Native
+x86-64 systemd, terminal independence, backup restoration, and clean offline
+bundle execution now pass. Disposable-machine reboot and the public service
+setup/remove workflow in a dedicated test account remain unverified.
 The prior audit observations below are historical, not a claim that every M0–M3
 exit criterion is closed.
 

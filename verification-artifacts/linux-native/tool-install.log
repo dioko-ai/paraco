@@ -1,0 +1,12 @@
+  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+                                 Dload  Upload   Total   Spent    Left  Speed
+  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0 39 28.5M   39 11.1M    0     0  11.6M      0  0:00:02 --:--:--  0:00:02 11.6M100 28.5M  100 28.5M    0     0  18.8M      0  0:00:01  0:00:01 --:--:-- 18.8M
+  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+                                 Dload  Upload   Total   Spent    Left  Speed
+  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0100  3777  100  3777    0     0  13807      0 --:--:-- --:--:-- --:--:-- 13835
+node.tar.xz: OK
+  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+                                 Dload  Upload   Total   Spent    Left  Speed
+  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0
+  0 43.5M    0  366k    0     0   628k      0  0:01:10 --:--:--  0:01:10  628k 55 43.5M   55 24.2M    0     0  15.2M      0  0:00:02  0:00:01  0:00:01 23.6M100 43.5M  100 43.5M    0     0  18.9M      0  0:00:02  0:00:02 --:--:-- 25.2M
+/tmp/paraco-native-tools/install.sh: line 11: unzip: command not found

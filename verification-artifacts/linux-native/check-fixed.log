@@ -1,0 +1,287 @@
+
+> check
+> npm run check:core && npm run check:tools && cargo test --tests && npm run test:browser
+
+
+> check:core
+> npm run check:rust && npm run check:schema && npm run check:types && npm run test:management
+
+
+> check:rust
+> cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test --lib --bin paraco
+
+    Checking paraco v0.1.0 (/home/adibb/repos/paraco)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.94s
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.22s
+     Running unittests src/lib.rs (target/debug/deps/paraco-af74a5f30d384521)
+
+running 8 tests
+test ai::tests::denied_request_does_not_read_credential_or_contact_provider ... ok
+test ai::tests::missing_host_secret_is_redacted_before_transport ... ok
+test ai::tests::provider_rejects_downgrade_and_credential_leaking_endpoints ... ok
+test ai::tests::rejects_world_readable_host_secret ... ok
+test ai::tests::sse_decoder_handles_split_unicode_and_requires_terminal_event ... ok
+test ai::tests::sse_decoder_rejects_malformed_and_truncated_records ... ok
+test slug::tests::canonical_dns_slugs ... ok
+test slug::tests::manifest_schema_shares_slug_contract ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (target/debug/deps/paraco-ddf7b6ea398e8bda)
+
+running 44 tests
+test artifact::tests::graph_specifiers_allow_contained_parent_imports_and_source_text ... ok
+test artifact::tests::only_import_alias_configuration_is_accepted ... ok
+test artifact::tests::rejects_existing_output_before_starting_deno ... ok
+test artifact::tests::source_digest_changes_when_a_file_changes ... ok
+test capability::config_tests::config_must_be_host_owned_and_invalid_content_is_redacted ... ok
+test capability::tests::authenticates_rejects_forged_identity_and_releases_listener ... ok
+test capability::tests::granted_fake_provider_works_over_private_and_streaming_http_transports ... ok
+test capability::tests::nonblocking_accepted_socket_waits_for_request_frame ... ok
+test capability::tests::shared_configuration_grants_each_deployment_and_content_changes_refresh_service ... ok
+test capability::tests::trickled_http_request_cannot_extend_the_absolute_deadline ... ok
+test capability::tests::trusted_tls_provider_fixture_exercises_reqwest_completion_and_streaming ... ok
+test control::transport::ownership_tests::ownership_rejects_symlinks_and_hardlinks_without_modifying_targets ... ok
+test control::transport::ownership_tests::ownership_survives_until_the_last_guardian_duplicate_closes ... ok
+test control::transport::ownership_tests::reads_large_reply_after_peer_closes ... ok
+test logs::tests::blocked_writer_drops_bounded_records_without_blocking_producers ... ok
+test logs::tests::bounded_lines_handle_large_output_invalid_utf8_and_partial_eof ... ok
+test logs::tests::busy_store_has_a_bounded_wait ... ok
+test logs::tests::independent_store_handles_serialize_writes_and_escape_messages ... ok
+test logs::tests::rejects_public_symlinked_and_hardlinked_storage ... ok
+test logs::tests::repairs_interrupted_append_before_next_write_and_after_reopen ... ok
+test logs::tests::rotates_prunes_and_keeps_latest_records_across_reopen ... ok
+test logs::tests::timed_out_flush_is_an_unknown_outcome_not_a_discard ... ok
+test manifest::tests::loads_valid_manifest ... ok
+test manifest::tests::rejects_bad_name_and_unsupported_capability ... ok
+test manifest::tests::rejects_entrypoint_symlinked_outside_app ... ok
+test manifest::tests::rejects_missing_and_escaping_entrypoints ... ok
+test manifest::tests::requires_all_schema_fields_and_rejects_unknown_fields ... ok
+test runtime::tests::rejects_wrong_runtime_version ... ok
+test runtime::tests::resolves_private_runtime_after_launcher_symlink ... ok
+test runtime::tests::source_install_in_bin_resolves_path_to_an_absolute_runtime ... ok
+test server::origin_tests::allows_only_document_cross_origin_navigation ... ok
+test server::origin_tests::origin_uses_application_slug ... ok
+test service::tests::escapes_plist_and_rejects_relative_paths ... ok
+test service::tests::failed_activation_restores_previous_definition_and_launcher ... ok
+test service::tests::launch_agent_has_xml_declaration_before_ownership_marker_and_bounded_shutdown ... ok
+test service::tests::refuses_foreign_and_removes_only_owned ... ok
+test service::tests::renders_paths_as_single_arguments ... ok
+test service::tests::stable_entry_is_absolute_and_independent_of_release ... ok
+test state::tests::excludes_other_runtime ... ok
+test state::tests::failed_commit_does_not_publish_memory ... ok
+test state::tests::identity_tracks_canonical_source_and_retirement_is_fresh ... ok
+test state::tests::migrates_legacy_and_exports_storage_without_reimporting ... ok
+test state::tests::migration_constraint_failure_rolls_back_schema_and_keeps_legacy ... ok
+test state::tests::rejects_newer_schema_and_failed_legacy_import_without_partial_schema ... ok
+
+test result: ok. 44 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.53s
+
+
+> check:schema
+> node tests/schema-contract.cjs
+
+manifest schema fixtures passed
+
+> check:types
+> tsc --noEmit --lib es2022,dom runtime/paraco.d.ts
+
+
+> test:management
+> node --test tests/management.test.cjs
+
+TAP version 13
+# Subtest: fragment authorization, lifecycle buttons, polling and keyboard focus
+ok 1 - fragment authorization, lifecycle buttons, polling and keyboard focus
+  ---
+  duration_ms: 10.616476
+  ...
+# Subtest: missing or revoked credentials stop polling and explain authorization
+ok 2 - missing or revoked credentials stop polling and explain authorization
+  ---
+  duration_ms: 3.475616
+  ...
+# Subtest: error output is rendered as text and storage-disabled tabs still work
+ok 3 - error output is rendered as text and storage-disabled tabs still work
+  ---
+  duration_ms: 2.543137
+  ...
+# Subtest: logs render hostile content as text, filter launches, refresh and show empty/error states
+ok 4 - logs render hostile content as text, filter launches, refresh and show empty/error states
+  ---
+  duration_ms: 5.164785
+  ...
+1..4
+# tests 4
+# suites 0
+# pass 4
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 101.346539
+
+> check:tools
+> node scripts/verify-tools.cjs
+
+   Compiling paraco v0.1.0 (/home/adibb/repos/paraco)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.80s
+     Running unittests src/lib.rs (target/debug/deps/paraco-af74a5f30d384521)
+
+running 8 tests
+test ai::tests::denied_request_does_not_read_credential_or_contact_provider ... ok
+test ai::tests::missing_host_secret_is_redacted_before_transport ... ok
+test ai::tests::provider_rejects_downgrade_and_credential_leaking_endpoints ... ok
+test ai::tests::rejects_world_readable_host_secret ... ok
+test ai::tests::sse_decoder_handles_split_unicode_and_requires_terminal_event ... ok
+test ai::tests::sse_decoder_rejects_malformed_and_truncated_records ... ok
+test slug::tests::canonical_dns_slugs ... ok
+test slug::tests::manifest_schema_shares_slug_contract ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (target/debug/deps/paraco-ddf7b6ea398e8bda)
+
+running 44 tests
+test artifact::tests::graph_specifiers_allow_contained_parent_imports_and_source_text ... ok
+test artifact::tests::only_import_alias_configuration_is_accepted ... ok
+test artifact::tests::rejects_existing_output_before_starting_deno ... ok
+test artifact::tests::source_digest_changes_when_a_file_changes ... ok
+test capability::config_tests::config_must_be_host_owned_and_invalid_content_is_redacted ... ok
+test capability::tests::authenticates_rejects_forged_identity_and_releases_listener ... ok
+test capability::tests::granted_fake_provider_works_over_private_and_streaming_http_transports ... ok
+test capability::tests::nonblocking_accepted_socket_waits_for_request_frame ... ok
+test capability::tests::shared_configuration_grants_each_deployment_and_content_changes_refresh_service ... ok
+test capability::tests::trickled_http_request_cannot_extend_the_absolute_deadline ... ok
+test capability::tests::trusted_tls_provider_fixture_exercises_reqwest_completion_and_streaming ... ok
+test control::transport::ownership_tests::ownership_rejects_symlinks_and_hardlinks_without_modifying_targets ... ok
+test control::transport::ownership_tests::ownership_survives_until_the_last_guardian_duplicate_closes ... ok
+test control::transport::ownership_tests::reads_large_reply_after_peer_closes ... ok
+test logs::tests::blocked_writer_drops_bounded_records_without_blocking_producers ... ok
+test logs::tests::bounded_lines_handle_large_output_invalid_utf8_and_partial_eof ... ok
+test logs::tests::busy_store_has_a_bounded_wait ... ok
+test logs::tests::independent_store_handles_serialize_writes_and_escape_messages ... ok
+test logs::tests::rejects_public_symlinked_and_hardlinked_storage ... ok
+test logs::tests::repairs_interrupted_append_before_next_write_and_after_reopen ... ok
+test logs::tests::rotates_prunes_and_keeps_latest_records_across_reopen ... ok
+test logs::tests::timed_out_flush_is_an_unknown_outcome_not_a_discard ... ok
+test manifest::tests::loads_valid_manifest ... ok
+test manifest::tests::rejects_bad_name_and_unsupported_capability ... ok
+test manifest::tests::rejects_entrypoint_symlinked_outside_app ... ok
+test manifest::tests::rejects_missing_and_escaping_entrypoints ... ok
+test manifest::tests::requires_all_schema_fields_and_rejects_unknown_fields ... ok
+test runtime::tests::rejects_wrong_runtime_version ... ok
+test runtime::tests::resolves_private_runtime_after_launcher_symlink ... ok
+test runtime::tests::source_install_in_bin_resolves_path_to_an_absolute_runtime ... ok
+test server::origin_tests::allows_only_document_cross_origin_navigation ... ok
+test server::origin_tests::origin_uses_application_slug ... ok
+test service::tests::escapes_plist_and_rejects_relative_paths ... ok
+test service::tests::failed_activation_restores_previous_definition_and_launcher ... ok
+test service::tests::launch_agent_has_xml_declaration_before_ownership_marker_and_bounded_shutdown ... ok
+test service::tests::refuses_foreign_and_removes_only_owned ... ok
+test service::tests::renders_paths_as_single_arguments ... ok
+test service::tests::stable_entry_is_absolute_and_independent_of_release ... ok
+test state::tests::excludes_other_runtime ... ok
+test state::tests::failed_commit_does_not_publish_memory ... ok
+test state::tests::identity_tracks_canonical_source_and_retirement_is_fresh ... ok
+test state::tests::migrates_legacy_and_exports_storage_without_reimporting ... ok
+test state::tests::migration_constraint_failure_rolls_back_schema_and_keeps_legacy ... ok
+test state::tests::rejects_newer_schema_and_failed_legacy_import_without_partial_schema ... ok
+
+test result: ok. 44 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.73s
+
+     Running tests/ai.rs (target/debug/deps/ai-2e4a2f9a64ba8fe2)
+
+running 14 tests
+test ambiguous_model_requires_provider_even_when_app_has_default ... ok
+test app_default_precedes_runtime_default_and_runtime_fills_absence ... ok
+test automatic_defaults_only_use_permitted_routes ... ok
+test blank_explicit_selection_is_not_treated_as_omission ... ok
+test capability_request_does_not_grant_credentials ... ok
+test explicit_pair_overrides_defaults_without_substitution ... ok
+test fake_response_is_deterministic_and_excludes_private_inputs ... ok
+test granted_credential_can_follow_an_ungranted_route_for_same_pair ... ok
+test grants_do_not_replace_capability_request_and_unknown_callers_fail ... ok
+test invalid_credential_references_and_provider_mismatches_fail_at_configuration ... ok
+test missing_default_route_falls_back_but_no_defaults_fail ... ok
+test model_only_resolves_within_callers_grants ... ok
+test multiple_credentials_for_one_pair_are_not_ambiguous ... ok
+test provider_only_uses_its_configured_model ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/logs.rs (target/debug/deps/logs-fbd8802cf1c87812)
+
+running 1 test
+test log_directory_precedence_and_offline_reading ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/runtime.rs (target/debug/deps/runtime-ca364a030fe3e759)
+
+running 18 tests
+test ai_capability_works_end_to_end_with_explicit_host_grant ... ok
+test ai_request_without_host_configuration_does_not_grant_access ... ok
+test app_without_ai_has_no_capability ... ok
+test forced_runtime_death_during_import_reaps_the_starting_app ... ok
+test forced_runtime_death_reaps_even_an_app_with_a_blocked_event_loop ... ok
+test invalid_export_and_import_fail_without_readiness ... ok
+test invalid_manifest_fails_before_launch ... ok
+test missing_deno_is_actionable ... ok
+test occupied_port_fails_without_readiness ... ok
+test persistent_single_app_logs_bound_large_lines_and_preserve_invalid_utf8 ... ok
+test prepare_accepts_resolved_contained_parent_imports_and_ordinary_source_text ... ok
+test repository_ai_example_uses_runtime_default ... ok
+test repository_hello_example_serves_expected_response ... ok
+test request_errors_do_not_break_subsequent_requests ... ok
+test serves_http_forwards_logs_and_reaps_on_ctrl_c ... ok
+test startup_timeout_reaps_an_app_that_never_exports ... ok
+test stubborn_app_is_forced_to_exit_after_grace_period ... ok
+test unexpected_exit_is_reported_and_reaped ... ok
+
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 47.25s
+
+     Running tests/server.rs (target/debug/deps/server-c6eef76a9b906e47)
+
+running 34 tests
+test a_second_runtime_cannot_disturb_the_live_runtime ... ok
+test ai_capability_is_recreated_and_released_on_lifecycle_changes ... ok
+test automatic_recovery_is_bounded_cancellable_and_isolated ... ok
+test browser_management_controls_apps_and_releases_listener ... ok
+test browser_management_rejects_unauthorized_cross_origin_and_invalid_commands ... ok
+test control_is_private_bounded_and_not_exposed_over_http ... ok
+test control_rejects_insecure_or_symlinked_directories ... ok
+test dashboard_logs_are_authenticated_filtered_and_rotation_safe ... ok
+test empty_dashboard_and_repository_ai_example ... ok
+test failed_apps_can_be_fixed_and_started_without_restarting_server ... ok
+test failures_and_hanging_requests_leave_other_apps_and_dashboard_available ... ok
+test forced_death_then_immediate_restart_waits_for_apps_and_recovers_socket ... ok
+test gateway_rejects_foreign_hosts_upgrades_and_oversized_bodies ... ok
+test independent_servers_share_one_persistent_log_store ... ok
+test lifecycle_commands_isolate_apps_and_reap_replaced_processes ... ok
+test log_store::tests::blocked_writer_drops_bounded_records_without_blocking_producers ... ok
+test log_store::tests::bounded_lines_handle_large_output_invalid_utf8_and_partial_eof ... ok
+test log_store::tests::busy_store_has_a_bounded_wait ... ok
+test log_store::tests::independent_store_handles_serialize_writes_and_escape_messages ... ok
+test log_store::tests::rejects_public_symlinked_and_hardlinked_storage ... ok
+test log_store::tests::repairs_interrupted_append_before_next_write_and_after_reopen ... ok
+test log_store::tests::rotates_prunes_and_keeps_latest_records_across_reopen ... ok
+test log_store::tests::timed_out_flush_is_an_unknown_outcome_not_a_discard ... ok
+test occupied_control_socket_is_preserved_and_launches_no_apps ... ok
+test occupied_ipv6_gateway_fails_before_launching_apps ... ok
+test persistent_logs_identify_apps_and_launches_and_survive_server_exit ... ok
+test rejects_duplicate_names_invalid_configuration_and_occupied_gateway ... ok
+test routes_two_apps_assets_bodies_queries_and_redirects ... ok
+test shutdown_during_startup_reaps_every_child ... ok
+test slow_stop_keeps_control_and_other_apps_responsive ... ok
+test slug_origin_is_served_over_ipv6_loopback ... ok
+test startup_failures_also_exhaust_recovery_budget ... ok
+test stop_cancels_startup_and_latest_command_wins_without_orphans ... ok
+test unexpected_endpoint_files_are_never_removed ... ok
+
+test result: ok. 34 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 33.33s
+
+
+> test:browser
+> node tests/browser-smoke.cjs
+

@@ -24,6 +24,13 @@ with tempfile.TemporaryDirectory(prefix='pc-offline-',dir='/tmp') as directory:
         with open(root/'run.log','w') as log:
             child=subprocess.Popen([binary,'--log-dir',str(root/'logs'),'run-prepared',str(relocated),'--port',str(port)],env={'PATH':'/nonexistent','TMPDIR':'/tmp'},cwd='/',stdout=log,stderr=log)
             try:
+                # Deno can serve before the host consumes its readiness message.
+                # Wait for host readiness before testing a normal graceful stop.
+                for _ in range(200):
+                    if 'listening on http://' in (root/'run.log').read_text(): break
+                    if child.poll() is not None: raise RuntimeError((root/'run.log').read_text())
+                    time.sleep(.1)
+                else: raise RuntimeError('host readiness timed out')
                 for _ in range(200):
                     try:
                         with urllib.request.urlopen(f'http://127.0.0.1:{port}',timeout=1) as response: assert response.read()==b'dependency-ok'; break

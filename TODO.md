@@ -10,8 +10,10 @@ See [current verification evidence](docs/verification-2026-09-21.md) and the
 cron-draft storage, backup export, authenticated `open`, and relocatable private
 Deno artifacts are implemented with regression checks. Historical pending labels
 below are superseded only where that evidence explicitly records a pass. Native
-Linux systemd, clean macOS, and machine reboot gates remain separate acceptance
-work; scheduling is not implemented.
+[Native Linux evidence](docs/verification-linux-native-2026-09-21.md) now covers
+systemd, terminal independence, clean offline bundles, and backup restore.
+Dedicated-user public service installation, clean macOS, and machine reboot
+gates remain separate acceptance work; scheduling is not implemented.
 
 ## Proposed foundation pivot
 
@@ -124,10 +126,10 @@ source fingerprints, failures repaired, and platform limitations.
 
 | Gate | Status | Evidence / required follow-up |
 | --- | --- | --- |
-| Pinned complete checks | observed pass | Rust 1.96.1, Deno 2.2.5, Node 22.14.0, Playwright 1.52.0 on macOS ARM64 and Linux ARM64 container. |
+| Pinned complete checks | observed pass | Rust 1.96.1, Deno 2.2.5, Node 22.14.0, Playwright 1.52.0 on macOS ARM64, Linux ARM64 container, and native Linux x86-64. |
 | Browser isolation, management, AI authorization | observed pass | Complete Rust/Chromium suites; see retained platform logs. |
 | Guardian/crash recovery | observed pass on tested targets | Includes blocked import/event loop and immediate restart. |
 | 1/10/50 workload | observed pass | Readiness, noisy output, 72 successful requests per workload, management latency, host/tree RSS recorded. |
-| Native service | launchd observed; systemd pending | Linux agent handoff covers actual systemd session, terminal independence, and reboot. |
+| Native service | launchd and systemd observed | Linux x86-64 restart, terminal independence, storage/backup restoration, and cleanup pass; dedicated-user public installation and machine reboot remain open. |
 | Clean offline bundle | Linux observed; clean macOS pending | Linux network-disabled container, no SDK tools, relocated artifact, symlinked private-Deno launcher. |
 | Machine restart / other targets | pending | No active Mac reboot or unobserved architecture/browser support claim. |

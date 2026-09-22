@@ -1,0 +1,46 @@
+Tue Sep 22 01:29:19 UTC 2026
+Linux dko-box 6.8.0-138-generic #138-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul 31 22:41:49 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux
+PRETTY_NAME="Ubuntu 24.04.4 LTS"
+NAME="Ubuntu"
+VERSION_ID="24.04"
+VERSION="24.04.4 LTS (Noble Numbat)"
+VERSION_CODENAME=noble
+ID=ubuntu
+ID_LIKE=debian
+HOME_URL="https://www.ubuntu.com/"
+SUPPORT_URL="https://help.ubuntu.com/"
+BUG_REPORT_URL="https://bugs.launchpad.net/ubuntu/"
+PRIVACY_POLICY_URL="https://www.ubuntu.com/legal/terms-and-policies/privacy-policy"
+UBUNTU_CODENAME=noble
+LOGO=ubuntu-logo
+glibc 2.39
+rustc 1.96.1 (31fca3adb 2026-06-26)
+cargo 1.96.1 (356927216 2026-06-26)
+deno 2.2.5 (stable, release, x86_64-unknown-linux-gnu)
+v8 13.5.212.4-rusty
+typescript 5.7.3
+v22.14.0
+paraco@ /home/adibb/repos/paraco
+├── @playwright/test@1.52.0
+├── ajv@8.17.1
+└── typescript@5.8.3
+
+Python 3.12.3
+OpenSSL 3.0.13 30 Jan 2024 (Library: OpenSSL 3.0.13 30 Jan 2024)
+systemd 255 (255.4-1ubuntu8.17)
++PAM +AUDIT +SELINUX +APPARMOR +IMA +SMACK +SECCOMP +GCRYPT -GNUTLS +OPENSSL +ACL +BLKID +CURL +ELFUTILS +FIDO2 +IDN2 -IDN +IPTC +KMOD +LIBCRYPTSETUP +LIBFDISK +PCRE2 -PWQUALITY +P11KIT +QRENCODE +TPM2 +BZIP2 +LZ4 +XZ +ZLIB +ZSTD -BPF_FRAMEWORK -XKBCOMMON +UTMP +SYSVINIT default-hierarchy=unified
+user bus exit: 0
+State=active
+Linger=no
+session type: tty
+c039a810584851ee314e3ffd12339d96663ae46d
+ M scripts/verify-prepared.py
+ M scripts/verify-service.py
+ M src/service.rs
+ M tests/clean-offline.sh
+?? scripts/__pycache__/
+?? scripts/verify-linux-durable.py
+?? verification-artifacts/linux-native/
+213af6601e50269ff13dfd255251842da404adfaa2a954ec1d9f9399add0e6e1  -
+4a84e05991ad6f2a84c1361c29b52b38c390365bd1fc269b1936c88d482a8928  /home/adibb/.rustup/toolchains/1.96.1-x86_64-unknown-linux-gnu/bin/rustc
+a73b2c25573d251489101c0d8f19ad3702eb9761166de5ed8437b472b6c038ce  /home/adibb/.rustup/toolchains/1.96.1-x86_64-unknown-linux-gnu/bin/cargo

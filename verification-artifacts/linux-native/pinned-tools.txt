@@ -1,0 +1,5 @@
+deno 2.2.5 (stable, release, x86_64-unknown-linux-gnu)
+v8 13.5.212.4-rusty
+typescript 5.7.3
+v22.14.0
+033efd1e64b9ef57c52c611f0037802a8d0b322f493d3719b8a2481e44c3d9da  /tmp/paraco-native-tools/deno/deno
