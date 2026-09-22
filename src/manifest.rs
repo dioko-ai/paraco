@@ -52,10 +52,7 @@ impl fmt::Display for Error {
             Self::ParseManifest { path, source } => {
                 write!(f, "invalid manifest {}: {source}", path.display())
             }
-            Self::InvalidName => write!(
-                f,
-                "manifest field `name` must be 1-63 lowercase letters, digits, or hyphens and start with a letter"
-            ),
+            Self::InvalidName => write!(f, "manifest field `name` must be {}", paraco::slug::RULES),
             Self::InvalidEntrypoint(reason) => {
                 write!(f, "invalid manifest field `entrypoint`: {reason}")
             }
@@ -119,7 +116,7 @@ pub fn load(app_dir: &Path) -> Result<App, Error> {
     {
         return Err(Error::UnsupportedSchemaVersion(version));
     }
-    if !valid_name(&manifest.name) {
+    if paraco::slug::validate(&manifest.name).is_err() {
         return Err(Error::InvalidName);
     }
     if let Some(capability) = manifest
@@ -179,15 +176,6 @@ pub fn load(app_dir: &Path) -> Result<App, Error> {
         root: app_dir,
         entrypoint,
     })
-}
-
-fn valid_name(name: &str) -> bool {
-    let bytes = name.as_bytes();
-    (1..=63).contains(&bytes.len())
-        && bytes[0].is_ascii_lowercase()
-        && bytes
-            .iter()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
 }
 
 #[cfg(test)]

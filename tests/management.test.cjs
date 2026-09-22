@@ -32,7 +32,7 @@ function browser({ hash = '#secret', status = 200, error = null, stored = null, 
     fetch: async (url, options) => {
       requests.push({ url, ...options });
       return { status, ok: status === 200, text: async () => 'Denied', json: async () => ({
-        apps: [{ name: 'hello', url: 'http://app-example.localhost:3000/', desired: 'running', state: error ? 'failed' : 'running', error }],
+        apps: [{ name: 'hello', url: 'http://hello.localhost:3000/', desired: 'running', state: error ? 'failed' : 'running', error }],
       }) };
     },
   });
@@ -51,7 +51,7 @@ test('fragment authorization, lifecycle buttons, polling and keyboard focus', as
   const buttons = b.nodes['#apps'].querySelectorAll('button');
   assert.equal(buttons.length, 4);
   const link = b.nodes['#apps'].querySelectorAll('a')[0];
-  assert.equal(link.href, 'http://app-example.localhost:3000/');
+  assert.equal(link.href, 'http://hello.localhost:3000/');
   assert.equal(link.rel, 'noopener noreferrer');
   buttons[1].focus();
   await buttons[1].listeners.click();

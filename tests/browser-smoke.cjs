@@ -66,18 +66,22 @@ async function freePort() {
     throw new Error("server shutdown timed out and was force-terminated");
   };
   try {
-    const url = await waitFor(() => output.match(/management dashboard (http:\/\/[^\s]+)/)?.[1], "management URL");
+    const url = await waitFor(() => {
+      if (child.exitCode !== null) throw new Error(`server exited before readiness: ${output}`);
+      return output.match(/management dashboard (http:\/\/[^\s]+)/)?.[1];
+    }, "management URL");
     const browser = await chromium.launch({ headless: true });
     try {
       const page = await browser.newPage();
       await page.goto(url);
       await page.getByText("2 of 2 apps running").waitFor({ timeout });
-      const origins = await page.locator('a[href^="http://app-"]').evaluateAll(links => links.map(link => link.href));
+      const origins = await page.locator('a[href*=".localhost:"]').evaluateAll(links => links.map(link => link.href));
       assert.equal(origins.length, 2);
+      assert.deepEqual(origins.map(url => new URL(url).hostname), ["hello.localhost", "other.localhost"]);
       assert.notEqual(new URL(origins[0]).origin, new URL(origins[1]).origin);
       const [first] = await Promise.all([
         page.context().waitForEvent('page'),
-        page.locator('a[href^="http://app-"]').first().click()
+        page.locator('a[href*=".localhost:"]').first().click()
       ]);
       await first.waitForLoadState();
       assert.equal(new URL(first.url()).origin, new URL(origins[0]).origin);
@@ -85,7 +89,7 @@ async function freePort() {
       await first.evaluate(() => { localStorage.setItem("isolation", "one"); document.cookie = "hostonly=one"; });
       const [second] = await Promise.all([
         page.context().waitForEvent('page'),
-        page.locator('a[href^="http://app-"]').nth(1).click()
+        page.locator('a[href*=".localhost:"]').nth(1).click()
       ]);
       await second.waitForLoadState();
       assert.equal(new URL(second.url()).origin, new URL(origins[1]).origin);
@@ -94,7 +98,7 @@ async function freePort() {
       assert.doesNotMatch(await second.evaluate(() => document.cookie), /hostonly=one/);
       const gateway = `http://127.0.0.1:${new URL(origins[0]).port}/`;
       await page.goto(gateway);
-      await page.locator('a[href^="http://app-"]').first().click();
+      await page.locator('a[href*=".localhost:"]').first().click();
       await page.getByRole('heading', { name: 'hello' }).waitFor({ timeout });
       await page.goto(url);
       await page.getByRole("button", { name: "logs hello" }).click();

@@ -330,6 +330,10 @@ fn assert_reaped(pid: i32) {
 fn routes_two_apps_assets_bodies_queries_and_redirects() {
     let mut server = Server::run(&[("one", APP), ("two", APP)]);
     server.ready();
+    assert_eq!(
+        server.app_url("one"),
+        format!("http://one.localhost:{}", server.port)
+    );
     let one = server.inspect("one");
     let two = server.inspect("two");
     assert_ne!(one["pid"], two["pid"]);
@@ -1309,5 +1313,42 @@ fn startup_failures_also_exhaust_recovery_budget() {
             .as_str()
             .unwrap()
             .contains("retry limit reached (1/1)")
+    );
+}
+
+#[test]
+fn slug_origin_is_served_over_ipv6_loopback() {
+    let mut server = Server::run(&[("hello", APP)]);
+    server.ready();
+    server.inspect("hello");
+    let mut stream = TcpStream::connect(("::1", server.port)).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    write!(
+        stream,
+        "GET /next HTTP/1.1\r\nHost: hello.localhost:{}\r\nConnection: close\r\n\r\n",
+        server.port
+    )
+    .unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).unwrap();
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    assert!(response.ends_with("arrived"), "{response}");
+}
+
+#[test]
+fn occupied_ipv6_gateway_fails_before_launching_apps() {
+    let listener = TcpListener::bind(("::1", 0)).unwrap();
+    let dir = Server::fixture(&[("hello", APP)]);
+    let path = dir.path().join("server.json");
+    let mut server = Server::start(dir, &path, listener.local_addr().unwrap().port());
+    assert!(!server.wait_exit().success());
+    assert!(server.logs().contains("cannot bind IPv6 loopback gateway"));
+    assert!(!server.logs().contains("dashboard listening"));
+    assert!(
+        fs::read_to_string(server.dir.path().join("logs/current.jsonl"))
+            .unwrap_or_default()
+            .is_empty()
     );
 }

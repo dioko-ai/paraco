@@ -31,9 +31,11 @@ Open <http://127.0.0.1:3000/> for the dashboard. The example hosts:
   dashboard (the old `/apps/<name>/` links redirect only for GET/HEAD). AI calls
   are denied until you configure the hosted deployment grant described below.
 
-Use `--port 8787` for another loopback port. This runs in the foreground;
+Use `--port 8787` for another loopback port. Hosting reserves both IPv4 and IPv6
+loopback addresses; if either is occupied, choose another port. This runs in the foreground;
 Ctrl+C stops all apps. Configuration paths resolve relative to the configuration
-file, and a host-owned deployment ID determines each app's URL. The dashboard
+file, and each app's validated manifest name determines its URL (for example,
+`http://hello.localhost:3000`). Private deployment IDs remain separate from URLs. The dashboard
 refreshes app statuses every five seconds. To start, stop, or restart apps in the browser,
 open the separate `management dashboard` URL printed in the terminal. That page
 refreshes status every two seconds; its private access link changes each server session.
@@ -92,8 +94,8 @@ manifest schema is intentionally explicit:
 ```
 
 `schemaVersion` may be omitted for the existing v1 manifest or set to `1`.
-`name` is 1–63 lowercase ASCII letters, digits, or hyphens and starts with a
-letter. `entrypoint` must be a relative file contained in the application
+`name` is 1–63 lowercase ASCII letters, digits, or hyphens, starts with a
+letter, and ends with a letter or digit. `entrypoint` must be a relative file contained in the application
 directory. `capabilities` is required and may be empty or contain `"ai"` for the
 local fake AI capability. Unknown fields and unsupported capabilities fail
 validation. The machine-readable draft schema is

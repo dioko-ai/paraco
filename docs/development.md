@@ -17,7 +17,9 @@ unit tests without requiring Deno, Node pins, or Chromium. The local HTTPS
 provider fixture uses Python 3 and OpenSSL to serve a temporary trusted test
 certificate; it contacts no external provider. `npm run check:core`
 also runs schema, TypeScript declarations, and management DOM checks. The
-Node-based core checks require `npm ci`. Linux archive checks run separately
+Node-based core checks require `npm ci`. On macOS, use
+`TMPDIR=/private/tmp npm run test:browser` if the system temporary directory
+exceeds the Unix control-socket path limit. Linux archive checks run separately
 with `npm run test:installer` and `tests/bundle-smoke.sh` (see its required
 trusted-input arguments); CI runs these on Linux.
 

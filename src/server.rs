@@ -232,6 +232,11 @@ async fn host(
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
         .await
         .map_err(|e| format!("cannot bind gateway: {e}"))?;
+    // Browsers can prefer ::1 for *.localhost. Own both loopback addresses
+    // before starting apps so another service cannot receive their requests.
+    let listener_v6 = tokio::net::TcpListener::bind(("::1", port))
+        .await
+        .map_err(|e| format!("cannot bind IPv6 loopback gateway [::1]:{port}: {e}; choose another --port (both loopback addresses must be available)"))?;
     let durable = Arc::new(Mutex::new(durable));
     durable
         .lock()
@@ -303,7 +308,9 @@ async fn host(
         admission: Arc::new(Semaphore::new(64)),
     };
     let app = Router::new().fallback(dispatch).with_state(gateway);
+    let app_v6 = app.clone();
     let mut serving = tokio::spawn(async move { axum::serve(listener, app).await });
+    let mut serving_v6 = tokio::spawn(async move { axum::serve(listener_v6, app_v6).await });
     let mut managing =
         tokio::spawn(async move { axum::serve(management_listener, management_router).await });
     runner::announce(
@@ -316,11 +323,13 @@ async fn host(
     );
     let result = tokio::select! {
         result = &mut managing => result.map_err(|e| e.to_string())?.map_err(|e| e.to_string()),
+        result = &mut serving_v6 => result.map_err(|e| e.to_string())?.map_err(|e| e.to_string()),
         result = &mut serving => result.map_err(|e| e.to_string())?.map_err(|e| e.to_string()),
         _ = async { while !stop.load(Ordering::Relaxed) { tokio::time::sleep(Duration::from_millis(25)).await; } } => Ok(()),
     };
     // Stop accepting requests and cancel in-flight proxy calls on shutdown.
     serving.abort();
+    serving_v6.abort();
     managing.abort();
     // Dropping the owners reaps every child, including apps still starting.
     drop(supervisors);
@@ -338,13 +347,14 @@ async fn dispatch(State(gateway): State<Gateway>, request: Request) -> Response 
     let gateway_hosts = [
         format!("127.0.0.1:{}", gateway.port),
         format!("localhost:{}", gateway.port),
+        format!("[::1]:{}", gateway.port),
     ];
     let app_name = gateway
         .apps
         .read()
         .unwrap()
         .iter()
-        .find(|(_, app)| host == app_host(&app.deployment_id, gateway.port))
+        .find(|(name, _)| host == app_host(name, gateway.port))
         .map(|(name, _)| name.clone());
     if !gateway_hosts.contains(&host) && app_name.is_none() {
         return (
@@ -407,20 +417,7 @@ async fn dispatch(State(gateway): State<Gateway>, request: Request) -> Response 
         StatusCode::PERMANENT_REDIRECT,
         [(
             header::LOCATION,
-            format!(
-                "http://{}/{}{query}",
-                app_host(
-                    &gateway
-                        .apps
-                        .read()
-                        .unwrap()
-                        .get(name)
-                        .unwrap()
-                        .deployment_id,
-                    gateway.port
-                ),
-                suffix
-            ),
+            format!("http://{}/{}{query}", app_host(name, gateway.port), suffix),
         )],
     )
         .into_response()
@@ -431,19 +428,7 @@ async fn proxy_app(gateway: &Gateway, request: Request, name: &str, suffix: &str
         Some(app) => app.root.clone(),
         None => return StatusCode::NOT_FOUND.into_response(),
     };
-    let origin = format!(
-        "http://{}",
-        app_host(
-            &gateway
-                .apps
-                .read()
-                .unwrap()
-                .get(name)
-                .unwrap()
-                .deployment_id,
-            gateway.port
-        )
-    );
+    let origin = format!("http://{}", app_host(name, gateway.port));
     if !permitted_browser_request(request.headers(), request.method(), &origin) {
         return StatusCode::FORBIDDEN.into_response();
     }
@@ -520,17 +505,7 @@ async fn proxy_app(gateway: &Gateway, request: Request, name: &str, suffix: &str
     }
     parts.headers.insert(
         header::HOST,
-        HeaderValue::from_str(&app_host(
-            &gateway
-                .apps
-                .read()
-                .unwrap()
-                .get(name)
-                .unwrap()
-                .deployment_id,
-            gateway.port,
-        ))
-        .unwrap(),
+        HeaderValue::from_str(&app_host(name, gateway.port)).unwrap(),
     );
     parts
         .headers
@@ -609,8 +584,8 @@ async fn proxy_app(gateway: &Gateway, request: Request, name: &str, suffix: &str
     response
 }
 
-fn app_host(deployment_id: &str, port: u16) -> String {
-    format!("app-{deployment_id}.localhost:{port}")
+fn app_host(slug: &str, port: u16) -> String {
+    format!("{slug}.localhost:{port}")
 }
 
 /// Cross-origin applications may be followed as top-level documents. They may
@@ -677,7 +652,7 @@ fn dashboard(apps: &Inventory, port: u16) -> Html<String> {
             AppState::Stopping => ("stopping", "Stopping application".into()),
             AppState::Stopped => ("stopped", "Application is stopped".into()),
         };
-        let url = format!("http://{}", app_host(&app.deployment_id, port));
+        let url = format!("http://{}", app_host(name, port));
         format!("<li class=\"app\"><div><h2>{name}</h2><a class=\"path\" href=\"{url}\">{url}</a></div><span class=\"status {label}\">{label}</span><div class=\"detail\">{detail}</div></li>")
     }).collect();
     let running = apps
@@ -896,8 +871,8 @@ mod origin_tests {
     use super::{app_host, permitted_browser_request};
     use axum::http::{HeaderMap, HeaderValue, Method};
     #[test]
-    fn origin_uses_only_deployment_identity() {
-        assert_eq!(app_host("d123", 8787), "app-d123.localhost:8787");
+    fn origin_uses_application_slug() {
+        assert_eq!(app_host("hello", 8787), "hello.localhost:8787");
         assert_ne!(app_host("d123", 8787), app_host("d456", 8787));
     }
     #[test]

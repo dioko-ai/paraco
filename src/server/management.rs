@@ -216,10 +216,10 @@ async fn handle(state: &Management, request: Request) -> Response {
                 .into_iter()
                 .map(|app| {
                     let mut value = serde_json::to_value(&app).unwrap();
-                    if let Some(record) = roots.get(&app.name) {
+                    if roots.contains_key(&app.name) {
                         value["url"] = serde_json::Value::String(format!(
                             "http://{}",
-                            app_host(&record.deployment_id, state.gateway_port)
+                            app_host(&app.name, state.gateway_port)
                         ));
                     }
                     value

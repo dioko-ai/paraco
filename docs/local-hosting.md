@@ -26,9 +26,8 @@ increment. Ctrl+C or SIGTERM stops the server and all its apps on Unix.
 
 Paths are relative to the configuration file, independent of the shell's current
 working directory. Absolute paths also work. The app's manifest `name` labels the
-dashboard and must be unique within the server. The host allocates the browser
-origin and AI-grant identity from the app directory's canonical source, not that
-display name. Replacing a configured path allocates a new identity; removing a
+dashboard and is its canonical URL slug, unique within the server. The host
+allocates the private AI-grant identity from the app directory's canonical source. Replacing a configured path allocates a new identity; removing a
 path retires it, so grants do not transfer when it is added again. Unknown configuration fields,
 invalid manifests, and duplicate names fail before launching any app. An empty
 `apps` list serves an empty dashboard. Changes take effect after restarting the
@@ -39,8 +38,8 @@ be outside that app's directory and is only valid for an app requesting `ai`.
 A configuration or startup error specific to that capability marks the app
 failed without stopping the other apps. No grants are inferred from listing an
 app in the server configuration. To configure a hosted grant, start the server,
-read the deployment ID from its management API (`GET /api/apps`) or the
-`app-<deployment-id>.localhost` link, put that ID under `apps` in the AI config,
+read the deployment ID from its management API (`GET /api/apps`) or
+`paraco status`, put that ID under `apps` in the AI config,
 then restart the server. This is a host-managed discovery flow; app manifests
 cannot select an identity or grant themselves credentials.
 
@@ -48,15 +47,15 @@ cannot select an identity or grant themselves credentials.
 
 | Public request | App receives | `context.basePath` |
 | --- | --- | --- |
-| `http://app-<stable-id>.localhost:<port>/` | `/` | `/` |
-| `http://app-<stable-id>.localhost:<port>/style.css` | `/style.css` | `/` |
-| `http://app-<stable-id>.localhost:<port>/items?q=one` | `/items?q=one` | `/` |
+| `http://<app-name>.localhost:<port>/` | `/` | `/` |
+| `http://<app-name>.localhost:<port>/style.css` | `/style.css` | `/` |
+| `http://<app-name>.localhost:<port>/items?q=one` | `/items?q=one` | `/` |
 | Single-app `paraco run` request `/items` | `/items` | `/` |
 
 Each hosted app has a distinct deterministic `.localhost` hostname derived from
-its host-owned durable deployment ID. The app receives that canonical URL
+its validated manifest name. The app receives that canonical URL
 and Host; this separates browser origins even though all traffic reaches the same
-loopback listener. Query strings, methods, request bodies, and end-to-end headers
+loopback port on both IPv4 (`127.0.0.1`) and IPv6 (`::1`). Query strings, methods, request bodies, and end-to-end headers
 are forwarded. Client-supplied forwarding metadata and hop-by-hop headers are
 removed. Local upstream requests never use inherited proxy settings.
 
@@ -175,3 +174,26 @@ dashboard status, AI through the gateway, configuration resolution from another
 working directory, duplicate-name rejection, occupied ports, failure isolation,
 hanging requests, and cleanup both while running and during startup. The existing
 single-app and AI suites continue to run against the shared supervisor.
+
+## Slug contract and local troubleshooting
+
+The public `paraco::slug::validate` function owns slug syntax: 1–63 lowercase
+ASCII letters, digits, or hyphens, starting with a letter and ending with a
+letter or digit. Manifests use it directly; the JSON Schema mirrors its pattern.
+Names are validated without automatic normalization. A future marketplace can
+reuse this validator and enforce uniqueness in its own catalog; local server
+configuration already rejects duplicate names.
+
+Renaming an app changes its browser origin, but not its source-bound private
+identity or grants. Reusing a slug reuses browser storage for that hostname and
+port, even if the source has changed. Deployment IDs are not encoded in links.
+Old deployment-ID hostnames are no longer routed; refresh the dashboard links.
+
+Hosting must bind both loopback address families before launching apps. If
+another service owns either address on the selected port, startup fails with an
+error; use `--port 8787` (or another free port). This avoids browsers connecting
+to an unrelated IPv6 service while Paraco listens only on IPv4.
+
+Run `cargo run -- logs hello --tail 100` to inspect retained app output and
+lifecycle events (`~/.paraco/logs/current.jsonl` by default). These are not HTTP
+access logs: a request that reaches another service cannot appear here.

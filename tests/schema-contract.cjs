@@ -11,6 +11,7 @@ for (const fixture of [
 for (const fixture of [
   { schemaVersion: 2, name: "hello", entrypoint: "main.ts", capabilities: [] },
   { name: "hello", entrypoint: "main.ts", capabilities: ["ai", "ai"] },
+  { name: "hello-", entrypoint: "main.ts", capabilities: [] },
   { name: "Hello", entrypoint: "main.ts", capabilities: [] },
   { name: "hello", entrypoint: "main.ts", capabilities: [], unexpected: true },
 ]) assert.equal(validate(fixture), false, `fixture unexpectedly accepted: ${JSON.stringify(fixture)}`);
