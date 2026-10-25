@@ -4,6 +4,19 @@ Paraco is a local-first runtime for portable applications. This repository is
 building its standalone foundation: Rust supervises Deno applications and serves
 them through a local gateway, with a separate authenticated management dashboard.
 
+## Run the cron app
+
+```sh
+cargo run -- cron
+```
+
+An installed bundle runs the same app with `paraco cron`, without a checkout.
+Open the local dashboard and select **cron**. Create and review TypeScript jobs,
+publish one-off or recurring schedules, inspect run history and notifications,
+and archive or restore jobs. AI drafting is optional and requires an explicit
+host grant; proposals never publish automatically. See [tasks and cron](docs/tasks-and-cron.md)
+for the task contract, authorization, limits and current dependency restrictions.
+
 ## Try it
 
 Prerequisites are a current [Rust toolchain](https://rustup.rs/) and
@@ -96,7 +109,7 @@ manifest schema is intentionally explicit:
 `schemaVersion` may be omitted for the existing v1 manifest or set to `1`.
 `name` is 1–63 lowercase ASCII letters, digits, or hyphens, starts with a
 letter, and ends with a letter or digit. `entrypoint` must be a relative file contained in the application
-directory. `capabilities` is required and may be empty or contain `"ai"` for AI routing and `"storage"` for scoped configuration/data. Unknown fields and unsupported capabilities fail
+directory. `capabilities` is required and may be empty or contain `"ai"` for AI routing, `"storage"` for scoped configuration/data, and `"tasks"` for explicitly host-granted task authoring. Unknown fields and unsupported capabilities fail
 validation. The machine-readable draft schema is
 [`docs/paraco-manifest.schema.json`](docs/paraco-manifest.schema.json), and the
 matching handler types are in [`runtime/paraco.d.ts`](runtime/paraco.d.ts).
@@ -160,8 +173,8 @@ host-owned OpenAI-compatible provider, and a loopback OpenAI-compatible HTTP
 subset (including the documented SSE foundation) now have implementation
 scaffolding. The retained verification record distinguishes observed Linux/macOS integration
 and launchd checks from remaining native Linux service, clean macOS, machine
-reboot, signing, publication, and native package gates. Scheduling, notifications, health monitoring, cloud integration, and
-the proposed cron product remain deferred. Local operation needs neither a
+reboot, signing, publication, and native package gates. Bounded tasks, durable scheduling, a local notification inbox and the cron reference app
+are implemented; see their documented limits. Health monitoring and cloud integration remain deferred. Local operation needs neither a
 cloud account nor paid AI; the fake provider remains available.
 
 ## Try the local AI capability

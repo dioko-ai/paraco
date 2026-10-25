@@ -123,8 +123,8 @@ This adds one guardian process per running app. It covers termination of the
 main runtime while its guardians remain operational; killing a guardian itself
 or failure of the OS is outside this mechanism. Apps remain trusted local code,
 and arbitrary app-created subprocess trees are not supported. Durable desired
-state and opt-in owned user-service definitions are available, but retained
-native service-manager/reboot evidence remains pending.
+state and opt-in owned user-service definitions are available. Linux systemd
+restart and cleanup evidence is retained in the [current verification record](verification-2026-10-25.md); machine reboot and native macOS checks remain open.
 
 ## Browser management
 
@@ -174,11 +174,13 @@ logs are available through the [log CLI and dashboard](local-logs.md).
 
 `paraco service render --platform linux|macos --entry /absolute/paraco --config /absolute/config.json --state /absolute/state` renders a private user-service definition using absolute paths and a ten-second graceful-stop bound. `paraco service setup|remove|status --platform linux|macos --config /absolute/config.json` explicitly operates an owned user registration; setup atomically installs the stable `~/.paraco/service/paraco` launcher pointing to the current immutable executable and uses `~/.paraco/state`, so future service launches do not depend on PATH, terminal CWD, or a release-specific definition. Replacing that launcher does not affect a process already running its immutable executable. It never invokes `sudo`, refuses foreign definitions or launcher files, and removal preserves configuration and state. Native-manager invocations are bounded to ten seconds and report an actionable error when unavailable. There is no `paraco open` command: the current private management entry is intentionally printed only by a running server, rather than recovering or logging its rotating bearer token.
 
-A Linux systemd user unit normally starts when the user session is available; unattended boot requires user-controlled `loginctl enable-linger` and is not enabled by Paraco. A macOS LaunchAgent runs at user login, not before login. Native manager, reboot, terminal, and shutdown behavior has not been verified on either platform.
+A Linux systemd user unit normally starts when the user session is available; unattended boot requires user-controlled `loginctl enable-linger` and is not enabled by Paraco. A macOS LaunchAgent runs at user login, not before login. A current Linux systemd run observed startup, unexpected-death recovery, terminal independence, stopped-intent preservation, and graceful shutdown; see the [October verification record](verification-2026-10-25.md). Machine reboot and macOS manager behavior remain unverified, as does the public service setup/removal flow in a dedicated account.
 
-Cloud integration, scheduling, notifications, health monitoring, and published
-bundling/installers remain future work. The local service and installer tooling
-is unpublished and does not establish native release support.
+Bounded task scheduling, run history, and local notifications are implemented;
+the authorization, cron grammar, limits, and recovery contract are documented
+in [Tasks and cron](tasks-and-cron.md). Cloud integration and health monitoring
+remain future work. Bundle and installer tooling is local and unpublished; it
+does not establish native release support.
 
 Integration tests cover independent app control, repeated requests, changed
 process identities, process reaping, failure repair, startup cancellation, rapid
@@ -189,18 +191,23 @@ Crash tests kill the runtime during startup and with a blocked app event loop,
 restart immediately with multiple apps, verify Deno reaping and temporary-directory
 cleanup, and preserve live or unexpected control endpoints. These tests run in the
 Unix suite for Linux and macOS when its Deno prerequisite is available. The
-current pinned target is Deno 2.2.5. See [current status](status.md) for the
-observed process and browser checks. Current Linux/macOS evidence and remaining
-native-service/reboot gates are in [the verification record](verification-2026-09-21.md).
+current pinned target is Deno 2.2.5. See [current status](status.md) for
+current implementation commands and retained observations. September
+Linux/macOS lifecycle evidence remains dated in
+[the verification record](verification-2026-09-21.md); it does not establish
+the current task/release gates or native macOS service and reboot behavior.
 
 ```sh
-cargo fmt --check
-cargo clippy --offline --all-targets -- -D warnings
-cargo test --offline
-node --test tests/management.test.cjs
+npm run check:core
+npm run test:cron-runtime
+npm run test:cron-browser
+npm run test:installer
+npm run test:bundle-contract
 ```
 
-Tests require Deno on `PATH`, local sockets, and subprocess signals.
+Cron runtime checks require the pinned Deno runtime; browser checks require the
+configured Node/Playwright/Chromium tools. The Unix lifecycle suite requires
+local sockets and subprocess signals.
 
 Dashboard integration tests exercise authorization, cross-origin rejection, invalid
 commands, process replacement, independent apps, and listener cleanup. JavaScript

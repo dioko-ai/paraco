@@ -1,0 +1,9 @@
+{
+  "apps": [
+    {
+      "path": "./cron",
+      "taskAuthoring": true,
+      "taskNetwork": []
+    }
+  ]
+}

@@ -1,8 +1,8 @@
 {
   "private": true,
   "devDependencies": {
-    "@playwright/test": "1.52.0",
-    "ajv": "8.17.1",
+    "@playwright/test": "1.64.1",
+    "ajv": "8.20.0",
     "typescript": "5.8.3"
   },
   "scripts": {
@@ -11,9 +11,14 @@
     "test:browser": "node tests/browser-smoke.cjs",
     "check:schema": "node tests/schema-contract.cjs",
     "check:types": "tsc --noEmit --lib es2022,dom runtime/paraco.d.ts",
-    "check": "npm run check:core && npm run check:tools && cargo test --tests && npm run test:browser",
+    "check": "npm run check:core && npm run check:tools && cargo test --tests && npm run test:browser && npm run test:cron-runtime && npm run test:cron-browser",
     "check:rust": "cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test --lib --bin paraco",
-    "check:core": "npm run check:rust && npm run check:schema && npm run check:types && npm run test:management",
-    "test:installer": "bash tests/install-archive.sh"
+    "check:core": "npm run check:rust && npm run check:schema && npm run check:types && npm run test:management && npm run test:cron-ui",
+    "test:installer": "bash tests/install-archive.sh",
+    "test:cron-ui": "node --test tests/cron-ui.test.cjs",
+    "test:cron-runtime": "cargo build --locked && node tests/cron-runtime.cjs",
+    "test:bundle-contract": "bash tests/build-bundle.sh",
+    "test:cron-browser": "RUN_CRON_BROWSER=1 node --test tests/cron-ui.test.cjs",
+    "test:release": "bash tests/release-verification.sh"
   }
 }

@@ -1,0 +1,51 @@
+{
+  "platform": "linux",
+  "results": [
+    {
+      "apps": 1,
+      "startupMs": 174,
+      "managementLatencyMs": 18,
+      "treeRssAtReadyKiB": 66524,
+      "treeRssAfterLoadKiB": 104540,
+      "requests": 64,
+      "noisyRequests": 8,
+      "elapsedMs": 572,
+      "rssAtReadyKiB": 18496,
+      "rssAfterLoadKiB": 22872,
+      "statusCounts": {
+        "200": 72
+      }
+    },
+    {
+      "apps": 10,
+      "startupMs": 290,
+      "managementLatencyMs": 16,
+      "treeRssAtReadyKiB": 502576,
+      "treeRssAfterLoadKiB": 550420,
+      "requests": 64,
+      "noisyRequests": 8,
+      "elapsedMs": 435,
+      "rssAtReadyKiB": 21540,
+      "rssAfterLoadKiB": 26248,
+      "statusCounts": {
+        "200": 72
+      }
+    },
+    {
+      "apps": 50,
+      "startupMs": 1284,
+      "managementLatencyMs": 17,
+      "treeRssAtReadyKiB": 2486052,
+      "treeRssAfterLoadKiB": 2651628,
+      "requests": 64,
+      "noisyRequests": 8,
+      "elapsedMs": 845,
+      "rssAtReadyKiB": 25612,
+      "rssAfterLoadKiB": 30360,
+      "statusCounts": {
+        "200": 72
+      }
+    }
+  ]
+}
+{"storage": "persisted after SIGKILL and restart", "isolation": "app1 cannot read app0 draft", "desired_state": "stopped intent and identity restored", "open": "private URL rotates after restart"}

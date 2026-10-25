@@ -1,0 +1,72 @@
+{
+  "recorded_utc": "2026-10-25T16:48:01.433963+00:00",
+  "scope": "Actual Linux x86_64 native validation of an unsigned test-only bundle with non-distributable fixture notices; not a published release",
+  "host": "Linux-6.8.0-142-generic-x86_64-with-glibc2.39",
+  "architecture": "x86_64",
+  "source_revision": "d6a7b393c761ae653bbbd736ba85763de961e2f7",
+  "source_dirty": true,
+  "source_sha256": {
+    "src/tasks.rs": "536efa16e90c3108047b910c70b2c0595b5e5dd79b51436c5bc577a811b294f9",
+    "src/task_api.rs": "6d9ca64dcd81d3aec967c13977c2a6c0c2f0b79ff31964201172061682496106",
+    "src/reference.rs": "160b8f989bc1a3b06bf846ddadc871f2428e15d55484a3a7f24c310b4bcea867",
+    "src/runtime.rs": "6419b20840008ddb3f27cdd96244162ff4adbad0ba17b38978057aceaddf7127",
+    "runtime/task_host.ts": "6928beffc72e59fb385112e77824289925b894335c5d887dc0294b58f01d3042",
+    "examples/cron/main.ts": "d7aa20135845fe0529dbc6bc3b72bc631a69572cef1e1ab1108091c066d3ff17",
+    "examples/cron/app.js": "784bea37ba153f0f18c434b18918d18f7a1c278d5870fa7ab0c4c2b5bf67daf6",
+    "examples/cron/index.html": "4c611979b57aa3cfda184ae316d98239fa244319a94fdb6cc29daf8ee9b02307",
+    "examples/cron/paraco.json": "2106fe06e20e8a5848aa1f8ef21dc39a8210403b7074e2c6e584183fad0f3eb7",
+    "Cargo.lock": "9a825084ee36643bfb8d41ec4fa575c1e8c83758dfcb1620735832b71d9e55e4"
+  },
+  "runtime": "deno 2.9.8 (stable, release, x86_64-unknown-linux-gnu)\nv8 15.0.245.2-rusty\ntypescript 6.0.3",
+  "binary": "/tmp/paraco-final-native-evidence/prefix-final/releases/0.1.0/bin/paraco",
+  "binary_sha256": "66947c335520e8248d332cb6e34843e396b41f91259dbc08637cf67aa6353e53",
+  "archive": "/tmp/paraco-final-native-evidence/bundle-final/paraco-0.1.0-x86_64-unknown-linux-gnu.tar.gz",
+  "archive_sha256": "4bd1eeb30bad2a6cfacf27d217e3455853a57fa1f904eabf3a235d60c96c6985",
+  "private_runtime_sha256": "368bca08999e02c6911b8f248167b582276b1f547db5712b6e736d7eda1dbda7",
+  "bundle_hello_http_shutdown": "pass (tests/bundle-smoke.sh, with unrelated CWD and deliberately broken system Deno)",
+  "runtime_metadata_regression": "4 unit tests passed",
+  "reports": {
+    "installed_cron": {
+      "installed_cron": "pass",
+      "embedded_source_without_checkout": "pass",
+      "unrelated_cwd": "pass",
+      "broken_system_deno": "private runtime used",
+      "draft_publish_manual_task_logs": "pass",
+      "syntax_diagnostic": "pass",
+      "shutdown": "pass"
+    },
+    "service": {
+      "manager": "systemd",
+      "startup": "pass",
+      "unexpected_death_restart": "pass",
+      "stopped_intent_identity": "preserved",
+      "authenticated_entry": "rotated",
+      "shutdown": "pass",
+      "machine_reboot": "not performed"
+    },
+    "linux_durable": {
+      "unit": "dev.paraco.durable.1542235.service",
+      "deployment_ids": {
+        "drafts": "d38966988d13f400f8a6b21327c628b09",
+        "stopped": "d0203038e9d4cb795863d071b186932a4"
+      },
+      "terminal_exit": "service continued after launching PTY exited",
+      "source_update": "revision 2, same IDs/data/stopped intent",
+      "backup_restore": "fresh private state directory; IDs/data/intent preserved",
+      "backup_sha256": "11c4897a2c1fdbad6afb1a340d6a38113821f0ccb5a7cc48d711b14af68f1681",
+      "invalid_legacy": "refused without schema",
+      "future_schema": "refused without changing copy",
+      "shutdown": "9 cgroup processes reaped across 3 stops; listener closed",
+      "machine_reboot": "not performed"
+    }
+  },
+  "temporary_unit_cleanup": "no matching verification unit registrations remain",
+  "machine_reboot": "not performed",
+  "not_verified": [
+    "macOS native behavior",
+    "ARM64 native behavior",
+    "minimum OS/libc compatibility baseline",
+    "machine reboot/start-at-login",
+    "real publisher signatures/notarization and complete redistribution notices"
+  ]
+}

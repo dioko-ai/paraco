@@ -35,8 +35,24 @@ impl SseDecoder {
         }
         self.pending.extend_from_slice(bytes);
         let mut events = Vec::new();
-        while let Some(end) = self.pending.windows(2).position(|v| v == b"\n\n") {
-            let record: Vec<u8> = self.pending.drain(..end + 2).collect();
+        while let Some((end, separator)) = self
+            .pending
+            .windows(2)
+            .position(|v| v == b"\n\n")
+            .map(|end| (end, 2))
+            .into_iter()
+            .chain(
+                self.pending
+                    .windows(4)
+                    .position(|v| v == b"\r\n\r\n")
+                    .map(|end| (end, 4)),
+            )
+            .min_by_key(|(end, _)| *end)
+        {
+            if self.finished {
+                return Err(Error::ProviderFailed);
+            }
+            let record: Vec<u8> = self.pending.drain(..end + separator).collect();
             let record = std::str::from_utf8(&record[..end]).map_err(|_| Error::ProviderFailed)?;
             let mut data = None;
             for line in record.lines() {
@@ -48,7 +64,9 @@ impl SseDecoder {
                     return Err(Error::ProviderFailed);
                 }
             }
-            let data = data.ok_or(Error::ProviderFailed)?;
+            let Some(data) = data else {
+                continue;
+            };
             if data == "[DONE]" {
                 self.finished = true;
                 events.push(SseEvent::Done);
@@ -56,20 +74,14 @@ impl SseDecoder {
             }
             let value: serde_json::Value =
                 serde_json::from_str(data).map_err(|_| Error::ProviderFailed)?;
-            // OpenAI sends a final empty-delta record carrying finish_reason
-            // before [DONE]. It is structural terminal metadata, not output.
-            let Some(text) = value
-                .pointer("/choices/0/delta/content")
-                .and_then(serde_json::Value::as_str)
-            else {
-                if value
-                    .pointer("/choices/0/finish_reason")
-                    .and_then(serde_json::Value::as_str)
-                    .is_some()
-                {
-                    continue;
-                }
-                return Err(Error::ProviderFailed);
+            let delta = value
+                .pointer("/choices/0/delta")
+                .and_then(serde_json::Value::as_object)
+                .ok_or(Error::ProviderFailed)?;
+            let text = match delta.get("content") {
+                Some(serde_json::Value::String(text)) => text.as_str(),
+                None | Some(serde_json::Value::Null) => continue,
+                _ => return Err(Error::ProviderFailed),
             };
             self.emitted = self.emitted.saturating_add(text.len());
             if self.emitted > maximum {
@@ -518,7 +530,7 @@ impl OpenAiProxy {
             let mut body = response.bytes_stream();
             while let Some(chunk) = body.next().await {
                 for event in decoder.push(&chunk.map_err(|_| Error::ProviderFailed)?, maximum)? {
-                    match event { SseEvent::Text(text) => sink(&text)?, SseEvent::Done => {} }
+                    match event { SseEvent::Text(text) => sink(&text)?, SseEvent::Done => return Ok(()) }
                 }
             }
             decoder.finish()
@@ -767,6 +779,33 @@ mod tests {
         assert!(matches!(&chunks[..], [SseEvent::Text(value)] if value == "h\u{e9}"));
         assert!(decoder.push(b"data: [DONE]\n\n", 1024).is_ok());
         assert!(decoder.finish().is_ok());
+    }
+
+    #[test]
+    fn sse_decoder_accepts_crlf_comments_and_structural_chunks() {
+        let mut decoder = SseDecoder::default();
+        let input = b": heartbeat\r\n\r\ndata: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":null}}]}\r\n\r\ndata: {\"choices\":[{\"delta\":{}}]}\r\n\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\r\n\r\ndata: [DONE]\r\n\r\n";
+        let mut text = String::new();
+        for byte in input {
+            for event in decoder.push(&[*byte], 1024).unwrap() {
+                if let SseEvent::Text(value) = event {
+                    text.push_str(&value);
+                }
+            }
+        }
+        assert_eq!(text, "ok");
+        assert!(decoder.finish().is_ok());
+    }
+
+    #[test]
+    fn sse_decoder_rejects_errors_invalid_content_and_output_after_done() {
+        for input in [
+            &b"data: {\"error\":{\"message\":\"secret\"}}\n\n"[..],
+            &b"data: {\"choices\":[{\"delta\":{\"content\":4}}]}\n\n"[..],
+            &b"data: [DONE]\n\ndata: {\"choices\":[{\"delta\":{}}]}\n\n"[..],
+        ] {
+            assert!(SseDecoder::default().push(input, 1024).is_err());
+        }
     }
 
     #[test]

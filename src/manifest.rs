@@ -7,6 +7,7 @@ pub struct App {
     pub name: String,
     pub requests_ai: bool,
     pub requests_storage: bool,
+    pub requests_tasks: bool,
     pub root: PathBuf,
     pub entrypoint: PathBuf,
 }
@@ -123,11 +124,11 @@ pub fn load(app_dir: &Path) -> Result<App, Error> {
     if let Some(capability) = manifest
         .capabilities
         .iter()
-        .find(|c| c.as_str() != "ai" && c.as_str() != "storage")
+        .find(|c| c.as_str() != "ai" && c.as_str() != "storage" && c.as_str() != "tasks")
     {
         return Err(Error::UnsupportedCapability(capability.clone()));
     }
-    for capability in ["ai", "storage"] {
+    for capability in ["ai", "storage", "tasks"] {
         if manifest
             .capabilities
             .iter()
@@ -174,6 +175,7 @@ pub fn load(app_dir: &Path) -> Result<App, Error> {
     Ok(App {
         requests_ai: manifest.capabilities.iter().any(|c| c == "ai"),
         requests_storage: manifest.capabilities.iter().any(|c| c == "storage"),
+        requests_tasks: manifest.capabilities.iter().any(|c| c == "tasks"),
         name: manifest.name,
         root: app_dir,
         entrypoint,

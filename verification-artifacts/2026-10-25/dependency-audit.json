@@ -1,0 +1,8 @@
+{
+  "cargo_audit_version": "0.22.2",
+  "rust_vulnerabilities": 0,
+  "rust_warnings": {},
+  "npm_vulnerabilities": 0,
+  "Cargo.lock_sha256": "9a825084ee36643bfb8d41ec4fa575c1e8c83758dfcb1620735832b71d9e55e4",
+  "package-lock.json_sha256": "78179c1954003089279ac4cf2b7058cc8a10bebd01d83264c77a6fd2a7304c72"
+}

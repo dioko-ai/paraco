@@ -110,7 +110,35 @@ const storageContext = hostConfig.storage ? Object.fromEntries(["config", "data"
   set: (key: string, value: unknown) => storageRequest(namespace, key, value),
   delete: (key: string) => storageRequest(namespace, key, undefined, true),
 })])) : {};
-const context = Object.freeze({ ...aiContext, ...storageContext, basePath: hostConfig.basePath });
+const tasksContext = hostConfig.tasks ? { tasks: Object.freeze({
+  async command(action: string, body: unknown = {}) {
+    const data = encoder.encode(JSON.stringify({ token: hostConfig.tasks.token, action, body }) + "\n");
+    if (data.length > 96 * 1024) throw new Error("task request too large");
+    const conn = await connect({ hostname: "127.0.0.1", port: Number(hostConfig.tasks.address.split(":")[1]) });
+    const timer = setTimeout(() => { try { conn.close(); } catch { /* closed */ } }, 30000);
+    try {
+      let offset = 0;
+      while (offset < data.length) offset += await conn.write(data.subarray(offset));
+      const chunks: Uint8Array[] = [];
+      let size = 0;
+      while (size <= 4 * 1024 * 1024) {
+        const buffer = new Uint8Array(8192);
+        const n = await conn.read(buffer);
+        if (n === null) break;
+        chunks.push(buffer.slice(0, n)); size += n;
+        if (buffer.subarray(0, n).includes(10)) break;
+      }
+      if (size > 4 * 1024 * 1024) throw new Error("task response too large");
+      const output = new Uint8Array(size);
+      let position = 0;
+      for (const chunk of chunks) { output.set(chunk, position); position += chunk.length; }
+      const result = JSON.parse(decoder.decode(output));
+      if (result.error) throw new Error(result.error);
+      return result.value;
+    } finally { clearTimeout(timer); try { conn.close(); } catch { /* closed */ } }
+  }
+}) } : {};
+const context = Object.freeze({ ...aiContext, ...storageContext, ...tasksContext, basePath: hostConfig.basePath });
 
 const app = (await import(entrypoint)).default;
 if (!app || typeof app.fetch !== "function") {

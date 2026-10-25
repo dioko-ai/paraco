@@ -2,8 +2,8 @@
 
 ## Pinned toolchains
 
-The repository uses Rust 1.96.1 (`rust-toolchain.toml`), Deno 2.2.5, Node.js
-22.14.0, and Playwright 1.52.0. The latter three pins are enforced by the native
+The repository uses Rust 1.96.1 (`rust-toolchain.toml`), Deno 2.9.8, Node.js
+22.14.0, and Playwright 1.64.1. The latter three pins are enforced by the native
 CI workflow. Install Rust with rustup and Deno from its official installer, then:
 
 ```sh
@@ -25,7 +25,7 @@ trusted-input arguments); CI runs these on Linux.
 
 `npm run check` runs those independent checks first, then verifies prerequisites
 and runs every integration test and the browser smoke test. Full verification
-requires Deno 2.2.5 and Playwright Chromium. Local Node versions may be 22 or
+requires Deno 2.9.8 and Playwright Chromium. Local Node versions may be 22 or
 newer; CI enforces exactly 22.14.0. `cargo test` launches real Deno applications,
 so absent Deno is a failure, not a skipped success.
 `browser-smoke.cjs` builds on the management DOM test with a real headless
@@ -38,7 +38,7 @@ Rust integration tests also isolate the Unix control-socket root through
 ## CI evidence
 
 `.github/workflows/ci.yml` configures the above checks on Ubuntu 22.04 and
-macOS 13. Configuration is not observed evidence. Until successful native runs
+macOS 14. Configuration is not observed evidence. Until successful native runs
 are retained for both OS families, the M0 native-support acceptance gate remains
 pending.
 
@@ -70,3 +70,27 @@ and cgroup/listener cleanup. It uses a unique temporary systemd unit and require
 `script` from util-linux. It does not exercise machine reboot or the public
 `paraco.service` installation workflow. See the
 [native evidence](verification-linux-native-2026-09-21.md) for exact observations.
+
+## Cron and release checks
+
+The complete check also runs the cron public-API integration and real Chromium
+workflow. Run `npm run test:cron-runtime`, `npm run test:cron-ui`, and
+`npm run test:cron-browser` independently during development. Cron unit tests
+accept deterministic clock inputs to test DST, downtime, archival and crash state.
+
+`npm run test:bundle-contract` verifies the bundle format with a stub compiler;
+it does not claim a native compiled runtime. `npm run test:installer` exercises
+malformed/hostile archives, pointer ownership, upgrade, rollback and removal.
+The manual release-validation workflow runs native archive checks across its
+configured matrix and retains evidence. Fixture notices make those test archives
+non-distributable; successful CI is not signing or publication.
+
+Dependency verification uses `npm audit --audit-level=low` and `cargo audit --deny
+warnings` (cargo-audit 0.22.2). CI checks the committed lockfiles against current
+advisories. An audit is time-specific evidence, not a guarantee of absence of
+vulnerabilities. Current operational Deno is pinned to 2.9.8; historical records
+retain the runtime versions actually tested at those earlier dates.
+
+Runner labels in CI use the [GitHub hosted-runner reference](https://docs.github.com/en/actions/reference/runners/github-hosted-runners).
+Configured architecture coverage is only a claim about intended verification;
+successful native evidence must be retained separately.

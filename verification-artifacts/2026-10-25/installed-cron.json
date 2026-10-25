@@ -1,0 +1,9 @@
+{
+  "installed_cron": "pass",
+  "embedded_source_without_checkout": "pass",
+  "unrelated_cwd": "pass",
+  "broken_system_deno": "private runtime used",
+  "draft_publish_manual_task_logs": "pass",
+  "syntax_diagnostic": "pass",
+  "shutdown": "pass"
+}

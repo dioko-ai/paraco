@@ -38,6 +38,10 @@ struct AppConfig {
     path: PathBuf,
     ai_config: Option<PathBuf>,
     #[serde(default)]
+    task_authoring: bool,
+    #[serde(default)]
+    task_network: Vec<String>,
+    #[serde(default)]
     restart: RestartPolicy,
 }
 
@@ -74,6 +78,8 @@ impl Default for RestartPolicy {
 }
 
 struct PreparedApp {
+    task_authoring: bool,
+    task_network: Vec<String>,
     restart: RestartPolicy,
     app: manifest::App,
     ai_config: Option<PathBuf>,
@@ -161,7 +167,12 @@ fn load(path: &Path) -> Result<Vec<PreparedApp>, String> {
                 || entry.restart.max_backoff_ms > 300_000 {
                 return Err("restart policy requires maxRetries <= 100 and 1 <= backoffMs <= maxBackoffMs <= 300000".into());
             }
+            if !entry.task_authoring && !entry.task_network.is_empty() {
+                return Err("taskNetwork requires taskAuthoring".into());
+            }
             Ok(PreparedApp {
+                task_authoring: entry.task_authoring,
+                task_network: entry.task_network,
                 restart: entry.restart,
                 app,
                 ai_config: entry.ai_config.map(|p| root.join(p)),
@@ -187,7 +198,7 @@ pub fn serve(config: &Path, port: u16, log_dir: &Path) -> Result<(), String> {
         .enable_all()
         .build()
         .map_err(|e| e.to_string())?;
-    let result = runtime.block_on(host(apps, port, stop, store, durable));
+    let result = runtime.block_on(host(apps, port, stop, store, durable, &state_root));
     // spawn_blocking work is intentionally bounded but may be waiting on a
     // filesystem. Never let it turn process shutdown into an unbounded wait.
     runtime.shutdown_timeout(Duration::from_secs(2));
@@ -227,6 +238,7 @@ async fn host(
     stop: Arc<AtomicBool>,
     store: logs::Store,
     durable: state::Store,
+    state_root: &Path,
 ) -> Result<(), String> {
     // Bind the gateway before launching apps: an occupied public port starts none.
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
@@ -242,9 +254,27 @@ async fn host(
         .lock()
         .unwrap()
         .reconcile(apps.iter().map(|prepared| prepared.app.root.clone()))?;
+    let tasks = if apps.iter().any(|app| app.task_authoring) {
+        let tasks = crate::tasks::Tasks::open(state_root, crate::runtime::command_for_host()?)?;
+        tasks.set_lease(durable.lock().unwrap().guardian_lease()?);
+        durable.lock().unwrap().tasks = Some(tasks.clone());
+        Some(tasks)
+    } else {
+        None
+    };
     let mut initial = BTreeMap::new();
     for prepared in &apps {
         let deployment = durable.lock().unwrap().install(&prepared.app.root)?;
+        if prepared.task_authoring {
+            if let Some(tasks) = &tasks {
+                tasks.set_grant(deployment.id.clone(), prepared.task_network.clone());
+            }
+            durable
+                .lock()
+                .unwrap()
+                .task_grants
+                .insert(deployment.id.clone(), prepared.task_network.clone());
+        }
         initial.insert(
             prepared.app.name.clone(),
             AppRecord {
@@ -315,6 +345,9 @@ async fn host(
             );
         }));
     }
+    if let Some(tasks) = &tasks {
+        tasks.start();
+    }
     let gateway = Gateway {
         apps: inventory,
         client,
@@ -345,6 +378,11 @@ async fn host(
     serving.abort();
     serving_v6.abort();
     managing.abort();
+    // Cancel validation and task work before dropping app capability workers,
+    // so an in-flight publication cannot hold shutdown until its deadline.
+    if let Some(tasks) = &tasks {
+        tasks.shutdown();
+    }
     // Dropping the owners reaps every child, including apps still starting.
     drop(supervisors);
     drop(control);

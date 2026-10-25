@@ -1,0 +1,54 @@
+name: Native release validation (unsigned, unpublished)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native-bundle:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: macos-14
+            target: aarch64-apple-darwin
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96.1
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.9.8
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Inspect native host and exercise installer
+        shell: bash
+        run: |
+          mkdir -p release-evidence
+          { uname -a; rustc -vV; deno --version; command -v sw_vers >/dev/null && sw_vers || true; command -v ldd >/dev/null && ldd --version || true; } > release-evidence/environment.txt 2>&1
+          set -o pipefail
+          /bin/bash tests/build-bundle.sh 2>&1 | tee release-evidence/bundle-contract.log
+          /bin/bash tests/install-archive.sh 2>&1 | tee release-evidence/installer.log
+          /bin/bash tests/release-verification.sh 2>&1 | tee release-evidence/signature-contract.log
+      - name: Build and smoke test native archive
+        shell: bash
+        run: |
+          # Fixtures exercise archive composition only and must never be distributed.
+          printf 'TEST FIXTURE ONLY: incomplete redistribution notices; not distributable.\n' > release-evidence/fixture-notice
+          set -o pipefail
+          /bin/bash tests/bundle-smoke.sh --deno "$(command -v deno)" --deno-notice release-evidence/fixture-notice --third-party-notice release-evidence/fixture-notice --target '${{ matrix.target }}' 2>&1 | tee release-evidence/bundle-smoke.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: unsigned-validation-${{ matrix.target }}
+          path: release-evidence/

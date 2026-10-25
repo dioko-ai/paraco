@@ -1,0 +1,15 @@
+{
+  "unit": "dev.paraco.durable.1542235.service",
+  "deployment_ids": {
+    "drafts": "d38966988d13f400f8a6b21327c628b09",
+    "stopped": "d0203038e9d4cb795863d071b186932a4"
+  },
+  "terminal_exit": "service continued after launching PTY exited",
+  "source_update": "revision 2, same IDs/data/stopped intent",
+  "backup_restore": "fresh private state directory; IDs/data/intent preserved",
+  "backup_sha256": "11c4897a2c1fdbad6afb1a340d6a38113821f0ccb5a7cc48d711b14af68f1681",
+  "invalid_legacy": "refused without schema",
+  "future_schema": "refused without changing copy",
+  "shutdown": "9 cgroup processes reaped across 3 stops; listener closed",
+  "machine_reboot": "not performed"
+}

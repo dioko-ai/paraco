@@ -7,12 +7,15 @@ mod control;
 mod guardian;
 mod logs;
 mod manifest;
+mod reference;
 mod runner;
 mod runtime;
 mod server;
 mod service;
 mod state;
 mod storage;
+mod task_api;
+mod tasks;
 
 #[derive(Parser)]
 #[command(name = "paraco", version, about = "Run local Paraco applications")]
@@ -26,6 +29,17 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Run the bundled cron app; no checkout or separate app download required.
+    Cron {
+        #[arg(long, default_value_t = 3000)]
+        port: u16,
+        /// Host-owned AI configuration; AI drafts remain optional.
+        #[arg(long)]
+        ai_config: Option<PathBuf>,
+        /// Maximum task network grant. Each published revision requests a subset.
+        #[arg(long)]
+        allow_task_network: Vec<String>,
+    },
     /// Open the authenticated dashboard through the private local control socket.
     Open {
         #[arg(long, default_value_t = 3000)]
@@ -175,6 +189,10 @@ impl From<ServicePlatform> for service::Platform {
 }
 
 fn main() {
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("__paraco_task_guardian"))
+    {
+        std::process::exit(tasks::guardian());
+    }
     if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("__paraco_guardian")) {
         std::process::exit(guardian::run());
     }
@@ -188,6 +206,16 @@ fn main() {
 
 fn execute(cli: Cli) -> Result<(), String> {
     match cli.command {
+        Command::Cron {
+            port,
+            ai_config,
+            allow_task_network,
+        } => reference::serve(
+            port,
+            &logs::directory(cli.log_dir.as_deref())?,
+            ai_config.as_deref(),
+            allow_task_network,
+        ),
         Command::Open { port, print } => control::open(port, print),
         Command::Backup { state, output } => state::Store::open(&state)?.backup(&output),
         Command::Prepare { app, output, deno } => artifact::prepare(&app, &output, &deno),

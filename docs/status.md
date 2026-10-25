@@ -1,5 +1,26 @@
 # Implementation and verification status
 
+## Current implementation — 2026-10-25
+
+The working tree now contains a bounded task API and scheduler, deployment-scoped
+task history and notifications, the manual cron reference app, optional AI
+drafting, and an unsigned private-Deno archive builder with a local installer.
+These are implementation changes under review; they do not close the full
+M4–M8 milestones or release acceptance. See [Tasks and cron](tasks-and-cron.md)
+for the user-facing contract and [installation and release](installation-and-release.md)
+for package gates.
+
+On Linux x86-64, the complete `npm run check` passed: 146 Rust tests,
+formatting/strict Clippy/schema/types, four management tests, management browser
+smoke and six Cron UI/adapter/browser tests. Installer, bundle contract,
+synthetic signed-release tests and dependency audits also passed. The final
+packaged Cron app, systemd restart/durable-state tests, prepared-app relocation
+and 1/10/50-app workloads passed. See the dated
+[verification record](verification-2026-10-25.md) for retained evidence and limits.
+Native macOS/ARM64, minimum platform baselines, machine reboot, public service
+setup/removal in a dedicated account, real release notices and signatures,
+notarization and publication remain open release gates.
+
 This is the current status record. `spec.md` describes project intent; dated
 audits record historical findings. Milestone plans describe future work and do
 not establish verification evidence.
@@ -7,8 +28,8 @@ not establish verification evidence.
 ## M0–M3 follow-up — 2026-09-21
 
 SQLite migration, scoped cron-draft storage, backup, authenticated browser entry,
-portable prepared artifacts, and native service fixes are implemented. See
-[the retained verification record](verification-2026-09-21.md) for current results
+portable prepared artifacts, and native service fixes were implemented. See
+[the retained verification record](verification-2026-09-21.md) for September results
 and [native Linux follow-up](verification-linux-native-2026-09-21.md). Native
 x86-64 systemd, terminal independence, backup restoration, and clean offline
 bundle execution now pass. Disposable-machine reboot and the public service

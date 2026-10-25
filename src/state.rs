@@ -27,6 +27,8 @@ pub struct Store {
     db: rusqlite::Connection,
     _lock: File,
     disk: Disk,
+    pub tasks: Option<std::sync::Arc<crate::tasks::Tasks>>,
+    pub task_grants: BTreeMap<String, Vec<String>>,
 }
 
 impl Store {
@@ -70,7 +72,7 @@ impl Store {
         let version: u32 = db
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .map_err(|e| e.to_string())?;
-        if version > 1 {
+        if version > 2 {
             return Err("state schema is newer than this runtime".into());
         }
         if version == 0 {
@@ -102,6 +104,9 @@ impl Store {
             }
             tx.commit().map_err(|e| e.to_string())?;
         }
+        // Version 2 reserves the durable task schema; older binaries must refuse it.
+        db.execute_batch("PRAGMA user_version=2;")
+            .map_err(|e| e.to_string())?;
         let deployments = {
             let mut query = db
                 .prepare("SELECT source,id,desired FROM deployments")
@@ -121,6 +126,8 @@ impl Store {
                 .map_err(|e| e.to_string())?
         };
         Ok(Self {
+            tasks: None,
+            task_grants: BTreeMap::new(),
             db,
             _lock: lock,
             disk: Disk {

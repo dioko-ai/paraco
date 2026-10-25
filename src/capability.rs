@@ -64,14 +64,27 @@ enum Provider {
 }
 
 impl Provider {
-    fn complete(&self, caller: &str, request: &Request) -> Result<Response, AiError> {
+    fn complete(
+        &self,
+        caller: &str,
+        request: &Request,
+        stop: &AtomicBool,
+    ) -> Result<Response, AiError> {
         match self {
             Self::Fake(proxy) => proxy.complete(caller, request),
-            Self::OpenAi(proxy) => provider_runtime()?.block_on(proxy.complete(caller, request)),
+            Self::OpenAi(proxy) => {
+                provider_runtime()?.block_on(cancel_on_stop(stop, proxy.complete(caller, request)))
+            }
         }
     }
 
-    fn stream<F>(&self, caller: &str, request: &Request, sink: F) -> Result<(), AiError>
+    fn stream<F>(
+        &self,
+        caller: &str,
+        request: &Request,
+        stop: &AtomicBool,
+        sink: F,
+    ) -> Result<(), AiError>
     where
         F: FnMut(&str) -> Result<(), AiError>,
     {
@@ -82,9 +95,25 @@ impl Provider {
                 sink(&response.text)
             }
             Self::OpenAi(proxy) => provider_runtime()?
-                .block_on(proxy.stream(caller, request, sink))
+                .block_on(cancel_on_stop(stop, proxy.stream(caller, request, sink)))
                 .map(|_| ()),
         }
+    }
+}
+
+// Dropping the selected future releases admission permits and closes upstream I/O.
+async fn cancel_on_stop<T>(
+    stop: &AtomicBool,
+    operation: impl std::future::Future<Output = Result<T, AiError>>,
+) -> Result<T, AiError> {
+    tokio::select! {
+        biased;
+        _ = async {
+            while !stop.load(Ordering::Acquire) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        } => Err(AiError::ProviderFailed),
+        result = operation => result,
     }
 }
 
@@ -110,6 +139,7 @@ pub struct Capability {
     pub timeout: Duration,
     stop: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
+    active_connections: Vec<Arc<Mutex<Option<TcpStream>>>>,
 }
 
 impl Capability {
@@ -217,19 +247,8 @@ impl Capability {
         let worker_token = token.clone();
         let caller = deployment_id.to_owned();
         let worker_proxy = proxy.clone();
-        let worker = thread::spawn(move || {
-            while !worker_stop.load(Ordering::Relaxed) {
-                match listener.accept() {
-                    Ok((mut stream, _)) => {
-                        let _ = serve(&mut stream, &worker_token, &caller, &worker_proxy, timeout);
-                    }
-                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        thread::sleep(Duration::from_millis(10))
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
+        let private_connection = Arc::new(Mutex::new(None));
+        let worker_connection = private_connection.clone();
         let http_listener =
             TcpListener::bind(("127.0.0.1", 0)).map_err(|_| "cannot bind AI HTTP listener")?;
         let http_address = http_listener
@@ -243,17 +262,50 @@ impl Capability {
         let http_stop = stop.clone();
         let http_caller = deployment_id.to_owned();
         let http_proxy = proxy;
+        let http_connection = Arc::new(Mutex::new(None));
+        let worker = thread::spawn(move || {
+            while !worker_stop.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        *worker_connection.lock().unwrap() = stream.try_clone().ok();
+                        if worker_stop.load(Ordering::Acquire) {
+                            break;
+                        }
+                        let _ = serve(
+                            &mut stream,
+                            &worker_token,
+                            &caller,
+                            &worker_proxy,
+                            timeout,
+                            &worker_stop,
+                        );
+                        *worker_connection.lock().unwrap() = None;
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(10))
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        let worker_connection = http_connection.clone();
         let http_worker = thread::spawn(move || {
             while !http_stop.load(Ordering::Relaxed) {
                 match http_listener.accept() {
                     Ok((mut stream, _)) => {
+                        *worker_connection.lock().unwrap() = stream.try_clone().ok();
+                        if http_stop.load(Ordering::Acquire) {
+                            break;
+                        }
                         let _ = serve_http(
                             &mut stream,
                             &http_token,
                             &http_caller,
                             &http_proxy,
                             timeout,
+                            &http_stop,
                         );
+                        *worker_connection.lock().unwrap() = None;
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(10))
@@ -269,6 +321,7 @@ impl Capability {
             http_token: token.clone(),
             timeout,
             stop,
+            active_connections: vec![private_connection, http_connection],
             worker: Some(thread::spawn(move || {
                 let _ = worker.join();
                 let _ = http_worker.join();
@@ -314,6 +367,7 @@ fn serve_http(
     caller: &str,
     proxy: &Provider,
     timeout: Duration,
+    stop: &AtomicBool,
 ) -> std::io::Result<()> {
     stream.set_nonblocking(false)?;
     // Treat the HTTP head and body as one bounded request, rather than
@@ -379,7 +433,7 @@ fn serve_http(
             model: v.model.clone(),
             prompt: v.messages[0].content.clone(),
         };
-        let result = proxy.stream(caller, &request, |text| {
+        let result = proxy.stream(caller, &request, stop, |text| {
             let json = serde_json::json!({"choices":[{"delta":{"content": text}}]});
             let body = serde_json::to_string(&json).map_err(|_| AiError::ProviderFailed)?;
             stream
@@ -407,6 +461,7 @@ fn serve_http(
                     model: v.model,
                     prompt: v.messages[0].content.clone(),
                 },
+                stop,
             ) {
                 Ok(r) => (
                     200,
@@ -431,7 +486,14 @@ fn serve_http(
 
 impl Drop for Capability {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
+        self.stop.store(true, Ordering::Release);
+        for connection in &self.active_connections {
+            if let Ok(guard) = connection.lock()
+                && let Some(stream) = guard.as_ref()
+            {
+                let _ = stream.shutdown(std::net::Shutdown::Both);
+            }
+        }
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
@@ -463,6 +525,7 @@ fn serve(
     caller: &str,
     proxy: &Provider,
     timeout: Duration,
+    stop: &AtomicBool,
 ) -> std::io::Result<()> {
     // Accepted sockets can inherit the listener's nonblocking mode on macOS.
     // Framed reads and writes below use blocking I/O with bounded timeouts.
@@ -481,7 +544,7 @@ fn serve(
         Ok(envelope) if !token_matches(&envelope.token, token) => {
             serde_json::json!({"error": "unauthorized AI caller"})
         }
-        Ok(envelope) => match proxy.complete(caller, &envelope.request) {
+        Ok(envelope) => match proxy.complete(caller, &envelope.request, stop) {
             Ok(response) => serde_json::json!({"result": response}),
             Err(error) => serde_json::json!({"error": error.to_string()}),
         },
@@ -506,6 +569,36 @@ mod tests {
     use super::*;
 
     #[test]
+    fn shutdown_cancels_active_provider_future_and_releases_resources() {
+        struct Dropped(Arc<AtomicBool>);
+        impl Drop for Dropped {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+        let stop = Arc::new(AtomicBool::new(false));
+        let dropped = Arc::new(AtomicBool::new(false));
+        let (started, active) = std::sync::mpsc::channel();
+        let worker_stop = stop.clone();
+        let released = dropped.clone();
+        let worker = thread::spawn(move || {
+            provider_runtime()
+                .unwrap()
+                .block_on(cancel_on_stop(&worker_stop, async {
+                    let _guard = Dropped(released);
+                    started.send(()).unwrap();
+                    std::future::pending::<Result<(), AiError>>().await
+                }))
+        });
+        active.recv_timeout(Duration::from_secs(2)).unwrap();
+        stop.store(true, Ordering::Release);
+        let before = Instant::now();
+        assert!(worker.join().unwrap().is_err());
+        assert!(before.elapsed() < Duration::from_secs(1));
+        assert!(dropped.load(Ordering::Acquire));
+    }
+
+    #[test]
     fn nonblocking_accepted_socket_waits_for_request_frame() {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
@@ -519,6 +612,7 @@ mod tests {
                 "test",
                 &Provider::Fake(Box::new(FakeProxy::new(Config::default()).unwrap())),
                 Duration::from_secs(3),
+                &AtomicBool::new(false),
             )
         });
         thread::sleep(Duration::from_millis(50));
@@ -543,6 +637,43 @@ mod tests {
     }
 
     #[test]
+    fn shutdown_interrupts_idle_connections_on_both_transports() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = App {
+            name: "test".into(),
+            root: dir.path().to_path_buf(),
+            entrypoint: dir.path().join("main.ts"),
+            requests_ai: true,
+            requests_storage: false,
+            requests_tasks: false,
+        };
+        let capability = Capability::start(&app, "deployment-test", None).unwrap();
+        let _private = TcpStream::connect(&capability.address).unwrap();
+        let _http = TcpStream::connect(&capability.http_address).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !capability
+            .active_connections
+            .iter()
+            .all(|slot| slot.lock().unwrap().is_some())
+        {
+            assert!(
+                Instant::now() < deadline,
+                "workers must accept both sockets"
+            );
+            thread::sleep(Duration::from_millis(1));
+        }
+        let (done, completion) = std::sync::mpsc::channel();
+        let worker = thread::spawn(move || {
+            drop(capability);
+            done.send(()).unwrap();
+        });
+        completion
+            .recv_timeout(Duration::from_millis(500))
+            .expect("shutdown must interrupt reads");
+        worker.join().unwrap();
+    }
+
+    #[test]
     fn trickled_http_request_cannot_extend_the_absolute_deadline() {
         let dir = tempfile::tempdir().unwrap();
         let app = App {
@@ -551,6 +682,7 @@ mod tests {
             entrypoint: dir.path().join("main.ts"),
             requests_ai: true,
             requests_storage: false,
+            requests_tasks: false,
         };
         let capability = Capability::start(&app, "deployment-test", None).unwrap();
         let mut slow = TcpStream::connect(&capability.http_address).unwrap();
@@ -629,6 +761,7 @@ mod tests {
             entrypoint: app_root.path().join("main.ts"),
             requests_ai: true,
             requests_storage: false,
+            requests_tasks: false,
         };
         let capability = Capability::start(&app, "deployment-fixture", Some(&config)).unwrap();
         let completed = exchange(
@@ -667,6 +800,7 @@ mod tests {
             entrypoint: app_root.path().join("main.ts"),
             requests_ai: true,
             requests_storage: false,
+            requests_tasks: false,
         };
         let one = Capability::start(&app, "deployment-one", Some(&config)).unwrap();
         let two = Capability::start(&app, "deployment-two", Some(&config)).unwrap();
@@ -788,6 +922,7 @@ for _ in range(2):
             entrypoint: app_root.path().join("main.ts"),
             requests_ai: true,
             requests_storage: false,
+            requests_tasks: false,
         };
         let capability = Capability::start(&app, "deployment-tls", Some(&config)).unwrap();
         let completed = exchange(
@@ -814,6 +949,7 @@ for _ in range(2):
             entrypoint: dir.path().join("main.ts"),
             requests_ai: true,
             requests_storage: false,
+            requests_tasks: false,
         };
         let capability = Capability::start(&app, "deployment-test", None).unwrap();
         let request = serde_json::json!({"prompt": "private"});
@@ -887,6 +1023,7 @@ mod config_tests {
             entrypoint: root.path().join("main.ts"),
             requests_ai: true,
             requests_storage: false,
+            requests_tasks: false,
         };
         let inside = root.path().join("ai.json");
         std::fs::write(&inside, "{}").unwrap();

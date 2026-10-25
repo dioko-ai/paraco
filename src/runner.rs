@@ -156,6 +156,7 @@ pub struct RunningApp {
     errors: Option<thread::JoinHandle<()>>,
     _capability: Option<Capability>,
     _storage: Option<crate::storage::Service>,
+    _tasks: Option<crate::task_api::Service>,
     _temporary: tempfile::TempDir,
     log: logs::AppLog,
 }
@@ -260,6 +261,25 @@ impl RunningApp {
             }
             None
         };
+        let tasks = if app.requests_tasks {
+            let state = durable.lock().map_err(|_| "state unavailable")?;
+            let engine = state
+                .tasks
+                .clone()
+                .ok_or("tasks require hosted operation with taskAuthoring enabled")?;
+            let network = state
+                .task_grants
+                .get(deployment_id)
+                .cloned()
+                .ok_or("task authoring is not granted by the host")?;
+            Some(crate::task_api::Service::start(
+                engine,
+                deployment_id.to_string(),
+                network,
+            )?)
+        } else {
+            None
+        };
         let storage = if app.requests_storage {
             Some(crate::storage::Service::start(
                 durable,
@@ -281,6 +301,7 @@ impl RunningApp {
             .map_err(|_| "cannot create entrypoint file URL")?;
         let bootstrap = serde_json::json!({
             "basePath": base_path,
+            "tasks": tasks.as_ref().map(|s| serde_json::json!({"address":s.address,"token":s.token})),
             "storage": storage.as_ref().map(|s| serde_json::json!({"address":s.address,"token":s.token})),
             "backendToken": backend_token,
             "ai": capability.as_ref().map(|c| serde_json::json!({"address": c.address, "token": c.token, "timeoutMs": c.timeout.as_millis(), "http": {"address": c.http_address, "token": c.http_token}}))
@@ -321,10 +342,14 @@ impl RunningApp {
             .arg("--no-prompt")
             .arg(format!("--allow-read={}", app.root.display()))
             .arg(format!(
-                "--allow-net=127.0.0.1:{port}{}{}",
+                "--allow-net=127.0.0.1:{port}{}{}{}",
                 capability
                     .as_ref()
                     .map(|c| format!(",{},{}", c.address, c.http_address))
+                    .unwrap_or_default(),
+                tasks
+                    .as_ref()
+                    .map(|s| format!(",{}", s.address))
                     .unwrap_or_default(),
                 storage
                     .as_ref()
@@ -366,6 +391,7 @@ impl RunningApp {
             errors: None,
             _capability: capability,
             _storage: storage,
+            _tasks: tasks,
             _temporary: temporary,
             log: log.clone(),
         };

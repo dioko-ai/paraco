@@ -7,13 +7,26 @@ verification. Cloud work remains deferred.
 
 See [current verification evidence](docs/verification-2026-09-21.md) and the
 [Linux-agent handoff](docs/linux-agent-handoff.md). SQLite migration, scoped
-cron-draft storage, backup export, authenticated `open`, and relocatable private
+cron-draft storage, backup export, authenticated browser management, and relocatable private
 Deno artifacts are implemented with regression checks. Historical pending labels
 below are superseded only where that evidence explicitly records a pass. Native
 [Native Linux evidence](docs/verification-linux-native-2026-09-21.md) now covers
 systemd, terminal independence, clean offline bundles, and backup restore.
 Dedicated-user public service installation, clean macOS, and machine reboot
-gates remain separate acceptance work; scheduling is not implemented.
+gates remain separate acceptance work. Scheduling and the cron reference app
+have since been implemented; native service and release gates remain open.
+
+## Implementation update — 2026-10-25
+
+Task authoring, bounded execution and scheduling, run history, notifications,
+the embedded cron reference app, optional AI drafting, bundle creation, and local
+archive installation are implemented. Linux core, task runtime, installer,
+bundle-contract and synthetic signed-release checks have passed; the complete
+`npm run check` now passes, including the real Chromium workflow. See [current status](docs/status.md)
+and [dated evidence](docs/verification-2026-10-25.md). These results do not close
+M4–M8. Native macOS and reboot, dedicated-user public service installation,
+release-grade signing/notices, authenticity, notarization, and publication remain
+open.
 
 ## Proposed foundation pivot
 
@@ -31,7 +44,7 @@ execution order; completed work remains recorded as historical milestones.
 6. Deliver the manual cron app, then AI drafting with explicit publication (M6–M7).
 7. Finish installation and release verification (M8).
 
-The detailed plan defines the acceptance gates; partial implementation progress
+The detailed plan defines the acceptance gates. Partial implementation progress
 is recorded below without declaring an entire milestone complete.
 
 ## M1 crash recovery — Linux/macOS ARM64 evidence retained
@@ -86,8 +99,11 @@ is recorded below without declaring an entire milestone complete.
 
 - [x] Generate explicit, user-scoped systemd/launchd definitions and document
       opt-in setup/removal/status behavior.
-- [ ] Retain observed native manager, terminal-independence, reboot, and graceful
-      shutdown evidence (generated definitions are not native verification).
+- [ ] Re-run Linux packaged systemd startup, unexpected-death recovery, graceful
+      shutdown, and durable stopped intent against the final task-engine patch.
+      The prior binary passed these checks; see dated evidence.
+- [ ] Verify macOS LaunchAgent behavior, machine reboot, and public service
+      setup/removal in a dedicated account.
 - [ ] Retain restart/machine-restart restoration evidence on supported targets.
 
 ## Further local capabilities
@@ -98,7 +114,14 @@ is recorded below without declaring an entire milestone complete.
 - [x] Persist host deployment identity and desired state.
 - [x] Add deployment-scoped SQLite configuration/data storage for cron drafts,
       with backup/export and migration/restore checks.
-- [x] Define deferred bounded scheduling, notifications, and health increments.
+- [x] Verify task API publication, scope, bounded execution, scheduling,
+      recovery, notifications, backup restoration, and log recovery through
+      unit and runtime checks; see `docs/verification-2026-10-25.md`.
+- [x] Verify manual Cron review/publication in real Chromium and optional AI
+      drafting safeguards in simulated UI tests; all six UI/adapter/browser
+      checks pass.
+- [x] Document task authorization, schedule semantics, limits, and recovery in
+      `docs/tasks-and-cron.md`.
 - [ ] Verify Deno SDK streaming, provider saturation/cancellation, and native
       end-to-end HTTP behavior with deterministic fixtures.
 
@@ -107,6 +130,10 @@ is recorded below without declaring an entire milestone complete.
 - [x] Define local unsigned private-Deno bundle, archive installer, and generated
       unpublished Homebrew/Debian/macOS-package recipe tooling.
 - [x] Test hostile archive-path rejection and local installer pointer/data safety.
+- [x] Add bundle contract and release-validation workflows; these do not by
+      themselves establish native macOS, reboot, signing, or publication evidence.
+- [x] Pass the local release verification harness with temporary payloads and
+      ephemeral keys; this does not verify real publisher authenticity.
 - [ ] Verify actual archives on clean machines, offline dependencies, HTTP, and
       shutdown across supported native targets.
 - [ ] Execute authenticity, dependency review, signing/notarization, publication,

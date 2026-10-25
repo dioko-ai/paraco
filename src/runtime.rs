@@ -11,6 +11,10 @@ struct BundleMetadata {
     deno_version: String,
     target: String,
     source_revision: String,
+    // Local developer bundles may be dirty; publisher release verification
+    // enforces cleanliness. Older local bundle metadata omitted this marker.
+    #[serde(rename = "sourceDirty", default)]
+    _source_dirty: Option<bool>,
     notices: Vec<String>,
     checksums: BTreeMap<String, String>,
     trusted_input_provenance: String,
@@ -201,9 +205,27 @@ mod tests {
         assert_eq!(result, deno.canonicalize().unwrap());
     }
 
+    #[test]
+    fn accepts_builder_cleanliness_marker_without_claiming_release_authenticity() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("bundle.json");
+        let mut document: serde_json::Value = serde_json::from_str(&metadata("2.9.8")).unwrap();
+        for dirty in [false, true] {
+            document["sourceDirty"] = serde_json::json!(dirty);
+            std::fs::write(&path, document.to_string()).unwrap();
+            assert_eq!(read_version(&path).unwrap(), "2.9.8");
+        }
+        document["sourceDirty"] = serde_json::json!("false");
+        std::fs::write(&path, document.to_string()).unwrap();
+        assert!(read_version(&path).is_err());
+        document.as_object_mut().unwrap().remove("sourceDirty");
+        std::fs::write(&path, document.to_string()).unwrap();
+        assert_eq!(read_version(&path).unwrap(), "2.9.8");
+    }
+
     fn metadata(version: &str) -> String {
         format!(
-            r#"{{"paracoVersion":"0.1.0","denoVersion":"{version}","target":"x86_64-unknown-linux-gnu","sourceRevision":"abc","notices":["notices/LICENSE"],"checksums":{{"bin/paraco":"x","libexec/paraco/deno":"y"}},"trustedInputProvenance":"test"}}"#
+            r#"{{"paracoVersion":"0.1.0","denoVersion":"{version}","target":"x86_64-unknown-linux-gnu","sourceRevision":"abc","sourceDirty":false,"notices":["notices/LICENSE"],"checksums":{{"bin/paraco":"x","libexec/paraco/deno":"y"}},"trustedInputProvenance":"test"}}"#
         )
     }
 }

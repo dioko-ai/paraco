@@ -10,14 +10,18 @@ while (($#)); do case $1 in
   --version) version=${2:?}; shift 2;; --prefix) prefix=${2:?}; shift 2;;
   --channel) channel=${2:?}; shift 2;; *) usage;; esac; done
 [[ $cmd == install || $cmd == rollback || $cmd == uninstall ]] || usage
-[[ $prefix = /* && $version =~ ^[A-Za-z0-9._-]+$ && $channel =~ ^[A-Za-z0-9._-]+$ ]] || { echo 'absolute prefix and safe version/channel required' >&2; exit 2; }
+[[ $prefix = /* && $version =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ && $channel =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || { echo 'absolute prefix and safe version/channel required' >&2; exit 2; }
 root="$prefix"; releases="$root/releases"; active="$root/channels/$channel"; lock="$root/.installer.lock"
 owner="$root/channels/.paraco-$channel.owner"
 mkdir -p "$releases" "$(dirname "$active")"
 if ! mkdir "$lock" 2>/dev/null; then echo 'another installer owns this prefix' >&2; exit 1; fi
 trap 'rmdir "$lock"' EXIT
+replace_pointer(){
+  # BSD mv -h and GNU mv -T both prevent following the destination symlink.
+  if [[ $(uname -s) == Darwin ]]; then mv -fh "$1" "$2"; else mv -Tf "$1" "$2"; fi
+}
 hash(){ if command -v sha256sum >/dev/null; then sha256sum "$1" | awk '{print $1}'; else shasum -a 256 "$1" | awk '{print $1}'; fi; }
-if [[ -e $active && (! -f $owner || $(cat "$owner") != paraco-channel-v1) ]]; then
+if [[ ( -e $active || -L $active ) && (! -f $owner || $(cat "$owner") != paraco-channel-v1) ]]; then
   echo 'refusing foreign or unowned channel pointer' >&2; exit 1
 fi
 if [[ $cmd == uninstall ]]; then
@@ -32,34 +36,26 @@ if [[ $cmd == rollback ]]; then
   # explicitly re-prepare if an older binary cannot read current host state.
   [[ ! -e "$root/state/format" ]] || [[ $(cat "$root/state/format") == 1 ]] || { echo 'rollback refused: newer state format requires recovery' >&2; exit 1; }
   printf 'paraco-channel-v1\n' > "$owner"
-  tmp="$active.new.$$"; ln -s "../releases/$version" "$tmp"; mv -Tf "$tmp" "$active"
+  tmp="$active.new.$$"; ln -s "../releases/$version" "$tmp"; replace_pointer "$tmp" "$active"
   echo "rolled back $channel -> $version"; exit 0
 fi
 [[ -f $archive && $checksum =~ ^[A-Fa-f0-9]{64}$ ]] || { echo 'local archive and explicit SHA-256 are required trust inputs' >&2; exit 2; }
+[[ $(wc -c < "$archive") -le 1100000000 ]] || { echo 'compressed archive size rejected' >&2; exit 1; }
 [[ $(hash "$archive") == "$checksum" ]] || { echo 'archive checksum mismatch' >&2; exit 1; }
-# Reject unsafe member names before extraction. The builder owns the exact root
-# name: paraco-<version>-<target>. The installer maps that immutable bundle to
-# its versioned release slot.
-mapfile -t members < <(tar -tzf "$archive")
-((${#members[@]} > 0 && ${#members[@]} <= 10000)) || { echo 'archive entry count rejected' >&2; exit 1; }
-declare -A seen=()
-archive_root=
-for p in "${members[@]}"; do
- [[ $p != /* && $p != *'..'* ]] || { echo "unsafe archive path: $p" >&2; exit 1; }
- top=${p%%/*}
- [[ $top =~ ^paraco-${version}-[A-Za-z0-9._-]+$ ]] || { echo "unsafe archive path: $p" >&2; exit 1; }
- [[ -z $archive_root || $archive_root == "$top" ]] || { echo "archive has multiple roots" >&2; exit 1; }; archive_root=$top
- [[ -z ${seen[$p]+x} ]] || { echo "duplicate archive path: $p" >&2; exit 1; }; seen[$p]=1
-done
+# Copy and validate the exact bytes extracted to avoid a source-file race.
+# Requires Perl, gzip and tar; avoids Bash 4 and GNU-only archive inspection.
 stage=$(mktemp -d "$root/.stage.XXXXXX"); trap 'rm -rf "$stage"; rmdir "$lock"' EXIT
-tar -xzf "$archive" -C "$stage" --no-same-owner --no-same-permissions
-[[ ! -L "$stage/$archive_root" ]] && ! find "$stage" -type l -o -type b -o -type c -o -type p -o -type s | grep -q . || { echo 'links or special files rejected' >&2; exit 1; }
+cp "$archive" "$stage/input.tar.gz"
+[[ $(hash "$stage/input.tar.gz") == "$checksum" ]] || { echo 'archive changed during staging' >&2; exit 1; }
+archive_root=$(perl "$(dirname "$0")/validate-archive.pl" "$stage/input.tar.gz" "$version")
+tar -xzf "$stage/input.tar.gz" -C "$stage" --no-same-owner --no-same-permissions
+rm "$stage/input.tar.gz"
 [[ -x "$stage/$archive_root/bin/paraco" && -x "$stage/$archive_root/libexec/paraco/deno" && -f "$stage/$archive_root/bundle.json" ]] || { echo 'archive lacks the Paraco bundle contract' >&2; exit 1; }
 [[ $(du -sk "$stage" | awk '{print $1}') -le 1048576 ]] || { echo 'extraction size rejected' >&2; exit 1; }
 target="$releases/$version"
-[[ ! -e $target ]] || { echo 'release version already exists (immutable)' >&2; exit 1; }
+[[ ! -e $target && ! -L $target ]] || { echo 'release version already exists (immutable)' >&2; exit 1; }
 mv "$stage/$archive_root" "$target"
 # Atomic pointer replacement. Old release remains for processes and rollback.
-tmp="$active.new.$$"; ln -s "../releases/$version" "$tmp"; mv -Tf "$tmp" "$active"
+tmp="$active.new.$$"; ln -s "../releases/$version" "$tmp"; replace_pointer "$tmp" "$active"
 printf 'paraco-channel-v1\n' > "$owner"
 echo "activated $channel -> $version"

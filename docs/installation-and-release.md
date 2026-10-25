@@ -5,18 +5,44 @@
 `scripts/install-archive.sh` is an intentionally local, unpublished installer
 for a user-supplied archive and explicit SHA-256. It requires an absolute
 prefix, channel, and version, serializes ownership with a prefix lock, rejects
-traversal, duplicates, links, special files and oversized extraction, stages
-before an atomic channel-pointer switch, and retains old releases. Failed
+traversal, duplicates, links, special files and oversized extraction. Before
+extracting, its Perl validator streams gzip output and accepts a bounded strict
+POSIX ustar subset only; it rejects extensions and malformed trailers. It then
+stages before an atomic channel-pointer switch and retains old releases. Failed
 validation therefore cannot change the active channel. `uninstall` removes only
 the channel pointer and refuses a state-marked running runtime; it preserves
-state, configuration, credentials and releases. The script does not download,
-publish, register services, or claim health-checked service rollback.
+state, configuration, credentials and releases. This local installer does not
+register services or claim health-checked service rollback. The separate
+`install-release.sh` wrapper can acquire explicitly supplied HTTPS URLs after
+signature verification, but does not publish releases or provide a release
+endpoint.
 
-A checksum establishes integrity of the selected bytes, **not publisher
-authenticity**. The user must supply trusted local provenance. Signing,
-notarization, remote release provenance, native upgrade/rollback/service smoke
+A checksum alone establishes integrity of the selected bytes, **not publisher
+authenticity**. The signed installer adds signature verification only when the
+user supplies a public key through an independently trusted channel. Real key
+custody, notarization, release provenance, native upgrade/rollback/service smoke
 tests, prepared-artifact compatibility checks, and schema-downgrade recovery
 remain release gates rather than claimed support.
+
+`scripts/verify-release.sh` checks a detached OpenSSL SHA-256 signature against
+an independently supplied public key, then validates signed bundle metadata,
+target, source cleanliness, file hashes and required notice files without
+executing the payload. `scripts/install-release.sh` accepts local archive and
+signature files or HTTPS URLs, requires the public key and expected checksum,
+and activates only after verification. These are unpublished tools: the public
+key must already be trusted, and the scripts cannot establish that notices are
+complete or that a key belongs to Paraco. The local release test harness uses
+temporary synthetic payloads and ephemeral keys; it verifies the validation
+logic, not a real publisher or release.
+
+The installer is a Bash script and requires Perl, gzip, and tar, plus standard
+Unix utilities. It uses `sha256sum` when available and falls back to `shasum`.
+The validator intentionally does not rely on GNU tar inspection options. This
+prerequisite set is part of the local unpublished tooling, not a claim that a
+consumer-facing installer has been delivered.
+
+The signed `install-release.sh` and `verify-release.sh` wrapper additionally
+require OpenSSL; HTTPS acquisition by the installer also requires curl.
 
 ## Package recipe tooling (unpublished)
 
@@ -34,21 +60,28 @@ both bundled executables and the final package/notarization. Authenticity,
 dependency-vulnerability review, signing/notarization, and native package
 evidence remain required release acceptance gates; none is claimed here.
 
-This document records the installation direction discussed for Paraco and guides
-future implementation. It is a plan, not documentation of a shipped installer.
+This document records both implemented unpublished tooling and remaining
+installation direction. It does not describe a published installer or release.
 Use it alongside [the product spec](../spec.md) and
 [the first-runtime milestone](first-runtime.md).
 
 ## Current state
 
 The repository contains a Rust CLI that supervises a Deno subprocess. The Deno
-host adapter is embedded in the Rust binary, but the Deno executable is currently
-resolved from `PATH`. Building from source requires Rust, and running an app
-requires a separate Deno installation. There are no release installers or
-published installation commands yet.
+host adapter is embedded in the Rust binary. Source-built runs resolve Deno from
+`PATH`; unsigned bundle builds can include a private Deno executable and resolve
+it relative to the installed bundle. `scripts/build-bundle.sh` builds an
+unpublished archive from a caller-supplied executable and notice files, while
+`scripts/install-archive.sh` installs a trusted local archive and checksum.
+Building requires Rust/Cargo, Git metadata, a target-compatible Deno input, and
+notice inputs. The scripts do not create a signed or publishable release, and
+there are no published installation commands.
 
-The initial runtime was verified on Linux. Do not interpret target platforms in
-this plan as platforms already tested or supported by a release.
+The scripts and bundle contract have local verification commands, but do not
+interpret target platforms in this plan or a successful synthetic bundle test
+as native release support. Native macOS, reboot and service behavior, clean
+machine installation, signing/notarization, and publication need separate
+observations.
 
 ## User experience requirement
 
@@ -199,8 +232,8 @@ older versioned artifacts available for pinned installations and recovery.
 - Minimum supported OS versions and Linux libc/distribution baseline.
 - Release signing, checksum distribution, and macOS signing credentials.
 - Update command design, rollback policy, and channel ownership detection.
-- Project license and third-party redistribution notices; no project license
-  has been selected yet.
+- How release notice inputs will be sourced and reviewed for real artifacts;
+  fixture notices used by contract tests are not distributable release notices.
 - Timing and design of service startup and the local management interface.
 
 Implement these in small, verifiable steps. Do not describe future channels as

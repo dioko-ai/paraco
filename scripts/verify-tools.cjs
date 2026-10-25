@@ -10,13 +10,14 @@ function version(command, args, expected) {
   } catch {
     throw new Error(`${command} is required for this verification run`);
   }
-  if (!output.includes(expected)) {
+  const firstLine = output.split(/\r?\n/, 1)[0];
+  if (firstLine !== expected && !firstLine.startsWith(`${expected} `)) {
     throw new Error(`${command} must report ${expected}; got ${JSON.stringify(output.trim())}`);
   }
 }
 
 try {
-  version("deno", ["--version"], "deno 2.2.5");
+  version("deno", ["--version"], "deno 2.9.8");
   if (process.env.CI) {
     version(process.execPath, ["--version"], "v22.14.0");
   } else if (Number(process.versions.node.split(".")[0]) < 22) {
