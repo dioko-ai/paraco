@@ -1,5 +1,63 @@
 # Installation and release plan
 
+## Consumer installer preparation
+
+`scripts/generate-consumer-installer.py` packages the existing signed-release
+installer, verifier, archive validator, and publisher public key into one
+standalone Bash script. Python is needed only by the release maintainer to
+generate it. Users do not need Python, a checkout, release checksums, a separate
+key file, Rust, Node.js, or Deno. Standard system utilities (Bash, curl, OpenSSL,
+Perl, gzip, tar, and SHA-256 tooling) are still required.
+
+The maintainer supplies a JSON manifest with one entry per verified platform:
+
+```json
+{
+  "version": "0.1.0",
+  "assets": {
+    "aarch64-apple-darwin": {
+      "url": "https://example.invalid/paraco-0.1.0-aarch64-apple-darwin.tar.gz",
+      "signatureUrl": "https://example.invalid/paraco-0.1.0-aarch64-apple-darwin.tar.gz.sig",
+      "sha256": "REPLACE_WITH_FINAL_ARCHIVE_SHA256"
+    }
+  }
+}
+```
+
+These are illustrative metadata, not published download locations. The
+generator rejects placeholder checksums. Prepare the final script with:
+
+```sh
+python3 scripts/generate-consumer-installer.py --manifest release.json \
+  --public-key publisher.pem --output install.sh
+```
+
+The generated script detects macOS/Linux and ARM64/x86-64, rejects targets absent
+from that release, downloads over HTTPS, checks the embedded SHA-256 and publisher
+signature, and uses the existing staged installer. It installs under
+`~/.local/share/paraco` by default (`--prefix` accepts another absolute path),
+prints a shell-profile PATH line, and starts no services. It never changes shell
+profiles. Repeating the same version leaves retained program files untouched;
+upgrades use a newly generated installer with the new immutable version.
+
+The installer itself is a trust root: distribute it through the trusted project
+release channel and offer downloading/inspection before execution. Embedding
+the public key prevents fetching an unrelated key alongside an archive, but
+does not authenticate a script obtained from an untrusted source. No publisher
+key or public installer has been created by this generator.
+
+Publish only after testing the generated script against final signed assets on
+each advertised target and satisfying the release gates below. Then replace
+the README installation status with the real download command. Keep Homebrew
+publication separate: the existing recipe generator prepares a formula from
+verified bundle inputs; it does not create or publish a tap.
+
+`bash tests/release-verification.sh` covers generated installer activation with
+a mocked HTTPS downloader, repeat installation, signature rejection, paths
+containing spaces, invalid prefixes, and unsupported processors. This is local
+contract coverage, not native clean-machine or public-download evidence.
+
+
 ## Local archive installer (unpublished)
 
 `scripts/install-archive.sh` is an intentionally local, unpublished installer

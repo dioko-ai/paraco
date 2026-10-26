@@ -1,226 +1,75 @@
-# paraco
+# Paraco
 
-Paraco is a local-first runtime for portable applications. This repository is
-building its standalone foundation: Rust supervises Deno applications and serves
-them through a local gateway, with a separate authenticated management dashboard.
+Run apps and scheduled jobs on your own computer. Paraco hosts portable apps,
+provides a local dashboard, and keeps your app data on your machine.
 
-## Run the cron app
+- **Run apps locally.** Start, stop, and restart them from your browser.
+- **Schedule jobs.** Use the built-in cron app to create recurring tasks, review
+  run history, and see notifications.
+- **Use AI when you choose.** Connect a provider explicitly; local operation
+  does not require a cloud account or paid AI.
 
-```sh
-cargo run -- cron
-```
+## Install
 
-An installed bundle runs the same app with `paraco cron`, without a checkout.
-Open the local dashboard and select **cron**. Create and review TypeScript jobs,
-publish one-off or recurring schedules, inspect run history and notifications,
-and archive or restore jobs. AI drafting is optional and requires an explicit
-host grant; proposals never publish automatically. See [tasks and cron](docs/tasks-and-cron.md)
-for the task contract, authorization, limits and current dependency restrictions.
+Paraco is being prepared for public release. **A public installer and Homebrew
+package are not available yet.** This README will include the working install
+command when the first release is published.
 
-## Try it
+The release download will include everything Paraco needs. You will **not** need
+to install Deno, Rust, Node.js, npm, or Docker, or clone this repository.
+Installation will use your own account without `sudo`.
 
-Prerequisites are a current [Rust toolchain](https://rustup.rs/) and
-[Deno](https://docs.deno.com/runtime/) available on `PATH`.
+The planned installation options are a single download-and-run command for macOS
+and Linux, and Homebrew for people who already use it. Each installs the same
+Paraco bundle, including its private runtime. npm is not required.
 
-```sh
-cargo run -- run ./examples/hello
-curl http://127.0.0.1:3000
-```
+## Get started
 
-The response is `Hello from Paraco`. Use `--port` to select another loopback
-port, for example `cargo run -- run ./examples/hello --port 8787`. Press Ctrl+C
-to stop the application; Paraco sends it a graceful termination signal, then
-forces termination after five seconds if needed.
-
-## Host multiple apps
+Once installed, start the built-in scheduler:
 
 ```sh
-cargo run -- serve --config ./examples/server.json
+paraco cron
 ```
 
-Open <http://127.0.0.1:3000/> for the dashboard. The example hosts:
+Open the dashboard link printed in your terminal and select **cron**. Create a
+job, review its code, and publish a one-time or recurring schedule. AI drafting
+is optional, and drafts are never published automatically.
 
-- Hello and Fake AI at the distinct canonical `.localhost` URLs shown by the
-  dashboard (the old `/apps/<name>/` links redirect only for GET/HEAD). AI calls
-  are denied until you configure the hosted deployment grant described below.
+Leave Paraco running while you use your apps or scheduled jobs. Press Ctrl+C to
+stop it. Starting automatically at login is a separate, optional setup step.
 
-Use `--port 8787` for another loopback port. Hosting reserves both IPv4 and IPv6
-loopback addresses; if either is occupied, choose another port. This runs in the foreground;
-Ctrl+C stops all apps. Configuration paths resolve relative to the configuration
-file, and each app's validated manifest name determines its URL (for example,
-`http://hello.localhost:3000`). Private deployment IDs remain separate from URLs. The dashboard
-refreshes app statuses every five seconds. To start, stop, or restart apps in the browser,
-open the separate `management dashboard` URL printed in the terminal. That page
-refreshes status every two seconds; its private access link changes each server session.
+## Add an app
 
-See [local hosting](docs/local-hosting.md) for the configuration, app base-path
-contract, and limits. [Current status](docs/status.md) records implementation
-and verification evidence.
-
-## Manage running apps
-
-On Unix, use another terminal to control apps hosted by `paraco serve`:
+Browse the approved app catalog and install Hello World:
 
 ```sh
-cargo run -- status
-cargo run -- stop hello
-cargo run -- start hello
-cargo run -- restart hello
+paraco marketplace list
+paraco marketplace install hello-world --output ./hello-world
+paraco run ./hello-world
 ```
 
-Commands print JSON status and acknowledge lifecycle requests immediately. Use
-`status hello` to check completion; add the server's `--port` if it differs from
-3000. CLI management uses a private local socket. Browser controls use the separate
-authorized management dashboard; the gateway dashboard stays read-only.
-See [local lifecycle](docs/local-lifecycle.md) for state, security, and recovery
-semantics. Deployment identity and desired state persist across server sessions.
-On Unix, app guardians clean up Deno after a runtime crash, and restarting `serve`
-waits for cleanup before safely recovering its stale control socket.
+Open the local address printed in your terminal. Installing an app requires a
+network connection; apps that use online services also need connectivity.
 
-## Persistent logs
+Already have a Paraco app? Run it with `paraco run /path/to/app`.
 
-Application output and lifecycle events are retained as agent-readable JSONL in
-`~/.paraco/logs` by default (`%USERPROFILE%\.paraco\logs` on Windows). Override
-with `--log-dir <path>` or `PARACO_LOG_DIR`. A rotating five-file store caps retained
-log data at 10 MiB per directory, shared across apps and server sessions.
+## Your data
 
-```sh
-cargo run -- logs hello --tail 100
-cargo run -- logs hello --port 3000 --tail 500
-```
+Paraco stores its local state and logs under `~/.paraco` by default. App
+permissions and AI access are explicit. Removing the program through the
+installer preserves your app data and configuration.
 
-These commands work even after the server stops. Records identify the app,
-launch, process, stream, and capture time. See [local logs](docs/local-logs.md)
-for configuration, schema, pruning, dashboard viewing, and failure behavior.
+## Learn more
 
-## Application contract
+- [Tasks and the cron app](docs/tasks-and-cron.md)
+- [Hosting multiple apps](docs/local-hosting.md)
+- [Approved apps](docs/marketplace.md)
+- [AI configuration](docs/ai-routing.md)
 
-An app directory contains `paraco.json` and its source. The currently supported
-manifest schema is intentionally explicit:
+## Contributing
 
-```json
-{
-  "name": "hello",
-  "entrypoint": "main.ts",
-  "capabilities": []
-}
-```
+Building Paraco from source requires development tools. These are for
+contributors, not prerequisites for the packaged app.
 
-`schemaVersion` may be omitted for the existing v1 manifest or set to `1`.
-`name` is 1–63 lowercase ASCII letters, digits, or hyphens, starts with a
-letter, and ends with a letter or digit. `entrypoint` must be a relative file contained in the application
-directory. `capabilities` is required and may be empty or contain `"ai"` for AI routing, `"storage"` for scoped configuration/data, and `"tasks"` for explicitly host-granted task authoring. Unknown fields and unsupported capabilities fail
-validation. The machine-readable draft schema is
-[`docs/paraco-manifest.schema.json`](docs/paraco-manifest.schema.json), and the
-matching handler types are in [`runtime/paraco.d.ts`](runtime/paraco.d.ts).
-
-The entrypoint exports a default object whose `fetch` method receives web
-standard `Request` and returns a `Response` (or a promise for one):
-
-```ts
-export default {
-  fetch(_request: Request, _context: object): Response {
-    return new Response("Hello from Paraco");
-  },
-};
-```
-
-The Deno adapter calls `Deno.serve` and binds only `127.0.0.1`. The Rust binary
-embeds the adapter, so `paraco` does not rely on the shell working directory to
-find it. It grants Deno read access to the app directory and network access only
-to its selected loopback listener and, for AI-enabled apps, the capability port.
-It clears inherited environment variables
-apart from `PATH`, and supplies a temporary `DENO_DIR`; no ambient credential
-environment variables are passed to apps. These permissions are only the narrow
-ones needed for this example and are not a complete security sandbox for
-untrusted code.
-
-## Verify
-
-```sh
-cargo fmt --check
-cargo test
-node --test tests/management.test.cjs
-cargo run -- run ./examples/hello
-```
-
-The dashboard JavaScript tests use Node.js (no npm dependencies); Node.js is not
-needed to run Paraco.
-
-See [the first-runtime brief](docs/first-runtime.md) for the acceptance criteria
-and intentionally deferred work.
-
-See [development and verification](docs/development.md) for pinned toolchains,
-fresh-checkout checks, browser-smoke setup, and the distinction between configured
-CI and observed native evidence.
-
-See [installation and release planning](docs/installation-and-release.md) for
-the archive bundle workflow, CLI installer, and platform packaging plan.
-
-## Current scope
-
-The runtime supports foreground single-app and multi-app hosting, authenticated
-browser lifecycle controls, Unix CLI lifecycle controls, and a local fake AI
-capability, plus bounded persistent logs and CLI log queries. Authenticated dashboard logs and opt-in bounded automatic recovery are available.
-Hosted apps use distinct canonical `.localhost` browser origins. They cannot use
-shared-domain cookies; cross-origin subresource requests are rejected, while the
-separate management origin remains authenticated. Output-loss counters in the
-management log view distinguish storage and console loss. Hosted admission is
-bounded (50 apps, 64 gateway responses, 8 per app, and 4 log reads); these are
-safety limits rather than CPU/RSS quotas.
-Opt-in user-service definitions, deployment-scoped durable state, a bounded
-host-owned OpenAI-compatible provider, and a loopback OpenAI-compatible HTTP
-subset (including the documented SSE foundation) now have implementation
-scaffolding. The retained verification record distinguishes observed Linux/macOS integration
-and launchd checks from remaining native Linux service, clean macOS, machine
-reboot, signing, publication, and native package gates. Bounded tasks, durable scheduling, a local notification inbox and the cron reference app
-are implemented; see their documented limits. Health monitoring and cloud integration remain deferred. Local operation needs neither a
-cloud account nor paid AI; the fake provider remains available.
-
-## Try the local AI capability
-
-First allocate the app's stable host identity:
-
-```sh
-cargo run -- identity ./examples/ai
-```
-
-Copy `examples/ai-config.json` to a host-owned location outside the app directory
-and replace `REPLACE_WITH_PARACO_IDENTITY_OUTPUT` with that output. Then:
-
-```sh
-cargo run -- run ./examples/ai --ai-config /path/to/ai-config.json
-curl http://127.0.0.1:3000
-```
-
-Use the same `--log-dir` for identity discovery and launch if you override it.
-Hosted deployments have separate IDs; discover them with `paraco status` after
-starting the server, configure their grants, and restart the affected app.
-
-The response contains `Fake AI response` and the selected provider/model. This
-example needs no account, provider secret, or external network request. The app
-calls `context.ai.complete({ prompt: "Hello" })`; optional `provider` and `model`
-fields select a route. Apps requesting `ai` receive the interface, but calls are
-only permitted by grants in the explicitly selected host configuration. There
-are no automatic grants. The configuration must live outside the app directory.
-See [AI routing and transport](docs/ai-routing.md) for the contract and limits.
-
-SQLite migration, scoped cron-draft storage, backup/export, and authenticated
-`paraco open` are described in [durable state and services](docs/durable-state.md).
-See [retained verification evidence](docs/verification-2026-09-21.md) for the
-observed platform checks and gates that still require native machines.
-
-## Approved app marketplace
-
-Browse the curated catalog and install an exact approved package:
-
-```sh
-cargo run -- marketplace list
-cargo run -- marketplace install hello-world --output ./installed/hello-world
-cargo run -- run ./installed/hello-world
-```
-
-See [marketplace design and packaging](docs/marketplace.md) for approval, local
-package testing, repository templates and the release workflow. The
-[Hello World v0.1.0 release](https://github.com/dioko-ai/paraco-hello-world/releases/tag/v0.1.0)
-is published and its catalog download has been verified end to end.
+See [development setup](docs/development.md), the [runtime guide](docs/runtime-guide.md),
+and [release preparation](docs/installation-and-release.md).

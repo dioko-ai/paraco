@@ -44,6 +44,66 @@ printf 'tamper' >> "$base/tampered.tgz"
 cp "$base/good.tgz.sig" "$base/tampered.tgz.sig"
 reject verify tampered
 reject install tampered
+# Consumer installer embeds the trusted key/tools; users supply no release metadata.
+python3 - "$base" <<'PYFIXTURE'
+import hashlib, json, sys
+from pathlib import Path
+base = Path(sys.argv[1])
+asset = dict(url='https://release.invalid/archive', signatureUrl='https://release.invalid/signature',
+             sha256=hashlib.sha256((base/'good.tgz').read_bytes()).hexdigest())
+(base/'consumer.json').write_text(json.dumps(dict(version='1', assets={'x86_64-unknown-linux-gnu':asset})))
+PYFIXTURE
+python3 scripts/generate-consumer-installer.py --manifest "$base/consumer.json" --public-key "$base/public.pem" --output "$base/consumer.sh"
+bash -n "$base/consumer.sh"
+mkdir "$base/mock-bin"
+cat > "$base/mock-bin/uname" <<'SH'
+#!/bin/sh
+case "$1" in -s) echo Linux;; -m) echo x86_64;; esac
+SH
+cat > "$base/mock-bin/curl" <<'SH'
+#!/bin/bash
+set -eu
+output=
+while (($#)); do
+ case "$1" in
+ --output) output=$2; shift 2;;
+ https://release.invalid/archive) cp "$PARACO_TEST_RELEASE/good.tgz" "$output"; exit;;
+ https://release.invalid/signature) cp "$PARACO_TEST_RELEASE/good.tgz.sig" "$output"; exit;;
+ *) shift;;
+ esac
+done
+exit 1
+SH
+# Keep Linux target selection deterministic while supporting BSD mv on macOS.
+cat > "$base/mock-bin/mv" <<'SH'
+#!/bin/bash
+if [[ ${1:-} == -Tf ]]; then
+ shift
+ python3 - "$@" <<'PYMOVE'
+import os, sys
+os.replace(sys.argv[1], sys.argv[2])
+PYMOVE
+else
+ /bin/mv "$@"
+fi
+SH
+chmod +x "$base/mock-bin/"*
+consumer(){ PATH="$base/mock-bin:$PATH" PARACO_TEST_RELEASE="$base" bash "$base/consumer.sh" --prefix "$base/consumer prefix"; }
+consumer
+[[ -x "$base/consumer prefix/channels/stable/bin/paraco" ]]
+consumer # Same immutable version is harmless.
+cp "$base/good.tgz.sig" "$base/saved.sig"
+printf 'invalid signature' > "$base/good.tgz.sig"
+reject env PATH="$base/mock-bin:$PATH" PARACO_TEST_RELEASE="$base" bash "$base/consumer.sh" --prefix "$base/rejected"
+[[ ! -e "$base/rejected/channels/stable" ]]
+mv "$base/saved.sig" "$base/good.tgz.sig"
+reject bash "$base/consumer.sh" --prefix relative
+cat > "$base/mock-bin/uname" <<'SH'
+#!/bin/sh
+case "$1" in -s) echo Linux;; -m) echo riscv64;; esac
+SH
+reject consumer
+
 printf 'invalid signature' > "$base/good.tgz.sig"
 reject verify good
 reject install good
