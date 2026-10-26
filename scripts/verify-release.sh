@@ -37,11 +37,11 @@ $actual =~ /\A(?:x86_64|aarch64)-(?:unknown-linux-gnu|apple-darwin)\z/ or die "u
 $root eq "paraco-$version-$actual" or die "release root/metadata mismatch\n";
 ($m->{sourceRevision} // '') =~ /\A(?:[a-f0-9]{40}|[a-f0-9]{64})\z/ or die "invalid source revision\n";
 exists($m->{sourceDirty}) && ref($m->{sourceDirty}) eq 'JSON::PP::Boolean' && !$m->{sourceDirty} or die "release source is dirty or cleanliness is unrecorded\n";
-($m->{denoVersion} // '') =~ /\A[0-9]+\.[0-9]+\.[0-9]+\z/ or die "invalid runtime version\n";
-my @notices = ('notices/LICENSE', 'notices/DENO-NOTICE', 'notices/RUST-THIRD-PARTY-NOTICES');
+($m->{workerdVersion} // '') =~ /\A[0-9]{4}-[0-9]{2}-[0-9]{2}\z/ or die "invalid runtime version\n";
+my @notices = ('notices/LICENSE', 'notices/WORKERD-NOTICE', 'notices/ESBUILD-NOTICE', 'notices/RUST-THIRD-PARTY-NOTICES');
 ref($m->{notices}) eq 'ARRAY' && join("\0",sort @{$m->{notices}}) eq join("\0",sort @notices) or die "required notices not declared\n";
 ref($m->{checksums}) eq 'HASH' or die "missing file checksums\n";
-my @required = ('bin/paraco', 'libexec/paraco/deno', @notices);
+my @required = ('bin/paraco', 'libexec/paraco/workerd', 'libexec/paraco/esbuild', @notices);
 for my $p (@required) {
     -f "$dir/$p" && -s "$dir/$p" or die "missing or empty release file: $p\n";
     open my $f, '<', "$dir/$p" or die "cannot hash release file: $p\n";
@@ -57,6 +57,6 @@ for my $p (@required) {
 for my $p (keys %{$m->{checksums}}) {
     grep($_ eq $p, @required) or die "unexpected checksum member: $p\n";
 }
--x "$dir/bin/paraco" && -x "$dir/libexec/paraco/deno" or die "release executables lack execute permission\n";
-print encode_json({verified=>JSON::PP::true, sha256=>$checksum, publicKeyPemSha256=>$public_key_hash, paracoVersion=>$version, target=>$actual, sourceRevision=>$m->{sourceRevision}, denoVersion=>$m->{denoVersion}, sourceDirty=>JSON::PP::false, signatureAlgorithm=>'OpenSSL SHA-256 detached signature', scope=>'publisher signature and signed metadata; native execution and notice completeness require separate review'}), "\n";
+-x "$dir/bin/paraco" && -x "$dir/libexec/paraco/workerd" && -x "$dir/libexec/paraco/esbuild" or die "release executables lack execute permission\n";
+print encode_json({verified=>JSON::PP::true, sha256=>$checksum, publicKeyPemSha256=>$public_key_hash, paracoVersion=>$version, target=>$actual, sourceRevision=>$m->{sourceRevision}, workerdVersion=>$m->{workerdVersion}, sourceDirty=>JSON::PP::false, signatureAlgorithm=>'OpenSSL SHA-256 detached signature', scope=>'publisher signature and signed metadata; native execution and notice completeness require separate review'}), "\n";
 PERL

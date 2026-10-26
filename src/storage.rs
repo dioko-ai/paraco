@@ -16,11 +16,15 @@ use std::{
 #[serde(deny_unknown_fields)]
 struct Request {
     token: String,
+    #[serde(default)]
     namespace: String,
+    #[serde(default)]
     key: String,
     #[serde(default)]
     value: Option<serde_json::Value>,
     operation: Operation,
+    #[serde(default)]
+    request: serde_json::Value,
 }
 
 #[derive(Deserialize)]
@@ -29,6 +33,7 @@ enum Operation {
     Get,
     Set,
     Delete,
+    Platform,
 }
 
 pub struct Service {
@@ -38,7 +43,12 @@ pub struct Service {
     worker: Option<thread::JoinHandle<()>>,
 }
 impl Service {
-    pub fn start(store: Arc<Mutex<Store>>, deployment: String) -> Result<Self, String> {
+    pub fn start(
+        store: Arc<Mutex<Store>>,
+        deployment: String,
+        application: String,
+        outputs: serde_json::Value,
+    ) -> Result<Self, String> {
         let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
         listener.set_nonblocking(true).map_err(|e| e.to_string())?;
         let address = listener
@@ -79,28 +89,35 @@ impl Service {
                         Err(_) => break,
                     }
                 }
-                let result = if input.len() > 70000 {
-                    Err("storage request too large".into())
-                } else {
-                    serde_json::from_slice::<Request>(&input)
-                        .map_err(|_| "invalid storage request".to_string())
-                        .and_then(|r| {
-                            if r.token != auth {
-                                return Err("unauthorized storage request".into());
-                            }
-                            store.lock().map_err(|_| "storage unavailable")?.storage(
-                                &deployment,
-                                &r.namespace,
-                                &r.key,
-                                if matches!(r.operation, Operation::Set) {
-                                    Some(r.value.unwrap_or(serde_json::Value::Null))
-                                } else {
-                                    None
-                                },
-                                matches!(r.operation, Operation::Delete),
-                            )
-                        })
-                };
+                let result =
+                    if input.len() > 70000 {
+                        Err("storage request too large".into())
+                    } else {
+                        serde_json::from_slice::<Request>(&input)
+                            .map_err(|_| "invalid storage request".to_string())
+                            .and_then(|r| {
+                                if r.token != auth {
+                                    return Err("unauthorized storage request".into());
+                                }
+                                if matches!(r.operation, Operation::Platform) {
+                                    return store
+                                        .lock()
+                                        .map_err(|_| "storage unavailable")?
+                                        .platform(&deployment, &application, &outputs, &r.request);
+                                }
+                                store.lock().map_err(|_| "storage unavailable")?.storage(
+                                    &deployment,
+                                    &r.namespace,
+                                    &r.key,
+                                    if matches!(r.operation, Operation::Set) {
+                                        Some(r.value.unwrap_or(serde_json::Value::Null))
+                                    } else {
+                                        None
+                                    },
+                                    matches!(r.operation, Operation::Delete),
+                                )
+                            })
+                    };
                 let reply = match result {
                     Ok(value) => serde_json::json!({"value":value}),
                     Err(error) => serde_json::json!({"error":error}),

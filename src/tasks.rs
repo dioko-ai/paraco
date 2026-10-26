@@ -7,7 +7,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
     fs,
-    io::Read,
+    io::{Read, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{
@@ -64,7 +64,7 @@ struct Running {
 pub struct Tasks {
     db: Arc<Mutex<Connection>>,
     root: PathBuf,
-    deno: PathBuf,
+    workerd: PathBuf,
     running: Mutex<HashMap<String, Running>>,
     stop: AtomicBool,
     grants: Mutex<HashMap<String, Vec<String>>>,
@@ -89,7 +89,7 @@ fn id(prefix: &str) -> Result<String, String> {
     ))
 }
 impl Tasks {
-    pub fn open(root: &Path, deno: PathBuf) -> Result<Arc<Self>, String> {
+    pub fn open(root: &Path, workerd: PathBuf) -> Result<Arc<Self>, String> {
         let db = Connection::open(root.join("state.sqlite3")).map_err(err)?;
         db.busy_timeout(Duration::from_secs(3)).map_err(err)?;
         db.execute_batch("PRAGMA foreign_keys=ON; PRAGMA synchronous=FULL;
@@ -117,7 +117,7 @@ impl Tasks {
         Ok(Arc::new(Self {
             db: Arc::new(Mutex::new(db)),
             root,
-            deno,
+            workerd,
             running: Mutex::new(HashMap::new()),
             stop: AtomicBool::new(false),
             grants: Mutex::new(HashMap::new()),
@@ -496,66 +496,29 @@ impl Tasks {
             if fs::read_to_string(target.join("task.ts")).map_err(err)? != draft.source {
                 return Err("prepared task source integrity check failed".into());
             }
-            return Ok(());
+            if target.join("task.js").is_file() {
+                return Ok(());
+            }
         }
         let staging = tempfile::Builder::new()
             .prefix(".prepare-")
             .tempdir_in(&self.root)
             .map_err(err)?;
-        // Pass the same physical path to Deno and the graph validator. macOS
-        // temporary directories can be reached through the /var symlink.
         let dir = staging.path().canonicalize().map_err(err)?;
         let source = dir.join("task.ts");
         fs::write(&source, &draft.source).map_err(err)?;
-        // A narrow initial dependency contract: self-contained TypeScript only.
-        // Deno check is offline, --no-config prevents ambient import maps/plugins.
-        let mut graph = Command::new(&self.deno);
-        graph
-            .args([
-                "info",
-                "--json",
-                "--no-config",
-                "--no-lock",
-                "--no-remote",
-                "--no-npm",
-            ])
-            .arg(&source)
-            .env_clear()
-            .env("DENO_DIR", dir.join("cache"))
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        let (success, graph) = bounded_command(graph, Duration::from_secs(30), || {
-            self.stop.load(Ordering::Relaxed) || cancel.is_some_and(|c| c.load(Ordering::Relaxed))
-        })?;
-        if !success {
-            return Err(
-                "dependency validation failed; task must be a self-contained TypeScript module"
-                    .into(),
-            );
-        }
-        let graph: Value =
-            serde_json::from_str(&graph).map_err(|_| "invalid dependency graph".to_string())?;
-        let entry = url::Url::from_file_path(&source)
-            .map_err(|_| "invalid source path")?
-            .to_string();
-        let modules = graph
-            .get("modules")
-            .and_then(Value::as_array)
-            .ok_or("missing module graph")?;
-        validate_module_graph(modules, &entry)?;
-        let mut command = Command::new(&self.deno);
+        // Transform only: the compiler never resolves or reads task imports.
+        let mut command = Command::new(crate::worker::compiler()?);
         command
-            .args([
-                "check",
-                "--no-config",
-                "--no-lock",
-                "--no-remote",
-                "--no-npm",
-            ])
             .arg(&source)
-            .env_clear()
-            .env("DENO_DIR", dir.join("cache"))
+            .args([
+                "--format=esm",
+                "--platform=browser",
+                "--target=es2022",
+                "--log-level=error",
+            ])
+            .arg(format!("--outfile={}", dir.join("task.js").display()))
+            .arg(format!("--metafile={}", dir.join("meta.json").display()))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
@@ -564,6 +527,23 @@ impl Tasks {
         })?;
         if !output.0 {
             return Err(format!("task validation failed: {}", output.1));
+        }
+        let meta: Value =
+            serde_json::from_slice(&fs::read(dir.join("meta.json")).map_err(err)?).map_err(err)?;
+        if meta["outputs"]
+            .as_object()
+            .ok_or("missing compiler metadata")?
+            .values()
+            .any(|v| v["imports"].as_array().is_some_and(|a| !a.is_empty()))
+        {
+            return Err(
+                "Task dependencies are not supported; use a self-contained TypeScript module"
+                    .into(),
+            );
+        }
+        if target.exists() {
+            fs::rename(dir.join("task.js"), target.join("task.js")).map_err(err)?;
+            return Ok(());
         }
         if let Err(e) = fs::rename(dir, &target)
             && (!target.exists()
@@ -853,15 +833,17 @@ impl Tasks {
             let mut cmd = Command::new(std::env::current_exe().map_err(err)?);
             cmd.arg("__paraco_task_guardian");
             crate::guardian::inherit_lease(&mut cmd, self.lease.lock().unwrap().as_ref())?;
-            cmd.arg(&self.deno)
-                .arg(dir.join("task.ts"))
-                .arg(dir.join("cache"))
+            cmd.arg(&self.workerd)
+                .arg(dir.join("task.js"))
                 .arg(metadata.to_string())
                 .arg(serde_json::to_string(&draft.network).map_err(err)?)
                 .env_clear()
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
+            if std::env::var("PARACO_ALLOW_UNSANDBOXED").as_deref() == Ok("1") {
+                cmd.env("PARACO_ALLOW_UNSANDBOXED", "1");
+            }
             let spawning = self.running.lock().unwrap();
             self.allowed(deployment, &draft.network)?;
             if cancel.load(Ordering::Relaxed) || self.stop.load(Ordering::Relaxed) {
@@ -1058,37 +1040,6 @@ impl Drop for NotificationPump {
         }
     }
 }
-// Reject all external modules before considering diagnostics: Deno graph errors
-// for imported files can contain host file contents. Only the reviewed entry's
-// own parser diagnostic is safe to return to its author.
-fn validate_module_graph(modules: &[Value], entry: &str) -> Result<(), String> {
-    if modules.is_empty()
-        || modules
-            .iter()
-            .any(|module| module.get("specifier").and_then(Value::as_str) != Some(entry))
-    {
-        return Err(
-            "Task dependencies are not supported yet; use a self-contained TypeScript module"
-                .into(),
-        );
-    }
-    if let Some(diagnostic) = modules.iter().find_map(|module| module.get("error")) {
-        let diagnostic = diagnostic
-            .as_str()
-            .filter(|message| message.starts_with("SyntaxError:"))
-            .map(|message| {
-                message
-                    .replace(entry, "task.ts")
-                    .chars()
-                    .take(2000)
-                    .collect::<String>()
-            })
-            .unwrap_or_else(|| "Invalid task module".into());
-        return Err(format!("task validation failed: {diagnostic}"));
-    }
-    Ok(())
-}
-
 fn prune(tx: &rusqlite::Transaction<'_>, job: &str) -> Result<(), String> {
     tx.execute("UPDATE task_runs SET logs='',truncated=1,diagnostic=coalesce(diagnostic,'') || ' [Log content expired]' WHERE job=?1 AND id NOT IN(SELECT id FROM task_runs WHERE job=?1 ORDER BY started DESC LIMIT 100) AND logs<>''",[job]).map_err(err)?;
     tx.execute("DELETE FROM task_runs WHERE job=?1 AND status NOT IN('pending','running') AND id NOT IN(SELECT id FROM task_runs WHERE job=?1 ORDER BY started DESC LIMIT 1000)",[job]).map_err(err)?;
@@ -1125,7 +1076,11 @@ fn drain_events(
                                 if !oversized
                                     && let Some(message) = std::str::from_utf8(&line)
                                         .ok()
-                                        .and_then(|s| s.strip_prefix("PARACO_NOTIFICATION:"))
+                                        .and_then(|s| {
+                                            s.strip_prefix("PARACO_NOTIFICATION:").or_else(|| {
+                                                s.strip_prefix("console.log: PARACO_NOTIFICATION:")
+                                            })
+                                        })
                                         .and_then(|s| serde_json::from_str::<Value>(s).ok())
                                         .and_then(|v| v["message"].as_str().map(str::to_owned))
                                 {
@@ -1329,7 +1284,7 @@ pub fn next(schedule: &Schedule, after: i64) -> Result<Option<i64>, String> {
     }
 }
 
-/// Private child guardian; EOF from host means kill and reap Deno before dropping
+/// Private child guardian; EOF from host means kill and reap workerd before dropping
 /// the state ownership lease, on macOS as well as Linux.
 pub fn guardian() -> i32 {
     fn inner() -> Result<i32, String> {
@@ -1353,9 +1308,8 @@ pub fn guardian() -> i32 {
         } else {
             None
         };
-        let deno = args.next().ok_or("missing deno")?;
+        let workerd = args.next().ok_or("missing workerd")?;
         let entry = args.next().ok_or("missing entry")?;
-        let cache = args.next().ok_or("missing cache")?;
         let metadata = args.next().ok_or("missing metadata")?;
         let network: Vec<String> =
             serde_json::from_str(&args.next().ok_or("missing network")?.to_string_lossy())
@@ -1367,36 +1321,52 @@ pub fn guardian() -> i32 {
             flag.store(true, Ordering::Relaxed);
         });
         let temp = tempfile::tempdir().map_err(err)?;
-        let adapter = temp.path().join("task_host.ts");
-        fs::write(&adapter, include_str!("../runtime/task_host.ts")).map_err(err)?;
-        let mut cmd = Command::new(deno);
-        cmd.args([
-            "run",
-            "--no-config",
-            "--no-lock",
-            "--cached-only",
-            "--no-prompt",
-            "--no-remote",
-            "--no-npm",
-        ]);
-        cmd.arg(format!("--allow-read={}", PathBuf::from(&entry).display()));
-        if !network.is_empty() {
-            cmd.arg(format!("--allow-net={}", network.join(",")));
-        }
-        cmd.arg(adapter)
-            .arg(
-                url::Url::from_file_path(PathBuf::from(entry))
-                    .map_err(|_| "invalid task entry")?
-                    .as_str(),
-            )
-            .arg(metadata)
-            .env_clear()
-            .env("DENO_DIR", cache)
-            .stdin(Stdio::null());
+        let dir = temp.path();
+        fs::copy(entry, dir.join("app.js")).map_err(err)?;
+        fs::write(
+            dir.join("adapter.js"),
+            include_str!("../runtime/task_host.js"),
+        )
+        .map_err(err)?;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").map_err(err)?;
+        let port = listener.local_addr().map_err(err)?.port();
+        let metadata: Value = serde_json::from_str(&metadata.to_string_lossy()).map_err(err)?;
+        let config = crate::worker::config(dir, port, None, &metadata)?;
+        let bridge = crate::bridge::Bridge::start(json!({"network":network}), dir)?;
+        crate::worker::task_network(&config, dir, &bridge.address, &bridge.token)?;
+        let mut cmd = crate::worker::launch_command(Path::new(&workerd), dir, &config, &listener)?;
         let mut child = cmd.spawn().map_err(err)?;
+        drop(listener);
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        thread::spawn(move || {
+            let result = (|| -> Result<bool, String> {
+                let deadline = Instant::now() + Duration::from_secs(8);
+                loop {
+                    if let Ok(mut stream) = std::net::TcpStream::connect(("127.0.0.1", port)) {
+                        stream
+                            .set_read_timeout(Some(Duration::from_secs(3600)))
+                            .map_err(err)?;
+                        stream.write_all(b"POST /run HTTP/1.1\r\nHost: task\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").map_err(err)?;
+                        let mut bytes = [0; 128];
+                        let n = stream.read(&mut bytes).map_err(err)?;
+                        return Ok(String::from_utf8_lossy(&bytes[..n]).contains("200 OK"));
+                    }
+                    if Instant::now() > deadline {
+                        return Err("task startup timed out".into());
+                    }
+                    thread::sleep(Duration::from_millis(10));
+                }
+            })();
+            let _ = tx.send(result);
+        });
         loop {
             if let Some(status) = child.try_wait().map_err(err)? {
                 return Ok(status.code().unwrap_or(1));
+            }
+            if let Ok(result) = rx.try_recv() {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Ok(if result.unwrap_or(false) { 0 } else { 1 });
             }
             if gone.load(Ordering::Relaxed) {
                 let _ = child.kill();
@@ -1420,13 +1390,13 @@ mod tests {
     use super::*;
     fn fixture() -> (tempfile::TempDir, Arc<Tasks>) {
         let dir = tempfile::tempdir().unwrap();
-        let deno = std::env::var_os("DENO_BIN")
-            .or_else(|| std::env::var_os("PARACO_DENO"))
+        let workerd = std::env::var_os("WORKERD_BIN")
+            .or_else(|| std::env::var_os("PARACO_WORKERD"))
             .map(PathBuf::from)
             .map(|path| path.canonicalize().unwrap_or(path))
             .or_else(|| crate::runtime::command_for_host().ok())
-            .unwrap_or_else(|| PathBuf::from("/nonexistent/paraco-test-deno"));
-        let tasks = Tasks::open(dir.path(), deno).unwrap();
+            .unwrap_or_else(|| PathBuf::from("/nonexistent/paraco-test-workerd"));
+        let tasks = Tasks::open(dir.path(), workerd).unwrap();
         tasks.set_grant("owner".into(), vec![]);
         (dir, tasks)
     }
@@ -1986,22 +1956,6 @@ mod tests {
         assert!(out.1);
     }
     #[test]
-    fn graph_parser_errors_report_only_the_reviewed_entry_source() {
-        let entry = "file:///host/private/tasks/task.ts";
-        let modules = vec![
-            json!({"specifier":entry,"error":format!("SyntaxError: Expected ';' at {entry}:1:7")}),
-        ];
-        let error = validate_module_graph(&modules, entry).unwrap_err();
-        assert!(error.starts_with("task validation failed: SyntaxError:"));
-        assert!(!error.contains("/host/private"));
-        let mut external = modules;
-        external.push(json!({"specifier":"file:///host/private/secret.ts","error":"SyntaxError: EXTERNAL_SECRET_MUST_NOT_LEAK"}));
-        let error = validate_module_graph(&external, entry).unwrap_err();
-        assert!(error.starts_with("Task dependencies are not supported"));
-        assert!(!error.contains("EXTERNAL_SECRET"));
-    }
-
-    #[test]
     fn offline_preparation_checks_without_executing_top_level_and_rejects_imports() {
         let (_dir, tasks) = fixture();
         // Exercise the same directory alias that macOS uses for /var even on
@@ -2010,9 +1964,9 @@ mod tests {
         let tasks = {
             let alias = _dir.path().join("alias");
             std::os::unix::fs::symlink(_dir.path(), &alias).unwrap();
-            Tasks::open(&alias, tasks.deno.clone()).unwrap()
+            Tasks::open(&alias, tasks.workerd.clone()).unwrap()
         };
-        if Command::new(&tasks.deno)
+        if Command::new(&tasks.workerd)
             .arg("--version")
             .stdout(Stdio::null())
             .stderr(Stdio::null())

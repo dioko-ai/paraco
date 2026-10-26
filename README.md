@@ -15,13 +15,16 @@ Paraco is being prepared for public release. **A public installer and Homebrew
 package are not available yet.** This README will include the working install
 command when the first release is published.
 
-The release download will include everything Paraco needs. You will **not** need
-to install Deno, Rust, Node.js, npm, or Docker, or clone this repository.
-Installation will use your own account without `sudo`.
+The planned bundle contains the Rust host, workerd `2026-10-26`, and native
+esbuild `0.28.2`. End users will **not** need Deno, Rust, Node.js, npm, or
+Docker, or need to clone this repository. Installation is intended to use your
+own account without `sudo`.
 
 The planned installation options are a single download-and-run command for macOS
-and Linux, and Homebrew for people who already use it. Each installs the same
-Paraco bundle, including its private runtime. npm is not required.
+and Linux, and Homebrew for people who already use it. Each is intended to install the same Paraco bundle, including its private
+runtime and compiler. npm is not required. Linux app execution requires
+bubblewrap and unprivileged user/network namespaces. macOS secure containment is
+not implemented yet, so normal app execution currently fails closed there.
 
 ## Get started
 
@@ -73,3 +76,10 @@ contributors, not prerequisites for the packaged app.
 
 See [development setup](docs/development.md), the [runtime guide](docs/runtime-guide.md),
 and [release preparation](docs/installation-and-release.md).
+
+## Portable datasets and artifacts
+
+Applications can use versioned records, immutable output artifacts, and explicitly
+shared local or cloud-backed datasets. See [platform evolution](docs/platform-evolution.md)
+for contracts, permissions, Cloudflare D1 provisioning, and limits, or run the
+[Artifact Notebook example](examples/artifacts/README.md).

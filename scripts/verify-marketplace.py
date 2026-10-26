@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Exercise the source-package -> approved install -> live runtime boundary."""
 import json
+import hashlib
+import re
 import os
 from pathlib import Path
 import subprocess
@@ -24,14 +26,18 @@ with tempfile.TemporaryDirectory(prefix="paraco-marketplace-") as temporary:
     root = Path(temporary)
     package = root / "hello-world.paraco.json"
     run("python3", ROOT / "templates/hello-world/scripts/package.py", "--version", "0.1.0", "--output", package)
+    # A changed template is a new candidate, not the bytes already published at v0.1.0.
+    # Use a local explicit approval fixture; never rewrite the shipped release digest.
+    catalog = root / "catalog.yaml"
+    catalog.write_text(re.sub(r"sha256: [0-9a-f]{64}", "sha256: " + hashlib.sha256(package.read_bytes()).hexdigest(), (ROOT / "marketplace/catalog.yaml").read_text()))
     installed = root / "installed"
-    command = [BINARY, "marketplace", "install", "hello-world", "--package", package, "--output", installed]
+    command = [BINARY, "marketplace", "install", "hello-world", "--catalog", catalog, "--package", package, "--output", installed]
     run(*command)
     assert (installed / "paraco-install.json").is_file()
     run(*command, ok=False)
     bad = root / "corrupted.json"
     bad.write_bytes(package.read_bytes() + b" ")
-    run(BINARY, "marketplace", "install", "hello-world", "--package", bad, "--output", root / "rejected", ok=False)
+    run(BINARY, "marketplace", "install", "hello-world", "--catalog", catalog, "--package", bad, "--output", root / "rejected", ok=False)
     assert not (root / "rejected").exists()
     import socket
     with socket.socket() as sock:

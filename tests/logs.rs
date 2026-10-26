@@ -1,4 +1,4 @@
-//! CLI directory resolution does not require Deno or a running server.
+//! CLI directory resolution does not require workerd or a running server.
 use std::{fs, process::Command};
 
 #[test]

@@ -1,3 +1,5 @@
+> Runtime migration update: the supported backend is now workerd. See [current implementation and release gates](workerd-migration.md). Deno-specific decisions and test results below describe the previous runtime and are historical.
+
 # Implementation and verification status
 
 ## Current implementation — 2026-10-25

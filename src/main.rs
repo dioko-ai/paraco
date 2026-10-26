@@ -2,12 +2,14 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 mod artifact;
+mod bridge;
 mod capability;
 mod control;
 mod guardian;
 mod logs;
 mod manifest;
 mod marketplace;
+mod platform;
 mod reference;
 mod runner;
 mod runtime;
@@ -17,6 +19,7 @@ mod state;
 mod storage;
 mod task_api;
 mod tasks;
+mod worker;
 
 #[derive(Parser)]
 #[command(name = "paraco", version, about = "Run local Paraco applications")]
@@ -30,6 +33,18 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Validate a package's declared capabilities for an execution target without deploying it.
+    Check {
+        app: PathBuf,
+        #[arg(long, value_parser=["local", "cloudflare"], default_value="local")]
+        target: String,
+    },
+    /// Explicitly approve an installed source's current capability manifest (runtime stopped).
+    ApproveCapabilities {
+        app: PathBuf,
+        #[arg(long)]
+        state: PathBuf,
+    },
     /// Browse and install versions approved by a host-owned marketplace catalog.
     Marketplace {
         #[command(subcommand)]
@@ -60,16 +75,16 @@ enum Command {
         #[arg(long)]
         output: PathBuf,
     },
-    /// Copy, lock, and cache an application into an immutable offline artifact.
+    /// Compile an application and pin its runtime in an immutable offline artifact.
     Prepare {
         /// Source application directory.
         app: PathBuf,
         /// New host-owned artifact directory to create.
         #[arg(long)]
         output: PathBuf,
-        /// Explicit Deno executable used to cache and later run this artifact.
+        /// Explicit workerd executable used to run this artifact.
         #[arg(long)]
-        deno: PathBuf,
+        workerd: PathBuf,
     },
     /// Read retained JSONL records, even when the runtime is stopped.
     Logs {
@@ -212,6 +227,23 @@ fn main() {
 
 fn execute(cli: Cli) -> Result<(), String> {
     match cli.command {
+        Command::Check { app, target } => {
+            let app = manifest::load(&app).map_err(|e| e.to_string())?;
+            app.validate_target(&target).map_err(|e| e.to_string())?;
+            println!("{} supports {target}", app.name);
+            Ok(())
+        }
+        Command::ApproveCapabilities { app, state } => {
+            let app = manifest::load(&app).map_err(|e| e.to_string())?;
+            let mut store = state::Store::open(&state)?;
+            let deployment = store.install(&app.root)?;
+            store.check_capabilities(&deployment.id, &app, true)?;
+            println!(
+                "Approved current capabilities for {} ({})",
+                app.name, deployment.id
+            );
+            Ok(())
+        }
         Command::Marketplace { command } => marketplace::execute(command),
         Command::Cron {
             port,
@@ -225,7 +257,11 @@ fn execute(cli: Cli) -> Result<(), String> {
         ),
         Command::Open { port, print } => control::open(port, print),
         Command::Backup { state, output } => state::Store::open(&state)?.backup(&output),
-        Command::Prepare { app, output, deno } => artifact::prepare(&app, &output, &deno),
+        Command::Prepare {
+            app,
+            output,
+            workerd,
+        } => artifact::prepare(&app, &output, &workerd),
         Command::Service {
             command:
                 ServiceCommand::Render {

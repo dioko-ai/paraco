@@ -646,6 +646,8 @@ mod tests {
             requests_ai: true,
             requests_storage: false,
             requests_tasks: false,
+            supported_targets: vec!["local".into()],
+            outputs: Default::default(),
         };
         let capability = Capability::start(&app, "deployment-test", None).unwrap();
         let _private = TcpStream::connect(&capability.address).unwrap();
@@ -683,6 +685,8 @@ mod tests {
             requests_ai: true,
             requests_storage: false,
             requests_tasks: false,
+            supported_targets: vec!["local".into()],
+            outputs: Default::default(),
         };
         let capability = Capability::start(&app, "deployment-test", None).unwrap();
         let mut slow = TcpStream::connect(&capability.http_address).unwrap();
@@ -762,6 +766,8 @@ mod tests {
             requests_ai: true,
             requests_storage: false,
             requests_tasks: false,
+            supported_targets: vec!["local".into()],
+            outputs: Default::default(),
         };
         let capability = Capability::start(&app, "deployment-fixture", Some(&config)).unwrap();
         let completed = exchange(
@@ -801,6 +807,8 @@ mod tests {
             requests_ai: true,
             requests_storage: false,
             requests_tasks: false,
+            supported_targets: vec!["local".into()],
+            outputs: Default::default(),
         };
         let one = Capability::start(&app, "deployment-one", Some(&config)).unwrap();
         let two = Capability::start(&app, "deployment-two", Some(&config)).unwrap();
@@ -982,6 +990,8 @@ for _ in range(2):
             requests_ai: true,
             requests_storage: false,
             requests_tasks: false,
+            supported_targets: vec!["local".into()],
+            outputs: Default::default(),
         };
         let capability = Capability::start(&app, "deployment-tls", Some(&config)).unwrap();
         let completed = exchange(
@@ -1009,6 +1019,8 @@ for _ in range(2):
             requests_ai: true,
             requests_storage: false,
             requests_tasks: false,
+            supported_targets: vec!["local".into()],
+            outputs: Default::default(),
         };
         let capability = Capability::start(&app, "deployment-test", None).unwrap();
         let request = serde_json::json!({"prompt": "private"});
@@ -1083,6 +1095,8 @@ mod config_tests {
             requests_ai: true,
             requests_storage: false,
             requests_tasks: false,
+            supported_targets: vec!["local".into()],
+            outputs: Default::default(),
         };
         let inside = root.path().join("ai.json");
         std::fs::write(&inside, "{}").unwrap();

@@ -1,42 +1,46 @@
 # Authenticated release artifacts
 
-The repository can build, sign, verify and install an archive without a release
-host or account. No release domain, publisher key or signing credentials are
-configured by these scripts. A release owner must choose those inputs and obtain
-native validation evidence before publishing. The scripts do not publish.
+The repository can build, sign, verify, and locally install an archive without a
+release host or account. No release domain, publisher key, or signing credentials
+are configured by these scripts. They do not publish artifacts; Paraco has no
+public installer yet.
 
-Keep `install-release.sh`, `verify-release.sh`, `install-archive.sh` and
-`validate-archive.pl` together in the same trusted directory. Obtain these tools
-and the publisher's PEM public key through an independently trusted channel;
-never fetch an untrusted key alongside an archive and treat it as authenticated.
-The installer requires Bash (including macOS Bash 3.2), Perl with its core
-JSON::PP/Digest::SHA modules, gzip, tar, OpenSSL, and either shasum or sha256sum.
-Remote acquisition also requires curl. Python 3 is used only by test fixtures.
+Keep `install-release.sh`, `verify-release.sh`, `install-archive.sh`, and
+`validate-archive.pl` together in a trusted directory. Obtain the scripts and the
+publisher PEM public key through independently trusted channels. The installer
+requires Bash (including macOS Bash 3.2), Perl with core JSON::PP/Digest::SHA,
+gzip, tar, OpenSSL, and `shasum` or `sha256sum`; remote acquisition also needs
+curl. Python is used only by test fixtures.
 
 ## Prepare and sign a release
 
-Build from a clean, reviewed source checkout, using the tested Deno executable
-and complete, reviewed Deno/Rust redistribution notices:
+Build from a clean reviewed checkout using workerd `2026-10-26`, native esbuild
+`0.28.2`, and complete reviewed notices for workerd, esbuild, and Rust
+dependencies:
 
 ```sh
-scripts/build-bundle.sh --deno "$DENO" --deno-notice "$DENO_NOTICE" \
+scripts/build-bundle.sh \
+  --workerd "$WORKERD" --esbuild "$ESBUILD" \
+  --workerd-notice "$WORKERD_NOTICE" --compiler-notice "$ESBUILD_NOTICE" \
   --third-party-notice "$RUST_NOTICES" --target "$TARGET" --output "$OUTPUT"
 ```
 
-`$ARCHIVE` identifies the resulting versioned archive. Sign its exact compressed
-bytes with the release owner's existing RSA or ECDSA private key:
+The archive contains `bin/paraco`, `libexec/paraco/workerd`,
+`libexec/paraco/esbuild`, required notices, `bundle.json`, and `SHA256SUMS`.
+Metadata hashes all payload and notice files and records workerd's `YYYY-MM-DD`
+version. Sign the exact compressed archive bytes with the release owner's RSA or
+ECDSA private key:
 
 ```sh
 openssl dgst -sha256 -sign "$PRIVATE_KEY" -out "$ARCHIVE.sig" "$ARCHIVE"
 ```
 
 Private keys remain outside the repository and distribution artifacts. The
-verifier accepts OpenSSL SHA-256 detached RSA/ECDSA signatures; it does not accept
-Ed25519, GPG or Sigstore formats. The corresponding trusted public key can be
-exported by the release owner using `openssl pkey -in "$PRIVATE_KEY" -pubout`.
-Publish the archive, detached signature and SHA256SUMS only after the remaining
-release gates pass. The checksum detects accidental byte changes; the signature
-binds those bytes to the independently trusted publisher key.
+verifier accepts OpenSSL SHA-256 detached RSA/ECDSA signatures, not Ed25519, GPG,
+or Sigstore. Export the corresponding PEM public key with
+`openssl pkey -in "$PRIVATE_KEY" -pubout`. The checksum detects accidental byte
+changes; the signature binds the bytes to the independently trusted publisher
+key.
 
 ## Verify or install
 
@@ -48,18 +52,14 @@ scripts/verify-release.sh --archive "$ARCHIVE" --signature "$ARCHIVE.sig" \
   --version "$VERSION" --target "$TARGET"
 ```
 
-Verification checks the supplied SHA-256, detached signature, strict bounded
-ustar layout, version/target agreement, source revision, recorded clean source,
-all required executable/notice checksums, executable permissions and notice
-presence. Missing cleanliness metadata and obvious fixture, placeholder,
-incomplete or non-distributable notice labels fail the release gate. This
-label check cannot establish legal completeness; notice review remains a
-release-owner responsibility. It emits a JSON record containing the verified
-archive checksum, supplied public-key PEM fingerprint and signed source, target and Deno-version metadata. It does
-not run the binaries or establish their native compatibility.
+Verification checks the supplied SHA-256, detached signature, bounded ustar
+layout, version/target agreement, source revision and cleanliness, required
+executables and notices, all file checksums, and executable permissions. Obvious
+fixture and incomplete-notice labels are rejected; that check cannot establish
+legal completeness. Verification does not execute the payload or establish
+native compatibility.
 
-For HTTPS acquisition and activation, provide concrete archive and signature
-URLs, an independently trusted local public key, checksum, version and target:
+For HTTPS acquisition and activation:
 
 ```sh
 scripts/install-release.sh --url "$ARCHIVE_HTTPS_URL" \
@@ -67,36 +67,28 @@ scripts/install-release.sh --url "$ARCHIVE_HTTPS_URL" \
   --sha256 "$SHA256" --version "$VERSION" --target "$TARGET" --prefix "$PREFIX"
 ```
 
-Only HTTPS is allowed, including redirects; ordinary TLS verification remains
-enabled. The public key is never downloaded. Both downloads go to temporary
-storage. The signature and content gate completes before the existing staged
-installer can create or replace a channel pointer. Offline installation uses
-`--archive "$ARCHIVE" --signature "$ARCHIVE.sig"` instead of the URL arguments.
-Versions, targets and checksums must come from the release selection the user
-intends to trust, preventing substitution with another correctly signed version.
+HTTPS and normal TLS verification are required, including for redirects. The
+public key is not downloaded. Signature and content checks finish before the
+staged installer can switch an owned channel pointer. Offline installation uses
+`--archive "$ARCHIVE" --signature "$ARCHIVE.sig"`. The selected version, target,
+and checksum must come from the release the user intends to trust.
 
-Use `install-archive.sh rollback --version "$OLDER_VERSION" --prefix "$PREFIX"`
-for retained local releases; it preserves state and refuses unsupported state
-format downgrade. It is a pointer rollback, not automatic service-health or
-schema recovery. Uninstall preserves data, credentials and retained releases.
+`install-archive.sh rollback` switches to a retained version and refuses an
+unsupported state-format downgrade. It does not perform service-health checks or
+schema recovery. Uninstall preserves data, credentials, and retained releases.
 
 ## Remaining publication gates
 
-Run the native validation workflow and preserve its logs for each advertised
-platform/architecture. Its notice fixtures are explicitly non-distributable and
-will be rejected by this release verifier. Replace them with reviewed complete
-notices for real release artifacts. Test the final signed payload on the chosen
-minimum OS/libc baselines, without a separate Deno installation, and confirm HTTP,
-shutdown, upgrade and recovery behavior. Native builds on newer CI runners do
-not establish older OS support.
+The native validation workflow uses non-distributable notice fixtures. Replace
+them with complete reviewed notices for real artifacts. Validate final signed
+payloads on minimum OS/libc baselines, including HTTP, shutdown, upgrade and
+recovery behavior. Native builds on newer CI runners do not establish older OS
+support. Publisher key custody, dependency review, provenance, macOS signing and
+notarization, clean-machine evidence, Linux cgroup memory quotas, and secure
+macOS containment remain release gates. Do not claim deployed Cloudflare
+compatibility.
 
-Publisher key custody/distribution, real hosting, dependency review, reviewed
-license notices, native platform evidence and platform-specific signing remain
-external release-owner gates. This detached-signature flow does not replace
-macOS code signing, notarization or final package verification. No credentials,
-host ownership, native results or published releases are inferred by the tooling.
-
-Run `bash tests/release-verification.sh` to exercise ephemeral local signing,
-metadata and artifact tampering, malformed signatures, dirty/fixture rejection,
-and preservation of an already active installation. These are synthetic local
-fixtures and do not constitute a signed Paraco release or native execution proof.
+Run `bash tests/release-verification.sh` for synthetic signature, metadata,
+tampering, malformed signature, fixture rejection, and active-installation
+preservation checks. These tests do not constitute a signed release or native
+execution proof.

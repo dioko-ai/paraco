@@ -2,9 +2,11 @@ interface Context {
   tasks: { command(action: string, body: unknown): Promise<unknown> };
   ai: { complete(body: { prompt: string }): Promise<{ text: string }> };
 }
+import html from "./index.html" with { type: "text" };
+import appJs from "./app.js" with { type: "text" };
 const assets = new Map([
-  ["/", ["index.html", "text/html; charset=utf-8"]],
-  ["/app.js", ["app.js", "text/javascript; charset=utf-8"]],
+  ["/", [html, "text/html; charset=utf-8"]],
+  ["/app.js", [appJs, "text/javascript; charset=utf-8"]],
 ]);
 const actions = new Set(["list", "draft", "publish", "archive", "unarchive", "run", "cancel", "history", "logs", "revisions", "revision", "notifications", "read_notification", "preview", "status"]);
 async function jsonBody(request: Request): Promise<Record<string, unknown>> {
@@ -50,8 +52,8 @@ export default {
   async fetch(request: Request, context: Context): Promise<Response> {
     const url = new URL(request.url);
     if (request.method === "GET" && assets.has(url.pathname)) {
-      const [file, type] = assets.get(url.pathname)!;
-      return new Response(await Deno.readTextFile(new URL(file, import.meta.url)), {headers: {...headers, "Content-Type": type}});
+      const [content, type] = assets.get(url.pathname)!;
+      return new Response(content, {headers: {...headers, "Content-Type": type}});
     }
     if (request.method !== "POST" || !url.pathname.startsWith("/api/")) return new Response("Not found", {status: 404, headers});
     if (request.headers.get("origin") !== url.origin) return Response.json({error: "Same-origin request required"}, {status: 403, headers});

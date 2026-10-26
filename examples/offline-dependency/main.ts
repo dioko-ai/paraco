@@ -1,2 +1,2 @@
-import { basename } from "basename";
-export default { fetch() { return new Response(basename('/offline/dependency-ok')); } };
+import { basename } from "./basename.ts";
+export default { fetch() { return new Response(basename("/offline/dependency-ok")); } };

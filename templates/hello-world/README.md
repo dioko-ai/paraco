@@ -4,16 +4,16 @@ A tiny starter app for Paraco. It serves a polished welcome page at `/` and a JS
 
 ## Run locally
 
-Install Paraco and [Deno](https://deno.com/), then run:
+Install Paraco, then run:
 
 ```sh
 paraco run .
 ```
 
-Then open <http://localhost:3000>. Use `--port` to select another port. Run the tests with:
+Then open <http://localhost:3000>. Use `--port` to select another port. The app exports the web-standard `fetch(request, context)` handler that Paraco calls. Run the tests with Node.js 22 or newer:
 
 ```sh
-deno test
+node --experimental-strip-types --test main_test.ts
 ```
 
 ## Publish a release

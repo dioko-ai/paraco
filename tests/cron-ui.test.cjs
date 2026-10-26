@@ -55,13 +55,13 @@ test('AI context excludes logs unless explicitly selected and bounds prompts',as
 test('source review marks removed and added lines',()=>{
   const b=browser();assert.equal(vm.runInContext("sourceDiff('a\\nb','a\\nc')",b.context),'  a\n- b\n+ c');
 });
-test('HTTP adapter rejects foreign origins and oversized inputs without invoking capabilities',t=>{
-  const {spawnSync}=require('node:child_process');
-  const deno=process.env.DENO_BIN||'deno';
-  if(spawnSync(deno,['--version']).status!==0) { t.skip('Deno is required for HTTP adapter integration'); return; }
-  const moduleUrl=new URL('../examples/cron/main.ts',`file://${__filename}`).href;
-  const result=spawnSync(deno,['eval',`
-    import app from ${JSON.stringify(moduleUrl)};
+test('HTTP adapter rejects foreign origins and oversized inputs without invoking capabilities',async()=>{
+  const esbuild=require('esbuild');
+  const entry=new URL('../examples/cron/main.ts',`file://${__filename}`).pathname;
+  const bundle=esbuild.buildSync({entryPoints:[entry],bundle:true,platform:'node',format:'cjs',write:false});
+  const loaded={exports:{}};
+  new Function('module','exports',bundle.outputFiles[0].text)(loaded,loaded.exports);
+  const app=loaded.exports.default;
     let calls=0;
     const ctx={tasks:{command:async()=>{calls++;return [];}},ai:{complete:async()=>{calls++;return {text:'draft'};}}};
     const req=(path,body,origin='http://cron.localhost')=>new Request('http://cron.localhost/api/'+path,{method:'POST',headers:{origin,'content-type':'application/json'},body:JSON.stringify(body)});
@@ -90,12 +90,9 @@ test('HTTP adapter rejects foreign origins and oversized inputs without invoking
     }
     const originalTimeout=globalThis.setTimeout;
     globalThis.setTimeout=(fn,ms,...args)=>originalTimeout(fn,ms===5000?10:ms,...args);
-    const stalled=new Request('http://cron.localhost/api/draft',{method:'POST',headers:{origin:'http://cron.localhost','content-type':'application/json'},body:new ReadableStream({start(){}})});
+    const stalled=new Request('http://cron.localhost/api/draft',{method:'POST',headers:{origin:'http://cron.localhost','content-type':'application/json'},body:new ReadableStream({start(){}}),duplex:'half'});
     if((await app.fetch(stalled,ctx)).status!==408)throw Error('body deadline');
     globalThis.setTimeout=originalTimeout;
-
-  `],{encoding:'utf8'});
-  assert.equal(result.status,0,result.stderr);
 });
 test('real Cron browser lifecycle uses explicit review and immutable revision publication', {skip: !process.env.RUN_CRON_BROWSER, timeout: 120000}, async()=>{
   const {mkdtemp,mkdir,writeFile,cp,rm}=require('node:fs/promises');

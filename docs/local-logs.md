@@ -48,7 +48,9 @@ recorded public port, without connecting to a server.
 - `timestamp_unix_ms`: host capture time, milliseconds since the Unix epoch.
 - `app`: manifest name; `mode`: `run` or `serve`; `port`: public listening port.
 - `run_id`: random ID for each launch attempt, including retries and restarts.
-- `pid`: Deno process ID, or null before spawning.
+- `pid`: host-observed supervised process ID, or null before spawning. With Linux
+  bubblewrap, this can be the guardian/bubblewrap PID rather than workerd’s inner
+  namespace PID.
 - `stream`: `stdout`, `stderr`, or `supervisor`.
 - `event`: `output`, `starting`, `running`, `failed`, `launch_failed`, `stopped`,
   or `read_error`. `stopped` means resources were cleaned up, including after a
@@ -113,8 +115,9 @@ Use a local filesystem with OS file locking. External log rotation is unsupporte
 
 ## Access and failure behavior
 
-The store must live outside all configured application directories. Deno receives
-no additional filesystem permission for logs. On Unix, newly created directories
+The store must live outside all configured application directories. The Linux
+sandbox mounts app launch files and public libraries/certificates only; it does
+not mount the host log store into the app sandbox. On Unix, newly created directories
 use 0700 and files use 0600. Existing storage must be owned by the current user
 and inaccessible to group/other users. Symlinked store directories/files and
 hard-linked files are rejected on Unix. Windows uses the account's directory

@@ -17,7 +17,17 @@ function version(command, args, expected) {
 }
 
 try {
-  version("deno", ["--version"], "deno 2.9.8");
+  const workerd = process.env.WORKERD_BIN || "workerd";
+  let runtimeVersion;
+  try {
+    runtimeVersion = execFileSync(workerd, ["--version"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).split(/\r?\n/, 1)[0];
+  } catch {
+    throw new Error(`${workerd} is required for this verification run`);
+  }
+  if (runtimeVersion !== "workerd 2026-10-26") {
+    throw new Error(`${workerd} must report workerd 2026-10-26; got ${JSON.stringify(runtimeVersion)}`);
+  }
+  version("esbuild", ["--version"], "0.28.2");
   if (process.env.CI) {
     version(process.execPath, ["--version"], "v22.14.0");
   } else if (Number(process.versions.node.split(".")[0]) < 22) {

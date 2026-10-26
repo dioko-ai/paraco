@@ -1,0 +1,7 @@
+{
+  "name": "paraco-artifact-notebook",
+  "main": "../../artifacts/worker.ts",
+  "compatibility_date": "2026-08-03",
+  "compatibility_flags": ["disallow_importable_env"],
+  "services": [{"binding":"PARACO", "service":"paraco-notebook-capabilities"}]
+}

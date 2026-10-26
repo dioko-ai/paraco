@@ -1,6 +1,8 @@
 # Durable state and user services
 
-Runtime state uses SQLite schema version 1 (`PRAGMA user_version`). First open
+Runtime state uses SQLite schema version 3 (`PRAGMA user_version`). Version 3 adds
+portable records, immutable artifacts, execution input snapshots, and installation
+capability baselines; see [platform evolution](platform-evolution.md). First open
 imports the existing format-2 `state.json` in the same transaction that creates
 the schema. IDs and stopped/running intent are preserved. The original JSON is
 left untouched as migration evidence and is never reimported after migration.
@@ -32,6 +34,10 @@ access, or provider credentials. The host bounds request size and read/write
 waits. Configuration is app-owned configuration, not a secret vault or a way to
 grant additional capabilities.
 
+Capability HTTP requests travel over a private Unix socket to a Rust bridge,
+which translates them to the existing host-scoped storage service. The binding
+is present only for apps granted storage.
+
 `examples/cron-drafts` demonstrates storing draft source and timezone across
 restarts. This stores drafts only; scheduling, publication, task history, and AI
 approval workflows remain subsequent milestones. Draft data does not authorize
@@ -42,9 +48,10 @@ execution. Keep executable code and accepted revisions outside this mutable stor
 Updating source at the same canonical deployment path preserves its ID, desired
 state, grants keyed to that ID, and storage. A failed prepared build publishes
 nothing; build a new artifact directory and validate it before selecting it.
-Prepared format 2 includes a digest-verified private Deno executable and can be
-relocated. Format-1 artifacts must be prepared again. Execution uses a disposable
-copy of the verified dependency cache, `--cached-only`, and a frozen lockfile.
+Prepared format 3 stores the copied source under `app/`, compiled browser ES
+modules under `code/`, and a digest-verified private workerd executable under
+`runtime/`. It can be relocated and needs no compiler at launch. Older artifact
+formats must be prepared again; execution never downloads runtime dependencies.
 
 Removing an app from a hosted configuration retires its deployment identity.
 Data remains in the database for backup/export, but a later re-add receives a

@@ -1,4 +1,6 @@
 use serde::Deserialize;
+use serde_json::Value;
+use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
 
@@ -10,6 +12,31 @@ pub struct App {
     pub requests_tasks: bool,
     pub root: PathBuf,
     pub entrypoint: PathBuf,
+    pub supported_targets: Vec<String>,
+    pub outputs: BTreeMap<String, Output>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Output {
+    pub media_type: String,
+    pub schema: Option<Value>,
+}
+
+impl App {
+    pub fn validate_target(&self, target: &str) -> Result<(), Error> {
+        if !self
+            .supported_targets
+            .iter()
+            .any(|supported| supported == target)
+        {
+            return Err(Error::UnsupportedTarget(target.into()));
+        }
+        if target == "cloudflare" && self.requests_tasks {
+            return Err(Error::TasksUnsupportedTarget(target.into()));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
@@ -38,6 +65,10 @@ pub enum Error {
     UnsupportedCapability(String),
     DuplicateCapability(String),
     UnsupportedSchemaVersion(u32),
+    InvalidTargets,
+    InvalidOutput(String),
+    UnsupportedTarget(String),
+    TasksUnsupportedTarget(String),
 }
 
 impl fmt::Display for Error {
@@ -78,6 +109,18 @@ impl fmt::Display for Error {
             Self::UnsupportedSchemaVersion(version) => {
                 write!(f, "unsupported manifest schemaVersion `{version}`")
             }
+            Self::InvalidTargets => write!(
+                f,
+                "manifest `targets` must be a non-empty array of unique supported targets (`local`, `cloudflare`)"
+            ),
+            Self::InvalidOutput(name) => write!(f, "invalid manifest output `{name}`"),
+            Self::UnsupportedTarget(target) => {
+                write!(f, "application does not support target `{target}`")
+            }
+            Self::TasksUnsupportedTarget(target) => write!(
+                f,
+                "the `tasks` capability is not supported on target `{target}`"
+            ),
         }
     }
 }
@@ -92,6 +135,18 @@ struct Manifest {
     name: String,
     entrypoint: String,
     capabilities: Vec<String>,
+    #[serde(default)]
+    targets: Option<Vec<String>>,
+    #[serde(default)]
+    outputs: BTreeMap<String, ManifestOutput>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ManifestOutput {
+    media_type: String,
+    #[serde(default)]
+    schema: Option<Value>,
 }
 
 pub fn load(app_dir: &Path) -> Result<App, Error> {
@@ -140,6 +195,36 @@ pub fn load(app_dir: &Path) -> Result<App, Error> {
         }
     }
 
+    let supported_targets = match manifest.targets {
+        Some(targets)
+            if !targets.is_empty()
+                && targets.iter().all(|t| t == "local" || t == "cloudflare")
+                && targets
+                    .iter()
+                    .collect::<std::collections::HashSet<_>>()
+                    .len()
+                    == targets.len() =>
+        {
+            targets
+        }
+        Some(_) => return Err(Error::InvalidTargets),
+        None if manifest.capabilities.iter().any(|c| c == "tasks") => vec!["local".into()],
+        None => vec!["local".into(), "cloudflare".into()],
+    };
+    let mut outputs = BTreeMap::new();
+    for (name, output) in manifest.outputs {
+        if paraco::slug::validate(&name).is_err() || output.media_type.trim().is_empty() {
+            return Err(Error::InvalidOutput(name));
+        }
+        outputs.insert(
+            name,
+            Output {
+                media_type: output.media_type,
+                schema: output.schema,
+            },
+        );
+    }
+
     let requested = Path::new(&manifest.entrypoint);
     if requested.as_os_str().is_empty() || requested.is_absolute() {
         return Err(Error::InvalidEntrypoint(
@@ -179,6 +264,8 @@ pub fn load(app_dir: &Path) -> Result<App, Error> {
         name: manifest.name,
         root: app_dir,
         entrypoint,
+        supported_targets,
+        outputs,
     })
 }
 
@@ -206,6 +293,66 @@ mod tests {
         assert_eq!(app.name, "hello");
         assert_eq!(app.root, directory.path().canonicalize().unwrap());
         assert!(app.entrypoint.ends_with("main.ts"));
+        assert_eq!(app.supported_targets, ["local", "cloudflare"]);
+        assert!(app.validate_target("local").is_ok());
+    }
+
+    #[test]
+    fn defaults_tasks_to_local_and_checks_explicit_targets() {
+        let directory = app_dir(
+            r#"{"name":"task-app","entrypoint":"main.ts","capabilities":["tasks"]}"#,
+            true,
+        );
+        let app = load(directory.path()).unwrap();
+        assert_eq!(app.supported_targets, ["local"]);
+        assert!(matches!(
+            app.validate_target("cloudflare"),
+            Err(Error::UnsupportedTarget(_))
+        ));
+
+        let directory = app_dir(
+            r#"{"name":"task-app","entrypoint":"main.ts","capabilities":["tasks"],"targets":["local","cloudflare"]}"#,
+            true,
+        );
+        let app = load(directory.path()).unwrap();
+        assert!(matches!(
+            app.validate_target("cloudflare"),
+            Err(Error::TasksUnsupportedTarget(_))
+        ));
+    }
+
+    #[test]
+    fn validates_targets_and_loads_output_contracts() {
+        let directory = app_dir(
+            r#"{"name":"hello","entrypoint":"main.ts","capabilities":[],"targets":["cloudflare"],"outputs":{"report":{"mediaType":"application/json","schema":{"type":"object"}}}}"#,
+            true,
+        );
+        let app = load(directory.path()).unwrap();
+        assert!(matches!(
+            app.validate_target("local"),
+            Err(Error::UnsupportedTarget(_))
+        ));
+        assert_eq!(app.outputs["report"].media_type, "application/json");
+        assert_eq!(
+            app.outputs["report"].schema,
+            Some(serde_json::json!({"type":"object"}))
+        );
+
+        for targets in [r#"[]"#, r#"["local","local"]"#, r#"["remote"]"#] {
+            std::fs::write(
+                directory.path().join("paraco.json"),
+                format!(r#"{{"name":"hello","entrypoint":"main.ts","capabilities":[],"targets":{targets}}}"#),
+            ).unwrap();
+            assert!(matches!(load(directory.path()), Err(Error::InvalidTargets)));
+        }
+        std::fs::write(
+            directory.path().join("paraco.json"),
+            r#"{"name":"hello","entrypoint":"main.ts","capabilities":[],"outputs":{"bad name":{"mediaType":"application/json"}}}"#,
+        ).unwrap();
+        assert!(matches!(
+            load(directory.path()),
+            Err(Error::InvalidOutput(_))
+        ));
     }
 
     #[test]

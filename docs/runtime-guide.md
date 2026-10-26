@@ -1,8 +1,9 @@
 # Runtime and contributor guide
 
 Paraco is a local-first runtime for portable applications. This repository is
-building its standalone foundation: Rust supervises Deno applications and serves
-them through a local gateway, with a separate authenticated management dashboard.
+a Rust host that runs apps on workerd and serves them through a local gateway,
+with a separate authenticated management dashboard. Bundles include workerd
+`2026-10-26` and native esbuild `0.28.2`.
 
 ## Run the cron app
 
@@ -19,8 +20,9 @@ for the task contract, authorization, limits and current dependency restrictions
 
 ## Try it
 
-Prerequisites are a current [Rust toolchain](https://rustup.rs/) and
-[Deno](https://docs.deno.com/runtime/) available on `PATH`.
+For source development, install Rust, Node.js, and the pinned npm dependencies:
+`npm ci`, then put `node_modules/.bin` on `PATH`. End users of a Paraco bundle
+need no Node.js or Deno.
 
 ```sh
 cargo run -- run ./examples/hello
@@ -74,7 +76,7 @@ Commands print JSON status and acknowledge lifecycle requests immediately. Use
 authorized management dashboard; the gateway dashboard stays read-only.
 See [local lifecycle](local-lifecycle.md) for state, security, and recovery
 semantics. Deployment identity and desired state persist across server sessions.
-On Unix, app guardians clean up Deno after a runtime crash, and restarting `serve`
+App guardians clean up workerd after a runtime crash, and restarting `serve`
 waits for cleanup before safely recovering its stale control socket.
 
 ## Persistent logs
@@ -115,7 +117,10 @@ validation. The machine-readable draft schema is
 matching handler types are in [`runtime/paraco.d.ts`](../runtime/paraco.d.ts).
 
 The entrypoint exports a default object whose `fetch` method receives web
-standard `Request` and returns a `Response` (or a promise for one):
+standard `Request` and returns a `Response` (or a promise for one). esbuild
+bundles package dependencies during compilation or preparation; apps do not
+download modules at launch. Static text imports use the JavaScript import attribute syntax, for
+example `import page from "./page.html" with { type: "text" };`.
 
 ```ts
 export default {
@@ -125,15 +130,13 @@ export default {
 };
 ```
 
-The Deno adapter calls `Deno.serve` and binds only `127.0.0.1`. The Rust binary
-embeds the adapter, so `paraco` does not rely on the shell working directory to
-find it. It grants Deno read access to the app directory and network access only
-to its selected loopback listener and, for AI-enabled apps, the capability port.
-It clears inherited environment variables
-apart from `PATH`, and supplies a temporary `DENO_DIR`; no ambient credential
-environment variables are passed to apps. These permissions are only the narrow
-ones needed for this example and are not a complete security sandbox for
-untrusted code.
+Rust compiles TypeScript and local app imports to browser ES modules with the
+bundled esbuild compiler. Apps run on the pinned workerd runtime and do not get
+Node or Deno globals, runtime dependency downloads, or ambient filesystem access.
+On Linux, execution uses bubblewrap with unprivileged user
+and network namespaces; macOS fails closed until secure containment is
+implemented. `PARACO_ALLOW_UNSANDBOXED=1` is an explicit trusted-development
+override. See [workerd migration limits](workerd-migration.md).
 
 ## Verify
 
@@ -144,8 +147,8 @@ node --test tests/management.test.cjs
 cargo run -- run ./examples/hello
 ```
 
-The dashboard JavaScript tests use Node.js (no npm dependencies); Node.js is not
-needed to run Paraco.
+The dashboard tests use Node.js; it is a development dependency and is not
+needed to run a packaged Paraco host.
 
 See [the first-runtime brief](first-runtime.md) for the acceptance criteria
 and intentionally deferred work.
@@ -168,10 +171,8 @@ separate management origin remains authenticated. Output-loss counters in the
 management log view distinguish storage and console loss. Hosted admission is
 bounded (50 apps, 64 gateway responses, 8 per app, and 4 log reads); these are
 safety limits rather than CPU/RSS quotas.
-Opt-in user-service definitions, deployment-scoped durable state, a bounded
-host-owned OpenAI-compatible provider, and a loopback OpenAI-compatible HTTP
-subset (including the documented SSE foundation) now have implementation
-scaffolding. The retained verification record distinguishes observed Linux/macOS integration
+Opt-in user-service definitions, deployment-scoped durable state, and a bounded
+host-owned OpenAI-compatible provider are implemented. The retained verification record distinguishes observed Linux/macOS integration
 and launchd checks from remaining native Linux service, clean macOS, machine
 reboot, signing, publication, and native package gates. Bounded tasks, durable scheduling, a local notification inbox and the cron reference app
 are implemented; see their documented limits. Health monitoring and cloud integration remain deferred. Local operation needs neither a

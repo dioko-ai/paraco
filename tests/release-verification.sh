@@ -10,15 +10,16 @@ python3 - "$base" <<'PY'
 import hashlib, io, json, sys, tarfile
 from pathlib import Path
 base = Path(sys.argv[1])
-for kind in ('good', 'dirty', 'fixture', 'bad-hash', 'bad-version', 'bad-target', 'no-notice', 'unrecorded'):
-    files = {'bin/paraco':b'#!/bin/sh\nexit 0\n', 'libexec/paraco/deno':b'#!/bin/sh\nexit 0\n', 'notices/LICENSE':b'Copyright author. All rights reserved.\n', 'notices/DENO-NOTICE':b'Copyright runtime author. Permission granted.\n', 'notices/RUST-THIRD-PARTY-NOTICES':b'Copyright dependency authors. Permission granted.\n'}
-    if kind == 'fixture': files['notices/DENO-NOTICE'] = b'TEST FIXTURE ONLY - NOT DISTRIBUTABLE\n'
-    meta = dict(paracoVersion='1', denoVersion='2.2.5', target='x86_64-unknown-linux-gnu', sourceRevision='a'*40, sourceDirty=kind=='dirty', notices=[n for n in files if n.startswith('notices/')], checksums={n:hashlib.sha256(d).hexdigest() for n,d in files.items()})
+for kind in ('good', 'dirty', 'fixture', 'bad-hash', 'bad-version', 'bad-target', 'bad-runtime-version', 'no-notice', 'unrecorded'):
+    files = {'bin/paraco':b'#!/bin/sh\nexit 0\n', 'libexec/paraco/workerd':b'#!/bin/sh\nexit 0\n', 'libexec/paraco/esbuild':b'#!/bin/sh\nexit 0\n', 'notices/LICENSE':b'Copyright author. All rights reserved.\n', 'notices/WORKERD-NOTICE':b'Copyright runtime author. Permission granted.\n', 'notices/ESBUILD-NOTICE':b'Copyright compiler author. Permission granted.\n', 'notices/RUST-THIRD-PARTY-NOTICES':b'Copyright dependency authors. Permission granted.\n'}
+    if kind == 'fixture': files['notices/WORKERD-NOTICE'] = b'TEST FIXTURE ONLY - NOT DISTRIBUTABLE\n'
+    meta = dict(paracoVersion='1', workerdVersion='2026-10-26', target='x86_64-unknown-linux-gnu', sourceRevision='a'*40, sourceDirty=kind=='dirty', notices=[n for n in files if n.startswith('notices/')], checksums={n:hashlib.sha256(d).hexdigest() for n,d in files.items()})
     if kind == 'unrecorded': del meta['sourceDirty']
     if kind == 'bad-hash': meta['checksums']['bin/paraco'] = '0'*64
     if kind == 'bad-version': meta['paracoVersion'] = '2'
     if kind == 'bad-target': meta['target'] = 'aarch64-apple-darwin'
-    if kind == 'no-notice': del files['notices/DENO-NOTICE']
+    if kind == 'bad-runtime-version': meta['workerdVersion'] = '2.2.5'
+    if kind == 'no-notice': del files['notices/WORKERD-NOTICE']
     files['bundle.json'] = json.dumps(meta).encode()
     with tarfile.open(base / f'{kind}.tgz', 'w:gz', format=tarfile.USTAR_FORMAT) as t:
         for name,data in files.items():
@@ -34,7 +35,7 @@ reject scripts/verify-release.sh --archive "$base/good.tgz" --signature "$base/g
 reject scripts/verify-release.sh --archive "$base/good.tgz" --signature "$base/good.tgz.sig" --public-key "$base/public.pem" --sha256 "$(printf '%064d' 0)" --version 1 --target x86_64-unknown-linux-gnu
 install good
 pointer=$(readlink "$base/prefix/channels/stable")
-for kind in dirty fixture bad-hash bad-version bad-target no-notice unrecorded; do
+for kind in dirty fixture bad-hash bad-version bad-target bad-runtime-version no-notice unrecorded; do
  reject verify "$kind"
  reject install "$kind"
  [[ $(readlink "$base/prefix/channels/stable") == "$pointer" ]]

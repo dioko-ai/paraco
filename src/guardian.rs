@@ -1,10 +1,10 @@
-//! A separate process owns and reaps Deno when the main runtime disappears.
+//! A separate process owns and reaps workerd when the main runtime disappears.
 //! Its stdin is a bootstrap line followed by a lifetime pipe (EOF means stop).
 //! No JavaScript cooperation or persisted process identifiers are required.
 use std::{
     fs::File,
     io::{BufRead, BufReader, Read, Write},
-    process::{Child, Command, Stdio},
+    process::{Child, Command},
     sync::atomic::Ordering,
     thread,
     time::{Duration, Instant},
@@ -44,6 +44,14 @@ pub fn run() -> i32 {
             eprintln!("paraco: {error}");
             1
         }
+    }
+}
+
+// Both host and guardian own cleanup: either survivor can remove launch files.
+struct LaunchDirectory(std::path::PathBuf);
+impl Drop for LaunchDirectory {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
     }
 }
 
@@ -88,7 +96,7 @@ fn supervise() -> Result<i32, String> {
         if fd < 3 {
             return Err("invalid lease descriptor".into());
         }
-        // Keep ownership until Deno is reaped, but never pass it into Deno.
+        // Keep ownership until workerd is reaped, but never pass it into workerd.
         if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } == -1 {
             return Err("cannot protect guardian lease".into());
         }
@@ -122,60 +130,80 @@ fn supervise() -> Result<i32, String> {
     if stop.load(Ordering::Relaxed) {
         return Ok(0);
     }
-    let deno_args: Vec<_> = args.collect();
-    // The last three arguments belong to the embedded host adapter; preceding
-    // arguments are Deno options selected by the runtime.
-    let split = deno_args
-        .len()
-        .checked_sub(3)
-        .ok_or("missing adapter arguments")?;
-    let (deno_options, adapter_args) = deno_args.split_at(split);
-    let nonce = adapter_args[2].to_str().ok_or("invalid readiness nonce")?;
-    let temporary = tempfile::tempdir().map_err(|e| format!("cannot create app directory: {e}"))?;
-    let host_path = temporary.path().join("paraco-deno-host.ts");
-    std::fs::write(&host_path, include_str!("../runtime/deno_host.ts"))
-        .map_err(|e| format!("cannot write Deno host adapter: {e}"))?;
-    let deno = std::env::var_os("PARACO_GUARDIAN_DENO")
-        .map(std::path::PathBuf::from)
-        .ok_or("missing pinned guardian Deno runtime")?;
-    if !deno.is_absolute() || !deno.is_file() {
-        return Err("invalid pinned guardian Deno runtime".into());
-    }
-    let cache = std::env::var_os("PARACO_GUARDIAN_DENO_DIR")
-        .map(std::path::PathBuf::from)
-        .ok_or("missing pinned guardian Deno cache")?;
+    let dir = std::path::PathBuf::from(args.next().ok_or("missing worker directory")?);
+    let _directory = LaunchDirectory(dir.clone());
+    let port: u16 = args
+        .next()
+        .ok_or("missing port")?
+        .to_string_lossy()
+        .parse()
+        .map_err(|_| "invalid port")?;
+    let nonce = args
+        .next()
+        .ok_or("missing nonce")?
+        .to_string_lossy()
+        .to_string();
+    let settings: serde_json::Value =
+        serde_json::from_slice(&bootstrap).map_err(|e| e.to_string())?;
+    let bridge = crate::bridge::Bridge::start(settings.clone(), &dir)?;
+    let public = serde_json::json!({"basePath":settings["basePath"], "identity":settings["identity"], "backendToken":settings["backendToken"], "nonce":nonce, "hostToken":bridge.token,
+        "ai":!settings["ai"].is_null(), "storage":!settings["storage"].is_null(), "tasks":!settings["tasks"].is_null()});
+    std::fs::write(
+        dir.join("adapter.js"),
+        include_str!("../runtime/workerd_host.js"),
+    )
+    .map_err(|e| e.to_string())?;
+    std::fs::write(
+        dir.join("platform-client.js"),
+        include_str!("../runtime/platform-client.js"),
+    )
+    .map_err(|e| e.to_string())?;
+    let listener = std::net::TcpListener::bind(("127.0.0.1", port)).map_err(|e| e.to_string())?;
+    let port = listener.local_addr().map_err(|e| e.to_string())?.port();
+    let config = crate::worker::config(&dir, port, Some(&bridge.address), &public)?;
+    let runtime = std::env::var_os("PARACO_GUARDIAN_WORKERD").ok_or("missing workerd runtime")?;
+    let mut command =
+        crate::worker::launch_command(std::path::Path::new(&runtime), &dir, &config, &listener)?;
     let mut child = AppChild(
-        Command::new(deno)
-            .args(deno_options)
-            .arg(&host_path)
-            .args(adapter_args)
-            .env_remove("TMPDIR")
-            .env("DENO_DIR", cache)
-            .stdin(Stdio::piped())
+        command
             .spawn()
-            .map_err(|error| {
-                if error.kind() == std::io::ErrorKind::NotFound {
-                    "Deno was not found on PATH; install Deno and try again".to_owned()
-                } else {
-                    format!("cannot launch Deno: {error}")
-                }
-            })?,
+            .map_err(|e| format!("cannot launch workerd: {e}"))?,
     );
-    // Deno cannot import the app before receiving its bootstrap, so PID metadata
-    // reaches the runtime before application output.
+    drop(listener);
     writeln!(
         std::io::stdout(),
         "PARACO_READY:{nonce}:PID:{}",
         child.0.id()
     )
-    .map_err(|e| format!("cannot report application PID: {e}"))?;
-    child
-        .0
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(&bootstrap)
-        .map_err(|e| format!("cannot initialize Deno: {e}"))?;
+    .map_err(|e| e.to_string())?;
+    let deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        if stop.load(Ordering::Relaxed) {
+            return Ok(0);
+        }
+        if let Some(status) = child.0.try_wait().map_err(|e| e.to_string())? {
+            return Err(format!("workerd exited: {status}"));
+        }
+        if let Ok(mut stream) = std::net::TcpStream::connect(("127.0.0.1", port)) {
+            let _ = stream.set_read_timeout(Some(Duration::from_millis(100)));
+            let _ = write!(
+                stream,
+                "GET / HTTP/1.1\r\nHost: localhost\r\nx-paraco-ready: {nonce}\r\nConnection: close\r\n\r\n"
+            );
+            let mut bytes = [0; 128];
+            if stream
+                .read(&mut bytes)
+                .is_ok_and(|n| String::from_utf8_lossy(&bytes[..n]).contains("200 OK"))
+            {
+                break;
+            }
+        }
+        if Instant::now() > deadline {
+            return Err("workerd readiness deadline exceeded".into());
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    writeln!(std::io::stdout(), "PARACO_READY:{nonce}:{port}").map_err(|e| e.to_string())?;
     loop {
         if stop.load(Ordering::Relaxed) {
             return Ok(0);

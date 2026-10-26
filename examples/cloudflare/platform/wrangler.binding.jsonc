@@ -1,0 +1,9 @@
+{
+  "name": "paraco-notebook-capabilities",
+  "main": "binding.ts",
+  "compatibility_date": "2026-08-03",
+  "compatibility_flags": ["disallow_importable_env"],
+  "workers_dev": false,
+  "preview_urls": false,
+  "services": [{"binding":"SERVICE", "service":"paraco-datasets"}]
+}

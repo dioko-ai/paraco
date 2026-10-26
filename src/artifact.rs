@@ -1,290 +1,112 @@
-//! Host-owned, immutable application preparation artifacts.
-//!
-//! Preparation is the only operation that may populate a Deno cache.  Launch
-//! verifies the published metadata and runs from that cache with downloads
-//! disabled.  This deliberately supports a small Deno configuration subset;
-//! expanding it is a compatibility/security decision, not an accident of
-//! Deno's ambient configuration discovery.
-use crate::manifest;
+//! Immutable offline JavaScript packages with a pinned private workerd runtime.
+use crate::{manifest, worker};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::Command;
-
-const FORMAT: u32 = 2;
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
+const FORMAT: u32 = 3;
 const METADATA: &str = "paraco-artifact.json";
-
 pub struct PreparedApp {
     pub app: manifest::App,
     pub runtime: PathBuf,
-    pub cache: PathBuf,
-    pub lock: PathBuf,
-    pub config: Option<PathBuf>,
+    pub code: PathBuf,
 }
-
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Metadata {
     format: u32,
     source_digest: String,
-    lock_digest: String,
-    cache_digest: String,
-    runtime: PathBuf,
+    code_digest: String,
     runtime_version: String,
     runtime_digest: String,
-    has_config: bool,
 }
-
-pub fn prepare(source: &Path, output: &Path, deno: &Path) -> Result<(), String> {
+pub fn prepare(source: &Path, output: &Path, runtime: &Path) -> Result<(), String> {
     if output.exists() {
-        return Err(format!(
-            "artifact output {} already exists",
-            output.display()
-        ));
+        return Err("artifact output already exists".into());
     }
-    let source = source
-        .canonicalize()
-        .map_err(|e| format!("cannot read source app: {e}"))?;
-    let runtime = deno
-        .canonicalize()
-        .map_err(|e| format!("cannot read Deno executable: {e}"))?;
-    if !runtime.is_file() {
-        return Err("Deno executable is not a file".into());
-    }
-    let version = deno_version(&runtime)?;
-    let parent = output
-        .parent()
-        .ok_or("artifact output must have a parent directory")?;
-    fs::create_dir_all(parent).map_err(|e| format!("cannot create artifact parent: {e}"))?;
+    let output = std::env::current_dir()
+        .map_err(|e| e.to_string())?
+        .join(output);
+    let source = source.canonicalize().map_err(|e| e.to_string())?;
+    let runtime = runtime.canonicalize().map_err(|e| e.to_string())?;
+    let version = runtime_version(&runtime)?;
+    let parent = output.parent().ok_or("artifact output needs parent")?;
+    fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     let staging = tempfile::Builder::new()
         .prefix(".paraco-prepare-")
         .tempdir_in(parent)
-        .map_err(|e| format!("cannot create artifact staging directory: {e}"))?;
+        .map_err(|e| e.to_string())?;
     let root = staging.path();
     let app_dir = root.join("app");
     copy_tree(&source, &app_dir)?;
     let app = manifest::load(&app_dir).map_err(|e| e.to_string())?;
-    let config = validate_config(&app.root)?;
-    let cache = root.join("deno-cache");
-    let lock = root.join("deno.lock");
-    fs::create_dir(&cache).map_err(|e| format!("cannot create dependency cache: {e}"))?;
-    // Deno 2 writes a supplied lockfile and no longer accepts the old
-    // `--lock-write` flag. Seeding an empty lock also gives a dependency-free
-    // application an immutable lock artifact.
-    fs::write(&lock, "{}\n").map_err(|e| format!("cannot create dependency lockfile: {e}"))?;
-    let mut command = Command::new(&runtime);
-    command.arg("cache").arg("--quiet").arg("--lock").arg(&lock);
-    if let Some(config) = &config {
-        command.arg("--config").arg(config);
-    } else {
-        command.arg("--no-config");
-    }
-    let status = command
-        .arg(&app.entrypoint)
-        .env_clear()
-        .env("DENO_DIR", &cache)
-        .current_dir(&app.root)
-        .status()
-        .map_err(|e| format!("cannot start Deno preparation: {e}"))?;
-    if !status.success() {
-        return Err(format!("Deno preparation failed with {status}"));
-    }
-    validate_resolved_graph(&runtime, &app, config.as_deref(), &cache)?;
-    let digest = tree_digest(&app_dir)?;
-    let private_runtime = root.join("runtime");
-    fs::create_dir(&private_runtime).map_err(|e| e.to_string())?;
-    fs::copy(&runtime, private_runtime.join("deno"))
-        .map_err(|e| format!("cannot copy private Deno: {e}"))?;
+    app.validate_target("local").map_err(|e| e.to_string())?;
+    let code = root.join("code");
+    fs::create_dir(&code).map_err(|e| e.to_string())?;
+    worker::compile(&app.entrypoint, &code.join("app.js"), &app.root)?;
+    fs::create_dir(root.join("runtime")).map_err(|e| e.to_string())?;
+    fs::copy(&runtime, root.join("runtime/workerd")).map_err(|e| e.to_string())?;
     let metadata = Metadata {
         format: FORMAT,
-        source_digest: digest,
-        lock_digest: file_digest(&lock)?,
-        cache_digest: tree_digest(&cache)?,
-        runtime: PathBuf::from("runtime/deno"),
+        source_digest: tree_digest(&app_dir)?,
+        code_digest: tree_digest(&code)?,
         runtime_version: version,
-        runtime_digest: file_digest(&private_runtime.join("deno"))?,
-        has_config: config.is_some(),
+        runtime_digest: file_digest(&runtime)?,
     };
     fs::write(
         root.join(METADATA),
-        serde_json::to_vec_pretty(&metadata).map_err(|_| "cannot encode artifact metadata")?,
+        serde_json::to_vec_pretty(&metadata).map_err(|e| e.to_string())?,
     )
-    .map_err(|e| format!("cannot write artifact metadata: {e}"))?;
-    let staged = staging.keep();
-    fs::rename(&staged, output).map_err(|e| format!("cannot publish prepared artifact: {e}"))?;
+    .map_err(|e| e.to_string())?;
+    fs::rename(root, &output).map_err(|e| e.to_string())?;
     Ok(())
 }
-
 pub fn open(path: &Path) -> Result<PreparedApp, String> {
-    let root = path
-        .canonicalize()
-        .map_err(|e| format!("cannot read prepared artifact: {e}"))?;
-    let raw =
-        fs::read(root.join(METADATA)).map_err(|e| format!("cannot read artifact metadata: {e}"))?;
+    let root = path.canonicalize().map_err(|e| e.to_string())?;
     let metadata: Metadata =
-        serde_json::from_slice(&raw).map_err(|e| format!("invalid artifact metadata: {e}"))?;
+        serde_json::from_slice(&fs::read(root.join(METADATA)).map_err(|e| e.to_string())?)
+            .map_err(|e| format!("invalid workerd artifact metadata: {e}"))?;
     if metadata.format != FORMAT {
-        return Err(format!("unsupported artifact format {}", metadata.format));
+        return Err("unsupported prepared artifact; prepare again for workerd".into());
     }
     let app_dir = root.join("app");
-    if tree_digest(&app_dir)? != metadata.source_digest {
-        return Err("prepared artifact source digest does not match metadata".into());
+    let code = root.join("code");
+    let runtime = root.join("runtime/workerd");
+    if tree_digest(&app_dir)? != metadata.source_digest
+        || tree_digest(&code)? != metadata.code_digest
+        || file_digest(&runtime)? != metadata.runtime_digest
+    {
+        return Err("prepared artifact integrity check failed".into());
+    }
+    if runtime_version(&runtime)? != metadata.runtime_version {
+        return Err("prepared workerd version mismatch".into());
     }
     let app = manifest::load(&app_dir).map_err(|e| e.to_string())?;
-    let runtime = root
-        .join(&metadata.runtime)
-        .canonicalize()
-        .map_err(|e| format!("prepared Deno executable is unavailable: {e}"))?;
-    if file_digest(&runtime)? != metadata.runtime_digest {
-        return Err("prepared Deno digest no longer matches artifact metadata".into());
-    }
-    if deno_version(&runtime)? != metadata.runtime_version {
-        return Err("prepared Deno version no longer matches artifact metadata".into());
-    }
-    let lock = root.join("deno.lock");
-    if !lock.is_file() {
-        return Err("prepared artifact lockfile is missing".into());
-    }
-    let cache = root.join("deno-cache");
-    if !cache.is_dir() {
-        return Err("prepared artifact dependency cache is missing".into());
-    }
-    if file_digest(&lock)? != metadata.lock_digest {
-        return Err("prepared artifact lockfile digest does not match metadata".into());
-    }
-    if tree_digest(&cache)? != metadata.cache_digest {
-        return Err("prepared artifact dependency cache digest does not match metadata".into());
-    }
-    let config = if metadata.has_config {
-        validate_config(&app.root)?
-    } else {
-        None
-    };
-    Ok(PreparedApp {
-        app,
-        runtime,
-        cache,
-        lock,
-        config,
-    })
+    app.validate_target("local").map_err(|e| e.to_string())?;
+    Ok(PreparedApp { app, runtime, code })
 }
-
-fn deno_version(deno: &Path) -> Result<String, String> {
-    let output = Command::new(deno)
+fn runtime_version(runtime: &Path) -> Result<String, String> {
+    let result = Command::new(runtime)
         .arg("--version")
         .output()
-        .map_err(|e| format!("cannot inspect Deno version: {e}"))?;
-    if !output.status.success() {
-        return Err("Deno version command failed".into());
+        .map_err(|e| e.to_string())?;
+    let version = String::from_utf8(result.stdout).map_err(|e| e.to_string())?;
+    if !result.status.success() || !version.starts_with("workerd ") {
+        return Err("invalid workerd executable".into());
     }
-    String::from_utf8(output.stdout).map_err(|_| "Deno version output is not UTF-8".into())
+    Ok(version)
 }
-
-fn validate_config(root: &Path) -> Result<Option<PathBuf>, String> {
-    let path = root.join("deno.json");
-    if !path.exists() {
-        return Ok(None);
-    }
-    let value: serde_json::Value = serde_json::from_slice(
-        &fs::read(&path).map_err(|e| format!("cannot read deno.json: {e}"))?,
-    )
-    .map_err(|e| format!("invalid deno.json: {e}"))?;
-    let object = value.as_object().ok_or("deno.json must be an object")?;
-    if object.keys().any(|key| key != "imports") {
-        return Err("deno.json supports only the `imports` field in prepared artifacts".into());
-    }
-    let imports = object
-        .get("imports")
-        .and_then(|v| v.as_object())
-        .ok_or("deno.json `imports` must be an object")?;
-    for value in imports.values() {
-        let value = value
-            .as_str()
-            .ok_or("deno.json import values must be strings")?;
-        if !(value.starts_with("https://") || value.starts_with("jsr:") || safe_relative(value)) {
-            return Err("deno.json imports support only https, jsr, or contained ./ paths in prepared artifacts".into());
-        }
-    }
-    Ok(Some(path))
-}
-
-fn safe_relative(value: &str) -> bool {
-    value.starts_with("./") && !value.split('/').any(|part| part == "..")
-}
-
-fn validate_resolved_graph(
-    deno: &Path,
-    app: &manifest::App,
-    config: Option<&Path>,
-    cache: &Path,
-) -> Result<(), String> {
-    let mut command = Command::new(deno);
-    command.arg("info").arg("--json");
-    if let Some(config) = config {
-        command.arg("--config").arg(config);
-    } else {
-        command.arg("--no-config");
-    }
-    let output = command
-        .arg(&app.entrypoint)
-        .env_clear()
-        .env("DENO_DIR", cache)
-        .current_dir(&app.root)
-        .output()
-        .map_err(|e| format!("cannot inspect prepared dependency graph: {e}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "Deno dependency graph inspection failed with {}",
-            output.status
-        ));
-    }
-    let graph: serde_json::Value = serde_json::from_slice(&output.stdout)
-        .map_err(|e| format!("Deno dependency graph was not valid JSON: {e}"))?;
-    let modules = graph
-        .get("modules")
-        .and_then(serde_json::Value::as_array)
-        .ok_or("Deno dependency graph did not report modules")?;
-    for module in modules {
-        let specifier = module
-            .get("specifier")
-            .and_then(serde_json::Value::as_str)
-            .ok_or("Deno dependency graph contains a module without a specifier")?;
-        validate_graph_specifier(specifier, &app.root)?;
-    }
-    Ok(())
-}
-
-fn validate_graph_specifier(specifier: &str, root: &Path) -> Result<(), String> {
-    let url = url::Url::parse(specifier)
-        .map_err(|_| format!("invalid resolved dependency specifier {specifier}"))?;
-    match url.scheme() {
-        "https" | "jsr" => Ok(()),
-        "file" => {
-            let path = url
-                .to_file_path()
-                .map_err(|_| format!("invalid file dependency {specifier}"))?;
-            let path = path
-                .canonicalize()
-                .map_err(|_| format!("unavailable file dependency {specifier}"))?;
-            let root = root
-                .canonicalize()
-                .map_err(|_| "unavailable application root".to_string())?;
-            if path.starts_with(&root) {
-                Ok(())
-            } else {
-                Err(format!(
-                    "resolved dependency escapes application root: {specifier}"
-                ))
-            }
-        }
-        scheme => Err(format!(
-            "unsupported resolved dependency scheme {scheme}: {specifier}"
-        )),
-    }
-}
-
 fn file_digest(path: &Path) -> Result<String, String> {
+    if !fs::symlink_metadata(path)
+        .map_err(|e| e.to_string())?
+        .file_type()
+        .is_file()
+    {
+        return Err("artifact file must be a regular file, not a symlink".into());
+    }
     let mut hash = Sha256::new();
     hash.update(fs::read(path).map_err(|e| format!("cannot hash artifact file: {e}"))?);
     Ok(format!("{:x}", hash.finalize()))
@@ -320,6 +142,13 @@ pub(crate) fn copy_tree(from: &Path, to: &Path) -> Result<(), String> {
 }
 
 fn tree_digest(root: &Path) -> Result<String, String> {
+    if !fs::symlink_metadata(root)
+        .map_err(|e| e.to_string())?
+        .file_type()
+        .is_dir()
+    {
+        return Err("artifact directory must not be a symlink".into());
+    }
     let mut files = Vec::new();
     collect_files(root, root, &mut files)?;
     files.sort();
@@ -357,79 +186,4 @@ fn collect_files(root: &Path, current: &Path, files: &mut Vec<PathBuf>) -> Resul
         }
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn only_import_alias_configuration_is_accepted() {
-        let root = tempfile::tempdir().unwrap();
-        fs::write(
-            root.path().join("deno.json"),
-            r#"{"imports":{"lib/":"./lib/"}}"#,
-        )
-        .unwrap();
-        assert!(validate_config(root.path()).unwrap().is_some());
-        fs::write(root.path().join("deno.json"), r#"{"tasks":{"x":"echo x"}}"#).unwrap();
-        assert!(validate_config(root.path()).is_err());
-    }
-
-    #[test]
-    fn source_digest_changes_when_a_file_changes() {
-        let root = tempfile::tempdir().unwrap();
-        fs::create_dir(root.path().join("app")).unwrap();
-        let file = root.path().join("app/main.ts");
-        fs::write(&file, "export default 1").unwrap();
-        let first = tree_digest(&root.path().join("app")).unwrap();
-        fs::write(&file, "export default 2").unwrap();
-        assert_ne!(first, tree_digest(&root.path().join("app")).unwrap());
-    }
-
-    #[test]
-    fn graph_specifiers_allow_contained_parent_imports_and_source_text() {
-        let root = tempfile::tempdir().unwrap();
-        let nested = root.path().join("nested");
-        fs::create_dir(&nested).unwrap();
-        fs::write(
-            nested.join("module.ts"),
-            "// Documentation example: ../assets",
-        )
-        .unwrap();
-        assert!(
-            validate_graph_specifier(
-                url::Url::from_file_path(nested.join("module.ts"))
-                    .unwrap()
-                    .as_str(),
-                root.path()
-            )
-            .is_ok()
-        );
-        assert!(validate_graph_specifier("file:///tmp/secret.ts", root.path()).is_err());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn graph_specifiers_compare_physical_paths_and_reject_symlink_escapes() {
-        let root = tempfile::tempdir().unwrap();
-        let app = root.path().join("app");
-        fs::create_dir(&app).unwrap();
-        fs::write(app.join("main.ts"), "export default 1").unwrap();
-        let alias = root.path().join("alias");
-        std::os::unix::fs::symlink(&app, &alias).unwrap();
-        let entry = url::Url::from_file_path(alias.join("main.ts")).unwrap();
-        assert!(validate_graph_specifier(entry.as_str(), &alias).is_ok());
-
-        fs::write(root.path().join("private.ts"), "export default 2").unwrap();
-        std::os::unix::fs::symlink(root.path().join("private.ts"), app.join("escape.ts")).unwrap();
-        let escape = url::Url::from_file_path(alias.join("escape.ts")).unwrap();
-        assert!(validate_graph_specifier(escape.as_str(), &alias).is_err());
-    }
-
-    #[test]
-    fn rejects_existing_output_before_starting_deno() {
-        let root = tempfile::tempdir().unwrap();
-        assert!(prepare(root.path(), root.path(), Path::new("missing-deno")).is_err());
-    }
 }

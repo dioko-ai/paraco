@@ -4,15 +4,16 @@ set -euo pipefail
 base=$(mktemp -d); trap 'rm -rf "$base"' EXIT
 mkdir -p "$base/tools" "$base/target/fixture-target/release" "$base/input with spaces"
 printf '#!/bin/sh\nexit 0\n' > "$base/tools/cargo"
-printf '#!/bin/sh\necho deno 2.2.5\n' > "$base/input with spaces/deno"
+printf '#!/bin/sh\necho workerd 2026-10-26\n' > "$base/input with spaces/workerd"
+printf '#!/bin/sh\necho 0.28.2\n' > "$base/input with spaces/esbuild"
 printf '#!/bin/sh\nexit 0\n' > "$base/target/fixture-target/release/paraco"
 printf 'TEST NOTICE FIXTURE ONLY\n' > "$base/notice"
-chmod +x "$base/tools/cargo" "$base/input with spaces/deno" "$base/target/fixture-target/release/paraco"
+chmod +x "$base/tools/cargo" "$base/input with spaces/workerd" "$base/input with spaces/esbuild" "$base/target/fixture-target/release/paraco"
 # Hide sha256sum so this fixture also exercises macOS's shasum fallback.
 for tool in awk cat cp dirname du git grep gzip head ln mkdir mktemp mv perl rm rmdir sed shasum tar uname wc; do
   ln -s "$(command -v "$tool")" "$base/tools/$tool"
 done
-PATH="$base/tools" CARGO_TARGET_DIR="$base/target" scripts/build-bundle.sh --deno "$base/input with spaces/deno" --deno-notice "$base/notice" --third-party-notice "$base/notice" --target fixture-target --output "$base/output with spaces"
+PATH="$base/tools" CARGO_TARGET_DIR="$base/target" scripts/build-bundle.sh --workerd "$base/input with spaces/workerd" --esbuild "$base/input with spaces/esbuild" --workerd-notice "$base/notice" --compiler-notice "$base/notice" --third-party-notice "$base/notice" --target fixture-target --output "$base/output with spaces"
 version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)
 archive="$base/output with spaces/paraco-$version-fixture-target.tar.gz"
 perl scripts/validate-archive.pl "$archive" "$version"
@@ -27,7 +28,7 @@ with tarfile.open(archive) as t:
     root = t.getnames()[0]
     metadata = json.load(t.extractfile(root + '/bundle.json'))
     assert metadata['target'] == 'fixture-target'
-    assert metadata['denoVersion'] == '2.2.5'
+    assert metadata['workerdVersion'] == '2026-10-26'
     assert isinstance(metadata['sourceDirty'], bool)
     for path, expected in metadata['checksums'].items():
         assert hashlib.sha256(t.extractfile(root + '/' + path).read()).hexdigest() == expected

@@ -3,10 +3,10 @@
 # Args: installed bundle launcher, prepared artifact, hello app.
 set -euo pipefail
 launcher=$1 artifact=$2 hello=$3
-for tool in rustc cargo node deno; do
+for tool in rustc cargo node workerd esbuild; do
   if command -v "$tool" >/dev/null; then echo "unexpected system tool: $tool" >&2; exit 1; fi
 done
-echo 'Rust/cargo, Node, and system Deno absent'
+echo 'Rust/cargo, Node, workerd, and esbuild absent'
 ln -s "$launcher" /tmp/paraco-offline-launcher
 cd /
 child=

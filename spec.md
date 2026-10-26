@@ -1,3 +1,5 @@
+> Runtime migration update: the supported backend is now workerd. See [current implementation and release gates](docs/workerd-migration.md). Deno-specific decisions and test results below describe the previous runtime and are historical.
+
 # Paraco Open-Source Runtime and Application Framework
 
 ## Repository Scope

@@ -11,7 +11,7 @@ base = Path(sys.argv[1])
 for version in ('1', '2', '3'):
     root = f'paraco-{version}-test'
     with tarfile.open(base / f'{version}.tgz', 'w:gz', format=tarfile.USTAR_FORMAT) as t:
-        for name, data, mode in [('bin/paraco', b'#!/bin/sh\n', 0o755), ('libexec/paraco/deno', b'#!/bin/sh\n', 0o755), ('bundle.json', b'{}\n', 0o644)]:
+        for name, data, mode in [('bin/paraco', b'#!/bin/sh\n', 0o755), ('libexec/paraco/workerd', b'#!/bin/sh\n', 0o755), ('libexec/paraco/esbuild', b'#!/bin/sh\n', 0o755), ('bundle.json', b'{}\n', 0o644)]:
             h = tarfile.TarInfo(f'{root}/{name}'); h.size=len(data); h.mode=mode; t.addfile(h, io.BytesIO(data))
 raw = gzip.decompress((base / '3.tgz').read_bytes())
 corrupt = bytearray(raw); corrupt[0] ^= 1

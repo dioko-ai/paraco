@@ -1,29 +1,31 @@
 # Prepared application artifacts
 
-`paraco prepare APP --output ARTIFACT --deno /absolute/path/to/deno` copies an
-application into a new host-owned artifact, validates `paraco.json`, creates a
-Deno lockfile, and caches its dependency graph. It then asks Deno for the
-resolved graph and accepts file modules only when their resolved paths remain
-inside the copied application tree; HTTPS and JSR modules are recorded in the
-lock/cache. Preparation never starts the application entrypoint. The output
-directory must not already exist: preparation uses staging and only publishes it
-after Deno succeeds.
+`paraco prepare APP --output ARTIFACT --workerd /absolute/path/to/workerd` copies
+an application into a new host-owned artifact, validates `paraco.json`, and
+uses bundled esbuild to compile its TypeScript entrypoint and local imports to
+browser ES modules. Preparation records the pinned workerd runtime but never
+starts the application entrypoint. The output directory must not already exist:
+preparation stages the artifact and publishes it only after compilation and
+validation succeed.
 
-Run it with `paraco run-prepared ARTIFACT --port 3000`. Prepared execution
-checks source, lock, cache, and private-Deno digests plus the Deno version,
-copies dependencies into a disposable per-launch cache, and invokes Deno with
-`--cached-only --frozen --lock`; it cannot
-implicitly download dependencies. Keep the artifact directory private to the
+Run it with `paraco run-prepared ARTIFACT --port 3000`. Format 3 records the
+source tree and `app.js` under `code/`, along with a hash of the private runtime
+at `runtime/workerd`. Launch verifies those hashes and uses the compiled app;
+it does not invoke the compiler. Keep the artifact directory private to the
 host and do not edit it after preparation.
 
-The supported Deno configuration is deliberately limited to an app-root
-`deno.json` containing only string `imports` aliases. Symlinks, special files,
-and other Deno configuration fields are rejected. The existing `paraco run APP`
-command remains a development path and uses its own temporary cache; it is not
-a substitute for a prepared deployment.
+Preparation accepts the app entrypoint declared by `paraco.json` and bundles
+its local imports into browser ES modules. Symlinks, special files, and source
+modules that resolve outside the app tree are rejected. The existing
+`paraco run APP` command remains a development path and is not a substitute for
+prepared deployment.
 
-Artifact format 2 carries Deno at `runtime/deno`, relative to the artifact. It
-can be relocated without the preparation machine or its runtime installation.
-Format-1 artifacts require preparation again. Execution never writes into the
-verified dependency cache. `scripts/verify-prepared.py` checks repeated relocated
-launches and preservation of the previous revision after failed preparation.
+Format 3 is relocatable and contains no compiler. Older prepared formats require
+preparation again. Execution never writes into the verified artifact. The
+prepared-artifact verification script checks relocated launches and preservation
+of the previous revision after failed preparation.
+
+Prepared artifacts contain a native executable and are trusted host-generated
+outputs, not marketplace source packages. Their self-recorded hashes detect
+changes; they do not authenticate a downloaded runtime or publisher. Use verified
+Paraco releases and the approved source-package installation path for distribution.

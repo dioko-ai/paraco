@@ -50,7 +50,7 @@ cp "$archive" "$stage/input.tar.gz"
 archive_root=$(perl "$(dirname "$0")/validate-archive.pl" "$stage/input.tar.gz" "$version")
 tar -xzf "$stage/input.tar.gz" -C "$stage" --no-same-owner --no-same-permissions
 rm "$stage/input.tar.gz"
-[[ -x "$stage/$archive_root/bin/paraco" && -x "$stage/$archive_root/libexec/paraco/deno" && -f "$stage/$archive_root/bundle.json" ]] || { echo 'archive lacks the Paraco bundle contract' >&2; exit 1; }
+[[ -x "$stage/$archive_root/bin/paraco" && -x "$stage/$archive_root/libexec/paraco/workerd" && -x "$stage/$archive_root/libexec/paraco/esbuild" && -f "$stage/$archive_root/bundle.json" ]] || { echo 'archive lacks the Paraco bundle contract' >&2; exit 1; }
 [[ $(du -sk "$stage" | awk '{print $1}') -le 1048576 ]] || { echo 'extraction size rejected' >&2; exit 1; }
 target="$releases/$version"
 [[ ! -e $target && ! -L $target ]] || { echo 'release version already exists (immutable)' >&2; exit 1; }

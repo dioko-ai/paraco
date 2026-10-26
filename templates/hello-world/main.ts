@@ -48,9 +48,5 @@ export function handleRequest(request: Request): Response {
   return new Response("Not found", { status: 404 });
 }
 
-if (import.meta.main) {
-  Deno.serve({ port: Number(Deno.env.get("PORT") ?? "8000") }, handleRequest);
-}
-
 // Paraco owns the listener and calls this standard handler.
 export default { fetch: handleRequest };

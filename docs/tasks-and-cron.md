@@ -62,15 +62,17 @@ export default async (ctx: {
 };
 ```
 
-`ctx.execution` contains stable deployment, job, revision and run IDs. A fresh
-Deno process runs every invocation. There is no ambient filesystem, environment,
+`ctx.execution` contains stable deployment, job, revision and run IDs. A fresh workerd process runs every invocation. There is no ambient filesystem, environment,
 shell, credential, or unrestricted network permission. A resolved return marks
 success; a thrown error or failing process marks error. Timeout, cancellation,
 interruption and skipped occurrences have distinct outcomes.
 
-Publication type-checks without executing the module, validates its resolved
-module graph, and prepares an immutable offline artifact. This first task
-contract accepts self-contained modules; external task imports are rejected.
+Publication uses esbuild to parse and transform TypeScript without executing it;
+this is syntax validation, not TypeScript type checking. Static imports are
+rejected, so each task is self-contained. The immutable compiled task runs in
+workerd with no Node/Deno globals, runtime downloads, or ambient file access.
+Capability HTTP bindings travel over a private Unix socket to the Rust bridge,
+which applies the existing host-scoped task authorization and network policy.
 HTTP applications retain their existing prepared dependency support. Task AI,
 configuration/data and native desktop notifications are not exposed by this
 initial task adapter; the authoring app has its separately granted AI capability
@@ -119,7 +121,9 @@ use stable deduplication IDs. Notification presentation never changes execution
 success.
 
 Runtime state, task source, approval metadata, history and inbox share the SQLite
-backup. Missing executable artifacts can be recreated offline from the stored
+backup. Task modules have no Node or Deno globals and cannot access ambient files;
+use static imports with `with { type: "text" }` when embedding text assets in
+regular app modules (tasks themselves remain self-contained). Missing executable artifacts can be recreated offline from the stored
 approved self-contained source. Schema version 2 is required; older binaries
 must refuse it. Keep a pre-upgrade backup when testing a binary rollback.
 
@@ -136,10 +140,10 @@ published job untouched.
 
 ## Verification
 
-`npm run test:cron-runtime` exercises real Deno processes through the public
+`npm run test:cron-runtime` exercises real workerd processes through the public
 reference app: publication conflicts, success/error/timeout/cancel, no overlap,
 archive, restart, SIGKILL recovery, notification delivery and one-off deduplication.
 `npm run test:cron-browser` exercises the browser workflow in Chromium.
-`cargo test --bin paraco tasks` covers deterministic clock and state semantics.
+`cargo test --bin paraco tasks` covers deterministic clock, state, and task validation semantics.
 Native machine reboot and final signed release installation are separate gates;
 these tests do not establish those claims.

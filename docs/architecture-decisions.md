@@ -1,3 +1,5 @@
+> Runtime migration update: the supported backend is now workerd. See [current implementation and release gates](workerd-migration.md). Deno-specific decisions and test results below describe the previous runtime and are historical.
+
 # Foundation decisions
 
 These decisions define the first foundation slice. They do not claim that the
@@ -40,3 +42,13 @@ canonical containment after schema validation.
 
 Paraco uses Apache-2.0. This permissive license includes patent terms and is the
 selected option from the foundation plan; `LICENSE` is the authoritative text.
+
+## AD-005: portable datasets and immutable output artifacts
+
+Use installation-scoped private SQLite/D1 namespaces plus explicitly granted shared
+dataset aliases. Expose versioned JSON records rather than arbitrary SQL. Publish
+bounded artifact content and metadata atomically in the same database, with immutable
+identities, deterministic publication sequence, and saved execution input references.
+Keep configuration, credentials, and scheduling private. Large object storage and
+replication are deferred. See [platform evolution](platform-evolution.md) for the
+implemented contract, deployment configuration, limits, and verification scope.

@@ -1,4 +1,4 @@
-// Exercises public HTTP/task APIs against real supervised Deno processes.
+// Exercises public HTTP/task APIs against real supervised workerd processes.
 const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const os = require('node:os');
@@ -7,6 +7,7 @@ const net = require('node:net');
 const http = require('node:http');
 const {spawn, execFileSync} = require('node:child_process');
 const root = path.resolve(__dirname, '..');
+const binary = process.env.PARACO_BIN || path.join(root,'target/debug/paraco');
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function until(fn, label, ms=20000) {
   const deadline = Date.now()+ms;
@@ -29,7 +30,7 @@ async function freePort() { const s=net.createServer(); await new Promise(r=>s.l
    });
  }
  async function start() {
-   child=spawn(path.join(root,'target/debug/paraco'),['--log-dir',logs,'cron','--port',String(port)],{cwd:tmp,env:{...process.env,TMPDIR:tmp},stdio:['ignore','pipe','pipe']});
+   child=spawn(binary,['--log-dir',logs,'cron','--port',String(port)],{cwd:tmp,env:{...process.env,...(process.env.PARACO_TEST_EMPTY_PATH ? {PATH:"/nonexistent"} : {}),TMPDIR:tmp},stdio:['ignore','pipe','pipe']});
    child.stdout.on('data',b=>output+=b); child.stderr.on('data',b=>output+=b);
    await until(async()=>{const r=await call('/');return r.ok&&r.text.includes('editor');},'cron readiness');
  }
@@ -82,7 +83,7 @@ async function freePort() { const s=net.createServer(); await new Promise(r=>s.l
    const stateParent=path.join(tmp,'state');
    const [stateName]=await fs.readdir(stateParent);const stateRoot=path.join(stateParent,stateName);
    const backup=path.join(tmp,'backup.sqlite3');
-   execFileSync(path.join(root,'target/debug/paraco'),['backup','--state',stateRoot,'--output',backup]);
+   execFileSync(binary,['backup','--state',stateRoot,'--output',backup]);
    await fs.rm(path.join(stateRoot,'tasks'),{recursive:true,force:true});
    await fs.copyFile(backup,path.join(stateRoot,'state.sqlite3'));
    await start();

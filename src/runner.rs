@@ -11,7 +11,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
-// The guardian gives its Deno child five seconds after receiving our signal.
+// The guardian gives its workerd child five seconds after receiving our signal.
 // Leave it time to reap that child before escalating the guardian itself.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(7);
 const CONSOLE_QUEUE_RECORDS: usize = 256;
@@ -140,16 +140,14 @@ pub fn standalone_identity(app_path: &Path, log_dir: &Path) -> Result<String, St
 
 struct PreparedRuntime {
     runtime: std::path::PathBuf,
-    cache: std::path::PathBuf,
-    lock: std::path::PathBuf,
-    config: Option<std::path::PathBuf>,
+    code: std::path::PathBuf,
 }
 
-/// Owns every resource of one app. Dropping it always stops and reaps Deno.
+/// Owns every resource of one app. Dropping it always stops and reaps workerd.
 pub struct RunningApp {
     child: Child,
     // Kept open for a guardian-managed process. EOF is the guardian's proof
-    // that this host disappeared and it must reap Deno.
+    // that this host disappeared and it must reap workerd.
     _guardian_lifetime: Option<ChildStdin>,
     pub port: u16,
     output: Option<thread::JoinHandle<()>>,
@@ -207,13 +205,7 @@ impl RunningApp {
         stop: &AtomicBool,
         log: logs::AppLog,
     ) -> Result<Self, String> {
-        let artifact::PreparedApp {
-            app,
-            runtime,
-            cache,
-            lock,
-            config,
-        } = prepared;
+        let artifact::PreparedApp { app, runtime, code } = prepared;
         log.event("starting", "Starting prepared application");
         let result = Self::launch(
             app,
@@ -225,12 +217,7 @@ impl RunningApp {
             backend_token,
             stop,
             log.clone(),
-            Some(PreparedRuntime {
-                runtime,
-                cache,
-                lock,
-                config,
-            }),
+            Some(PreparedRuntime { runtime, code }),
             None,
         );
         if let Err(error) = &result {
@@ -253,6 +240,8 @@ impl RunningApp {
         prepared: Option<PreparedRuntime>,
         guardian_lease: Option<&std::fs::File>,
     ) -> Result<Self, String> {
+        app.validate_target("local")
+            .map_err(|error| error.to_string())?;
         let capability = if app.requests_ai {
             Some(Capability::start(&app, deployment_id, ai_config)?)
         } else {
@@ -284,23 +273,27 @@ impl RunningApp {
             Some(crate::storage::Service::start(
                 durable,
                 deployment_id.to_string(),
+                app.name.clone(),
+                serde_json::to_value(&app.outputs).map_err(|e| e.to_string())?,
             )?)
         } else {
             None
         };
         let temporary = tempfile::tempdir()
             .map_err(|error| format!("cannot create runtime temporary directory: {error}"))?;
-        // Deno writes runtime caches even with --cached-only. Keep immutable
-        // prepared dependencies pristine and discard per-launch cache writes.
-        let launch_cache = temporary.path().join("deno-cache");
-        if let Some(prepared) = &prepared {
-            artifact::copy_tree(&prepared.cache, &launch_cache)?;
-        }
         let nonce = readiness_nonce();
-        let entrypoint_url = url::Url::from_file_path(&app.entrypoint)
-            .map_err(|_| "cannot create entrypoint file URL")?;
+        if let Some(prepared) = &prepared {
+            std::fs::copy(
+                prepared.code.join("app.js"),
+                temporary.path().join("app.js"),
+            )
+            .map_err(|e| e.to_string())?;
+        } else {
+            crate::worker::compile(&app.entrypoint, &temporary.path().join("app.js"), &app.root)?;
+        }
         let bootstrap = serde_json::json!({
             "basePath": base_path,
+            "identity": {"applicationId": app.name, "installationId": deployment_id, "target": "local"},
             "tasks": tasks.as_ref().map(|s| serde_json::json!({"address":s.address,"token":s.token})),
             "storage": storage.as_ref().map(|s| serde_json::json!({"address":s.address,"token":s.token})),
             "backendToken": backend_token,
@@ -311,78 +304,38 @@ impl RunningApp {
         // Guardian consumes one framed bootstrap line and then retains stdin as
         // the owner lifetime pipe. Keep this delimiter in the shared host path.
         input.push(guardian::BOOTSTRAP_DELIMITER);
-        let deno = match &prepared {
+        let workerd = match &prepared {
             Some(p) => p.runtime.clone(),
             None => runtime::command_for_host()?,
         };
-        // The guardian owns the adapter and Deno after the host dies. Pass the
-        // already selected absolute runtime/cache so activation cannot swap it.
         let executable = std::env::current_exe()
-            .map_err(|e| format!("cannot locate Paraco guardian executable: {e}"))?
+            .map_err(|e| e.to_string())?
             .canonicalize()
-            .map_err(|e| format!("cannot resolve immutable Paraco guardian executable: {e}"))?;
+            .map_err(|e| e.to_string())?;
         let mut command = Command::new(executable);
         command.arg("__paraco_guardian");
         guardian::inherit_lease(&mut command, guardian_lease)?;
-        command.arg("run");
-        if let Some(prepared) = &prepared {
-            command
-                .arg("--cached-only")
-                .arg("--frozen")
-                .arg("--lock")
-                .arg(&prepared.lock);
-            if let Some(config) = &prepared.config {
-                command.arg("--config").arg(config);
-            } else {
-                command.arg("--no-config");
-            }
-        }
         command
-            .arg("--quiet")
-            .arg("--no-prompt")
-            .arg(format!("--allow-read={}", app.root.display()))
-            .arg(format!(
-                "--allow-net=127.0.0.1:{port}{}{}{}",
-                capability
-                    .as_ref()
-                    .map(|c| format!(",{},{}", c.address, c.http_address))
-                    .unwrap_or_default(),
-                tasks
-                    .as_ref()
-                    .map(|s| format!(",{}", s.address))
-                    .unwrap_or_default(),
-                storage
-                    .as_ref()
-                    .map(|s| format!(",{}", s.address))
-                    .unwrap_or_default()
-            ))
-            .arg(entrypoint_url.as_str())
+            .arg(temporary.path())
             .arg(port.to_string())
             .arg(&nonce)
-            .current_dir(&app.root)
             .env_clear()
-            .env("PARACO_GUARDIAN_DENO_DIR", &launch_cache)
-            .env("PARACO_GUARDIAN_DENO", deno)
+            .env("PARACO_GUARDIAN_WORKERD", workerd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        if let Some(path) = std::env::var_os("PATH") {
-            command.env("PATH", path);
-        }
-        // The guardian owns its temporary adapter directory. Preserve an
-        // operator-selected temporary root while keeping all other ambient
-        // environment out of the app process.
-        if let Some(tmpdir) = std::env::var_os("TMPDIR") {
-            command.env("TMPDIR", tmpdir);
+        if std::env::var("PARACO_ALLOW_UNSANDBOXED").as_deref() == Ok("1") {
+            command.env("PARACO_ALLOW_UNSANDBOXED", "1");
         }
         let child = command.spawn().map_err(|error| {
             if error.kind() == std::io::ErrorKind::NotFound {
-                "Deno was not found on PATH; install Deno and try again".to_string()
+                "workerd was not found on PATH; install workerd and try again".to_string()
             } else {
-                format!("cannot launch Deno: {error}")
+                format!("cannot launch workerd: {error}")
             }
         })?;
         log.pid(child.id());
+        log.event("spawned", "Application guardian spawned");
         let mut running = Self {
             child,
             _guardian_lifetime: None,
@@ -402,7 +355,7 @@ impl RunningApp {
             .ok_or("cannot initialize guardian")?;
         stdin
             .write_all(&input)
-            .map_err(|_| "cannot initialize Deno host")?;
+            .map_err(|_| "cannot initialize workerd host")?;
         running._guardian_lifetime = Some(stdin);
         let (ready_tx, ready_rx) = mpsc::sync_channel(1);
         running.output = Some(forward_stdout(
@@ -424,7 +377,7 @@ impl RunningApp {
         if let Some(status) = self
             .child
             .try_wait()
-            .map_err(|e| format!("cannot check Deno process: {e}"))?
+            .map_err(|e| format!("cannot check workerd process: {e}"))?
         {
             let error = format!("application exited unexpectedly with status {status}");
             self.log.event("failed", &error);
@@ -551,7 +504,7 @@ fn wait_until_ready(
         }
         if let Some(status) = child
             .try_wait()
-            .map_err(|error| format!("cannot check Deno process: {error}"))?
+            .map_err(|error| format!("cannot check workerd process: {error}"))?
         {
             return Err(format!(
                 "application exited during startup with status {status}"

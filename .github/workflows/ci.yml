@@ -20,14 +20,19 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.96.1
         with:
           components: rustfmt, clippy
-      - uses: denoland/setup-deno@v2
-        with:
-          deno-version: v2.9.8
       - uses: actions/setup-node@v4
         with:
           node-version: 22.14.0
           cache: npm
       - run: npm ci
+      - name: Expose pinned native tools
+        run: echo "$PWD/node_modules/.bin" >> "$GITHUB_PATH"
+      - name: Install Linux containment
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap
+      - name: Explicit trusted development tests on macOS
+        if: runner.os == 'macOS'
+        run: echo 'PARACO_ALLOW_UNSANDBOXED=1' >> "$GITHUB_ENV"
       - if: runner.os == 'Linux'
         run: npx playwright install --with-deps chromium
       - if: runner.os != 'Linux'
@@ -46,7 +51,7 @@ jobs:
           python3 scripts/verify-foundation.py 2>&1 | tee verification-artifacts/foundation.log
           python3 scripts/verify-prepared.py 2>&1 | tee verification-artifacts/prepared.log
           python3 scripts/verify-marketplace.py 2>&1 | tee verification-artifacts/marketplace.log
-          deno test templates/hello-world/main_test.ts
+          node --experimental-strip-types --test templates/hello-world/main_test.ts
       - name: Verify native archive composition
         run: |
           npm run test:installer
@@ -55,12 +60,13 @@ jobs:
           fixture_dir=$(mktemp -d)
           trap 'rm -rf "$fixture_dir"' EXIT
           echo 'TEST FIXTURE ONLY: not a distributable third-party notice.' > "$fixture_dir/notice"
-          bash tests/bundle-smoke.sh --deno "$(command -v deno)" --deno-notice "$fixture_dir/notice" --third-party-notice "$fixture_dir/notice" --target "$(rustc -vV | sed -n 's/^host: //p')"
+          esbuild_bin="node_modules/@esbuild/$(node -p '`${process.platform}-${process.arch}`')/bin/esbuild"
+          bash tests/bundle-smoke.sh --workerd "$(command -v workerd)" --esbuild "$esbuild_bin" --workerd-notice "$fixture_dir/notice" --compiler-notice "$fixture_dir/notice" --third-party-notice "$fixture_dir/notice" --target "$(rustc -vV | sed -n 's/^host: //p')"
       - name: Retain verification environment
         if: always()
         run: |
           mkdir -p verification-artifacts
-          { rustc --version; deno --version; node --version; npx playwright --version; uname -a; } > verification-artifacts/environment.txt
+          { rustc --version; workerd --version; node_modules/@esbuild/$(node -p '`${process.platform}-${process.arch}`')/bin/esbuild --version; node --version; npx playwright --version; uname -a; } > verification-artifacts/environment.txt
       - uses: actions/upload-artifact@v4
         if: always()
         with:

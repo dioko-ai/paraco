@@ -1,0 +1,14 @@
+import app from "./main";
+import { cloudflare } from "../../runtime/cloudflare";
+
+export default cloudflare(app, ["storage"], {
+  schemaVersion: 1,
+  name: "artifact-notebook",
+  entrypoint: "main.ts",
+  targets: ["local", "cloudflare"],
+  capabilities: ["storage"],
+  outputs: {
+    report: { mediaType: "text/plain" },
+    evaluation: { mediaType: "application/json" },
+  },
+});

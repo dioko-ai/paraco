@@ -1,4 +1,4 @@
-//! Real CLI/Deno acceptance tests. Unix signals and process groups are intentional.
+//! Real CLI/workerd acceptance tests. Unix signals and process groups are intentional.
 #![cfg(unix)]
 
 use std::fs::{self, File};
@@ -20,21 +20,21 @@ struct App {
 }
 
 impl App {
-    fn start(source: &str, port: u16, manifest: &str, missing_deno: bool) -> Self {
-        Self::start_config(source, port, manifest, missing_deno, None)
+    fn start(source: &str, port: u16, manifest: &str, missing_workerd: bool) -> Self {
+        Self::start_config(source, port, manifest, missing_workerd, None)
     }
 
     fn start_config(
         source: &str,
         port: u16,
         manifest: &str,
-        missing_deno: bool,
+        missing_workerd: bool,
         config: Option<&std::path::Path>,
     ) -> Self {
-        if !missing_deno {
+        if !missing_workerd {
             assert!(
-                Command::new("deno").arg("--version").output().is_ok(),
-                "runtime integration tests require Deno on PATH"
+                workerd_path().exists(),
+                "runtime integration tests require workerd (set WORKERD_BIN)"
             );
         }
         let dir = tempfile::tempdir().unwrap();
@@ -63,6 +63,12 @@ impl App {
             }
         }
         let mut command = Command::new(env!("CARGO_BIN_EXE_paraco"));
+        if !missing_workerd {
+            command
+                .env("PARACO_WORKERD", workerd_path())
+                .env("PARACO_WORKERD_VERSION", workerd_version())
+                .env("PATH", test_path());
+        }
         command.arg("--log-dir").arg(log_dir.path().join("logs"));
         command
             .args([
@@ -75,8 +81,16 @@ impl App {
             .stderr(File::create(dir.path().join("stderr")).unwrap())
             .stdin(Stdio::null())
             .process_group(0);
-        if missing_deno {
+        if missing_workerd {
             command.env("PATH", dir.path());
+            command.env_remove("PARACO_WORKERD");
+            command.env_remove("PARACO_WORKERD_VERSION");
+            command.env(
+                "PARACO_ESBUILD",
+                std::env::current_dir()
+                    .unwrap()
+                    .join("node_modules/.bin/esbuild"),
+            );
         }
         if let Some(config) = config {
             command.arg("--ai-config").arg(config);
@@ -163,7 +177,7 @@ impl App {
     }
 
     fn assert_released(&self, pid: i32) {
-        assert_eq!(unsafe { libc::kill(pid, 0) }, -1, "Deno still exists");
+        assert_eq!(unsafe { libc::kill(pid, 0) }, -1, "workerd still exists");
         assert_eq!(
             std::io::Error::last_os_error().raw_os_error(),
             Some(libc::ESRCH)
@@ -172,19 +186,19 @@ impl App {
     }
 
     fn pid(&self) -> i32 {
-        self.request("/pid")
-            .split("\r\n\r\n")
-            .nth(1)
+        fs::read_to_string(self._log_dir.path().join("logs/current.jsonl"))
             .unwrap()
-            .trim()
-            .parse()
-            .unwrap()
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter_map(|record| record["pid"].as_i64())
+            .next()
+            .expect("host log should record the supervised guardian pid") as i32
     }
 }
 
 impl Drop for App {
     fn drop(&mut self) {
-        // Kill the whole isolated test group, including Deno, even after a panic.
+        // Kill the whole isolated test group, including workerd, even after a panic.
         unsafe {
             libc::kill(-(self.child.id() as i32), libc::SIGKILL);
         }
@@ -193,11 +207,40 @@ impl Drop for App {
 }
 
 const MANIFEST: &str = r#"{"name":"test","entrypoint":"main.ts","capabilities":[]}"#;
+
+fn workerd_path() -> std::path::PathBuf {
+    std::env::var_os("WORKERD_BIN")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("node_modules/.bin/workerd"))
+}
+
+fn workerd_version() -> String {
+    String::from_utf8(
+        Command::new(workerd_path())
+            .arg("--version")
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap()
+    .trim()
+    .strip_prefix("workerd ")
+    .unwrap()
+    .to_owned()
+}
+
+fn test_path() -> std::ffi::OsString {
+    let mut paths = vec![std::env::current_dir().unwrap().join("node_modules/.bin")];
+    paths.extend(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    ));
+    std::env::join_paths(paths).unwrap()
+}
 const HEALTHY: &str = r#"
 console.log("app stdout");
 console.error("app stderr");
 export default { fetch(request) {
-  return new Response(new URL(request.url).pathname === "/pid" ? String(Deno.pid) : "Hello from Paraco");
+  return new Response("Hello from Paraco");
 }};
 "#;
 
@@ -226,11 +269,27 @@ fn serves_http_forwards_logs_and_reaps_on_ctrl_c() {
 
 #[test]
 fn forced_runtime_death_reaps_even_an_app_with_a_blocked_event_loop() {
-    let mut app = App::run(&format!(
-        "{HEALTHY}\nsetTimeout(() => {{ console.log('BLOCKED'); while (true) {{}} }}, 1000);"
-    ));
+    let source = r#"export default {fetch(request) {
+  if (new URL(request.url).pathname === "/block") {
+    console.log("BLOCKED");
+    while (true) {}
+  }
+  return new Response("healthy");
+}};"#;
+    let mut app = App::run(source);
     app.ready();
     let pid = app.pid();
+    let port = app.port;
+    let request = thread::spawn(move || {
+        if let Ok(mut stream) = TcpStream::connect(("127.0.0.1", port)) {
+            let _ = write!(
+                stream,
+                "GET /block HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+            );
+            let mut response = Vec::new();
+            let _ = stream.read_to_end(&mut response);
+        }
+    });
     let deadline = Instant::now() + LIMIT;
     while !app.stdout().contains("BLOCKED") {
         assert!(Instant::now() < deadline, "{}", app.logs());
@@ -240,10 +299,11 @@ fn forced_runtime_death_reaps_even_an_app_with_a_blocked_event_loop() {
         unsafe { libc::kill(app.child.id() as i32, libc::SIGKILL) },
         0
     );
+    let _ = request.join();
     assert!(!app.wait().success());
     let deadline = Instant::now() + Duration::from_secs(8);
     while unsafe { libc::kill(pid, 0) } == 0 {
-        assert!(Instant::now() < deadline, "Deno survived runtime death");
+        assert!(Instant::now() < deadline, "workerd survived runtime death");
         thread::sleep(Duration::from_millis(25));
     }
     app.assert_released(pid);
@@ -251,15 +311,21 @@ fn forced_runtime_death_reaps_even_an_app_with_a_blocked_event_loop() {
 
 #[test]
 fn forced_runtime_death_during_import_reaps_the_starting_app() {
-    let mut app = App::run("console.log(`PID:${Deno.pid}`); while (true) {}");
+    let mut app =
+        App::run("while (true) {} export default {fetch() {return new Response('never');}};");
     let deadline = Instant::now() + LIMIT;
-    let pid: i32 = loop {
-        if let Some(pid) = app
-            .stdout()
-            .lines()
-            .find_map(|line| line.strip_prefix("PID:"))
+    let pid = loop {
+        if let Some(pid) = fs::read_to_string(app._log_dir.path().join("logs/current.jsonl"))
+            .ok()
+            .and_then(|contents| {
+                contents
+                    .lines()
+                    .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                    .filter_map(|record| record["pid"].as_i64())
+                    .next()
+            })
         {
-            break pid.parse().unwrap();
+            break pid as i32;
         }
         assert!(Instant::now() < deadline, "{}", app.logs());
         thread::sleep(Duration::from_millis(25));
@@ -273,7 +339,7 @@ fn forced_runtime_death_during_import_reaps_the_starting_app() {
     while unsafe { libc::kill(pid, 0) } == 0 {
         assert!(
             Instant::now() < deadline,
-            "starting Deno survived runtime death"
+            "starting workerd survived runtime death"
         );
         thread::sleep(Duration::from_millis(25));
     }
@@ -281,10 +347,10 @@ fn forced_runtime_death_during_import_reaps_the_starting_app() {
 }
 
 #[test]
-fn missing_deno_is_actionable() {
+fn missing_workerd_is_actionable() {
     let mut app = App::start(HEALTHY, free_port(), MANIFEST, true);
     assert!(!app.wait().success());
-    assert!(app.logs().contains("Deno was not found on PATH"));
+    assert!(app.logs().contains("workerd was not found on PATH"));
 }
 
 #[test]
@@ -292,17 +358,29 @@ fn invalid_manifest_fails_before_launch() {
     let mut app = App::start(HEALTHY, free_port(), "{}", true);
     assert!(!app.wait().success());
     assert!(app.logs().contains("invalid manifest"));
-    assert!(!app.logs().contains("Deno was not found"));
+    assert!(!app.logs().contains("workerd was not found"));
 }
 
 #[test]
 fn invalid_export_and_import_fail_without_readiness() {
-    for source in ["export default {};", "import './missing.ts';"] {
-        let mut app = App::run(source);
-        assert!(!app.wait().success());
-        assert!(app.logs().contains("application exited during startup"));
-        assert!(!app.stdout().contains("listening on http://"));
-    }
+    let mut app = App::run("import './missing.ts';");
+    assert!(!app.wait().success());
+    assert!(
+        app.logs().contains("application compilation failed"),
+        "{}",
+        app.logs()
+    );
+    assert!(!app.stdout().contains("listening on http://"));
+
+    // workerd starts the worker but the host adapter rejects the missing
+    // fetch handler on readiness probes.
+    let mut app = App::run("export default {};");
+    assert!(!app.wait().success());
+    assert!(
+        app.logs()
+            .contains("app default export must provide fetch(request, context)")
+    );
+    assert!(!app.stdout().contains("listening on http://"));
 }
 
 #[test]
@@ -354,9 +432,10 @@ fn unexpected_exit_is_reported_and_reaped() {
 
 #[test]
 fn stubborn_app_is_forced_to_exit_after_grace_period() {
-    let mut app = App::run(&format!("setInterval(() => {{}}, 1000);\n{HEALTHY}"));
+    let mut app = App::run(HEALTHY);
     app.ready();
     let pid = app.pid();
+    assert_eq!(unsafe { libc::kill(pid, libc::SIGSTOP) }, 0);
     let start = Instant::now();
     app.interrupt();
     assert!(app.wait().success());
@@ -370,23 +449,15 @@ fn stubborn_app_is_forced_to_exit_after_grace_period() {
 
 #[test]
 fn startup_timeout_reaps_an_app_that_never_exports() {
-    let mut app = App::run(
-        "console.log(`PID:${Deno.pid}`); setInterval(() => {}, 1000); await new Promise(() => {});",
-    );
+    let mut app =
+        App::run("while (true) {} export default {fetch() {return new Response('never');}};");
     assert!(!app.wait().success());
     assert!(
-        app.logs()
-            .contains("application did not start within 10 seconds"),
+        app.logs().contains("workerd readiness deadline exceeded"),
         "{}",
         app.logs()
     );
-    let pid = app
-        .stdout()
-        .lines()
-        .find_map(|line| line.strip_prefix("PID:"))
-        .unwrap()
-        .parse()
-        .unwrap();
+    let pid = app.pid();
     app.assert_released(pid);
 }
 
@@ -408,14 +479,7 @@ fn repository_hello_example_serves_expected_response() {
 
 #[test]
 fn prepare_accepts_resolved_contained_parent_imports_and_ordinary_source_text() {
-    let deno = std::env::var_os("PATH")
-        .into_iter()
-        .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
-        .map(|directory| directory.join("deno"))
-        .find(|candidate| candidate.is_file())
-        .expect("runtime integration tests require Deno on PATH")
-        .canonicalize()
-        .unwrap();
+    let workerd = workerd_path().canonicalize().unwrap();
     let source = tempfile::tempdir().unwrap();
     let nested = source.path().join("src");
     fs::create_dir(&nested).unwrap();
@@ -439,12 +503,18 @@ fn prepare_accepts_resolved_contained_parent_imports_and_ordinary_source_text() 
     let status = Command::new(env!("CARGO_BIN_EXE_paraco"))
         .args(["prepare", source.path().to_str().unwrap(), "--output"])
         .arg(&artifact)
-        .arg("--deno")
-        .arg(deno)
+        .arg("--workerd")
+        .arg(workerd)
+        .env("PATH", test_path())
         .status()
         .unwrap();
     assert!(status.success());
     assert!(artifact.join("paraco-artifact.json").is_file());
+    assert!(artifact.join("code/app.js").is_file());
+    assert!(artifact.join("runtime/workerd").is_file());
+    let metadata: serde_json::Value =
+        serde_json::from_slice(&fs::read(artifact.join("paraco-artifact.json")).unwrap()).unwrap();
+    assert_eq!(metadata["format"], 3);
 
     let port = free_port();
     let stdout = destination.path().join("stdout");
@@ -455,6 +525,7 @@ fn prepare_accepts_resolved_contained_parent_imports_and_ordinary_source_text() 
         .stdout(File::create(&stdout).unwrap())
         .stderr(File::create(&stderr).unwrap())
         .stdin(Stdio::null())
+        .env("PATH", test_path())
         .process_group(0)
         .spawn()
         .unwrap();
@@ -473,7 +544,6 @@ fn prepare_accepts_resolved_contained_parent_imports_and_ordinary_source_text() 
 const AI_MANIFEST: &str = r#"{"name":"test","entrypoint":"main.ts","capabilities":["ai"]}"#;
 const AI_APP: &str = r#"
 export default { async fetch(request, context) {
-  if (new URL(request.url).pathname === "/pid") return new Response(String(Deno.pid));
   try {
     const result = await context.ai.complete({prompt: "private prompt", provider: "fake", model: "small"});
     return Response.json(result);
@@ -570,10 +640,8 @@ fn repository_ai_example_uses_runtime_default() {
 }
 
 #[test]
-fn persistent_single_app_logs_bound_large_lines_and_preserve_invalid_utf8() {
-    let mut app = App::run(&format!(
-        "Deno.stdout.writeSync(new Uint8Array([255, 10])); console.log('x'.repeat(200000));\n{HEALTHY}"
-    ));
+fn persistent_single_app_logs_bound_large_lines() {
+    let mut app = App::run(&format!("console.log('x'.repeat(200000));\n{HEALTHY}"));
     app.ready();
     assert!(app.request("/").contains("200 OK"));
     app.interrupt();
@@ -583,7 +651,6 @@ fn persistent_single_app_logs_bound_large_lines_and_preserve_invalid_utf8() {
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
-    assert!(records.iter().any(|r| r["message"] == "�"));
     let large = records.iter().find(|r| r["truncated"] == true).unwrap();
     assert_eq!(large["message"].as_str().unwrap().len(), 16 * 1024);
     assert!(

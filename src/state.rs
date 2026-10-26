@@ -25,6 +25,7 @@ struct Disk {
 
 pub struct Store {
     db: rusqlite::Connection,
+    pub platform_config: crate::platform::Config,
     _lock: File,
     disk: Disk,
     pub tasks: Option<std::sync::Arc<crate::tasks::Tasks>>,
@@ -72,7 +73,7 @@ impl Store {
         let version: u32 = db
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .map_err(|e| e.to_string())?;
-        if version > 2 {
+        if version > 3 {
             return Err("state schema is newer than this runtime".into());
         }
         if version == 0 {
@@ -104,9 +105,8 @@ impl Store {
             }
             tx.commit().map_err(|e| e.to_string())?;
         }
-        // Version 2 reserves the durable task schema; older binaries must refuse it.
-        db.execute_batch("PRAGMA user_version=2;")
-            .map_err(|e| e.to_string())?;
+        crate::platform::migrate(&mut db)?;
+        let platform_config = crate::platform::Config::load(root)?;
         let deployments = {
             let mut query = db
                 .prepare("SELECT source,id,desired FROM deployments")
@@ -126,6 +126,7 @@ impl Store {
                 .map_err(|e| e.to_string())?
         };
         Ok(Self {
+            platform_config,
             tasks: None,
             task_grants: BTreeMap::new(),
             db,
@@ -158,6 +159,78 @@ impl Store {
             .map_err(|e| e.to_string())?;
         output.sync_all().map_err(|e| e.to_string())?;
         Ok(())
+    }
+
+    /// First launch records the owner's installation-time capability decision.
+    /// Later source updates cannot expand that baseline without explicit approval.
+    pub fn check_capabilities(
+        &mut self,
+        installation: &str,
+        app: &crate::manifest::App,
+        approve: bool,
+    ) -> Result<(), String> {
+        use rusqlite::OptionalExtension;
+        let requested: Vec<&str> = [
+            ("ai", app.requests_ai),
+            ("storage", app.requests_storage),
+            ("tasks", app.requests_tasks),
+        ]
+        .into_iter()
+        .filter_map(|(name, wanted)| wanted.then_some(name))
+        .collect();
+        let existing: Option<(String, String)> = self
+            .db
+            .query_row(
+                "SELECT application,capabilities FROM installation_grants WHERE installation=?1",
+                [installation],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+        if let Some((application, capabilities)) = &existing {
+            if application != &app.name {
+                return Err("application identity changed; install as a new source instead of reusing another application's installation".into());
+            }
+            let granted: Vec<String> =
+                serde_json::from_str(capabilities).map_err(|e| e.to_string())?;
+            if !approve
+                && requested
+                    .iter()
+                    .any(|cap| !granted.iter().any(|g| g == cap))
+            {
+                return Err("application update requests additional capabilities; review the manifest and use paraco approve-capabilities before restarting".into());
+            }
+        }
+        if existing.is_none() || approve {
+            self.db.execute("INSERT INTO installation_grants VALUES(?1,?2,?3) ON CONFLICT(installation) DO UPDATE SET capabilities=excluded.capabilities",rusqlite::params![installation,app.name,serde_json::to_string(&requested).map_err(|e|e.to_string())?]).map_err(|e|e.to_string())?;
+        }
+        Ok(())
+    }
+
+    pub fn platform(
+        &mut self,
+        installation: &str,
+        application: &str,
+        outputs: &serde_json::Value,
+        request: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        if !self.disk.deployments.values().any(|d| d.id == installation) {
+            return Err("unknown installation".into());
+        }
+        let config = self
+            .platform_config
+            .installations
+            .get(installation)
+            .cloned()
+            .unwrap_or_default();
+        crate::platform::execute(
+            &mut self.db,
+            installation,
+            application,
+            outputs,
+            &config,
+            request,
+        )
     }
 
     pub fn storage(
@@ -479,3 +552,7 @@ mod tests {
         assert!(Store::open(root.path()).is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "platform_state_tests.rs"]
+mod platform_state_tests;

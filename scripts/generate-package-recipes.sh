@@ -12,7 +12,7 @@ mkdir -p "$output"
 cat > "$output/paraco.rb" <<RUBY
 # Generated review artifact only: do not publish this formula until release gates pass.
 class Paraco < Formula
-  desc "Local application host with a bundled private Deno runtime"
+  desc "Local application host with a bundled private workerd runtime"
   homepage "https://github.com/dioko-ai/paraco"
   url "$url"
   version "$version"
@@ -29,7 +29,8 @@ cat > "$output/linux-deb/DEBIAN/control" <<DEB
 Package: paraco
 Version: $version
 Architecture: $target
-Description: Paraco bundle (private bundled Deno; service opt-in)
+Depends: bubblewrap
+Description: Paraco bundle (private bundled workerd; service opt-in)
 DEB
 cat > "$output/linux-deb/DEBIAN/postrm" <<'SH'
 #!/bin/sh
@@ -42,7 +43,7 @@ cat > "$output/macos-pkg/Distribution.xml" <<XML
 <installer-gui-script minSpecVersion="1"><title>Paraco $version</title><options customize="never"/></installer-gui-script>
 XML
 cat > "$output/package-manifest.json" <<JSON
-{"version":"$version","target":"$target","artifactUrl":"$url","sha256":"$sha","runtime":"bundled private Deno; system Deno is unsupported","service":"opt-in only","removal":"preserve user state/configuration/credentials","channel":"unsigned generated review artifact; unpublished"}
+{"version":"$version","target":"$target","artifactUrl":"$url","sha256":"$sha","runtime":"bundled private workerd; system workerd is unsupported","service":"opt-in only","removal":"preserve user state/configuration/credentials","channel":"unsigned generated review artifact; unpublished"}
 JSON
 cat > "$output/RELEASE-GATES.md" <<'MD'
 # Release acceptance gates
@@ -51,9 +52,11 @@ This directory is generated tooling, not a release, tap, package-manager action,
 or support claim. Before publication, retain a reviewed trusted-provenance and
 artifact-authenticity outcome, dependency-vulnerability review outcome, native
 clean-machine/package evidence, and platform support evidence. macOS requires
-successful verification of **both** bundled executables (`bin/paraco` and
-`libexec/paraco/deno`) and the final signed/notarized package. Missing native
+successful verification of all bundled executables (`bin/paraco`,
+`libexec/paraco/workerd`, and `libexec/paraco/esbuild`) and the final signed/notarized package. Missing native
 tools or credentials is a blocker, never a pass. Package removal must preserve
 user state/configuration/credentials; service setup remains explicit opt-in.
+Linux requires working unprivileged namespaces and bubblewrap. Hard per-app
+resource limits and verified macOS containment remain publication gates.
 MD
 echo "generated unpublished Homebrew, Debian-layout, and macOS-package-layout recipes in $output"

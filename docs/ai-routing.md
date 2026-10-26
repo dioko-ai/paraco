@@ -3,7 +3,7 @@
 This increment retains the deterministic fake backend and adds an opt-in
 OpenAI-compatible provider with completion and streaming support. The fake backend makes no network
 requests and needs no credentials or accounts. A real provider is enabled only
-by host configuration; the CLI and Deno host connect either backend to apps
+by host configuration; the Rust host connects either backend to apps
 requesting `ai` through `context.ai.complete({ prompt, provider?, model? })`.
 
 The trusted host constructs `Config` and supplies the caller identity separately
@@ -54,7 +54,7 @@ Tests cover every selection form, default precedence and fallback, absent routes
 and defaults, ambiguous models, duplicate provider/model routes, blank selections,
 invalid configuration, unknown callers, capability/grant separation, cross-app
 credential denial, and deterministic response content. The full suite remains
-`cargo test` with Deno on `PATH` on Unix.
+`cargo test` with workerd and esbuild on `PATH` on Unix.
 
 ## Local capability transport
 
@@ -66,82 +66,46 @@ paraco identity ./examples/ai
 
 Use that exact output as the key in `apps` in the host-owned AI configuration.
 Replace `REPLACE_WITH_PARACO_IDENTITY_OUTPUT` in `examples/ai-config.json`, then
-run `paraco run ./examples/ai --ai-config ./examples/ai-config.json`.
+run `paraco run ./examples/ai --ai-config /path/to/ai-config.json`.
 
-The identity is stable for the same canonical source. Moving to another source,
-or removing a hosted source from its server configuration, creates or retires a
-deployment respectively; grants do not follow an app display name. Configuration is read only when explicitly passed; it must be outside
-the canonical app directory so ordinary app read permissions do not include it.
-The example configuration illustrates credential identities (not secret values),
-routes, app grants, and optional app/runtime/provider defaults. Unknown fields
-and invalid references fail before Deno starts. An app cannot declare grants in
-its manifest. Without configuration the interface exists but calls are denied.
+The identity is stable for the same canonical source. Configuration is read only
+when explicitly passed and must live outside the app package. Unknown fields and
+invalid references fail before workerd starts. An app cannot declare grants in
+its manifest. Without configuration, AI calls are denied.
 
-The Rust host opens an ephemeral IPv4 loopback listener and fresh token per
-AI-enabled run. Those listeners authenticate the individual launch, then forward
-to one long-lived host provider service per canonical AI configuration and its
-contents. Provider clients, credential routing, and host-wide admission are shared across apps
-using the same configuration; an app launch never creates its own provider
-concurrency budget.
-A cryptographically random 256-bit token binds requests to that launched app.
-The host delivers address and token over stdin, consumed before app import;
-neither is supplied in command arguments or inherited environment variables.
-The adapter grants network access only to the app listener and capability port.
-Apps without `ai` receive no AI interface or capability listener.
+For an AI-enabled launch, the workerd adapter exposes the scoped capability over
+its private HTTP binding. Requests cross a private Unix socket to a Rust bridge,
+which authenticates the launch and translates them to the existing host AI
+transport. The host applies deployment grants, credential routing, deadlines,
+and admission limits. Apps without `ai` receive no binding. Provider secrets
+remain in host-owned files and are never passed to an app.
 
-This is the private transport used by `context.ai`; the loopback
-OpenAI-compatible HTTP endpoint is described below.
-Each connection carries one JSON request and response, each prefixed by a
-four-byte big-endian length. Frames are limited to 64 KiB. Unknown request
-fields, including caller identity and grants, are rejected. The configured
-provider timeout is also the private transport and adapter deadline (30 seconds
-by default), so a valid provider request is not abandoned by the SDK before the
-host's routing deadline. Requests are handled serially by the private capability
-transport. Real-provider work has an eight-request host-wide semaphore shared
-across every configuration, plus configurable per-service and per-deployment
-semaphores, a bounded admission queue, total deadlines, and a 1 MiB response
-bound. Cancellation or timeout drops
-its permits. The real transport accepts HTTPS only, rejects URL userinfo and
-fragments, disables redirects and ambient proxies, and redacts transport failures.
-The listener is stopped and joined on normal exit, failed startup, and Ctrl+C.
+Capability requests use the deployment identity selected by the host; a request
+cannot claim another identity. Configuration and launch tokens do not appear in
+command arguments, application environment variables, or app-visible logs. The
+AI transport does not log prompts, responses, configuration contents, or tokens.
+Applications can still log data they choose to print.
 
-## Loopback OpenAI-compatible HTTP subset
+The application process is not isolated from malicious programs running as the
+same OS user. Linux bubblewrap containment is enabled; secure macOS containment is
+not implemented and normal execution fails closed there. Trusted development may
+explicitly set `PARACO_ALLOW_UNSANDBOXED=1`. See [workerd migration limits](workerd-migration.md).
 
-Each AI-capable launch also receives a separate loopback address and fresh
-launch token in its private bootstrap (`ai.http`). It is not a management token,
-provider credential, or deployment name. Clients send `Authorization: Bearer
-<token>` to `POST /v1/chat/completions`. Only a single `user` message, optional
-`model`, and `stream: false` (or omitted) are accepted. The response has the
-non-streaming `choices[0].message.content` shape. `stream: true` returns
-`text/event-stream` content-only deltas followed by `[DONE]`. All other paths, origins
-(CORS is intentionally disabled), multiple messages, tools, caller
-identity, provider URLs, and credential references are rejected. Requests are
-limited to 64 KiB and use the same deployment-bound policy and provider bounds
-as `context.ai.complete`; errors are sanitized JSON error objects.
+The real transport accepts HTTPS only, rejects URL userinfo and fragments,
+disables redirects and ambient proxies, and redacts transport failures. Provider
+SSE is decoded incrementally and must terminate with `[DONE]`. External provider
+compatibility, remote TLS fixtures, and production workload measurements remain
+unverified.
 
-Success is `{ selection: { provider, model }, text }`. Policy or transport
-failures reject the promise. The transport does not log requests, responses,
-configuration contents, or tokens. Applications can log their own data; this
-mechanism does not prevent them from doing so.
+## Verification
 
-The token represents the whole application process. This supervised Deno setup
-is not a complete sandbox against malicious same-user processes or untrusted
-apps. The capability does not contain provider secrets; real secret values are
-not accepted in config, arguments, browser storage, or logs. They remain in
-host-owned files outside application permissions.
+Run policy tests with:
 
-Rust/unit coverage observes policy, decoder, credential-redaction, URL
-validation, frame-bound, and listener-cleanup paths. The local HTTPS fixture
-exercises real Reqwest completion and SSE through the capability transport;
-Deno integration tests exercise standalone and hosted grants and lifecycle
-renewal. See [current status](status.md) for observed results. Paid-provider
-compatibility and production workload measurements remain unverified.
+```sh
+cargo test --offline --test ai
+```
 
-Provider SSE is decoded incrementally at byte boundaries (including split UTF-8)
-and must terminate with `[DONE]`; malformed or truncated upstream events do not
-produce a successful terminal event. Output and total duration use the existing
-provider bounds; a client write failure aborts the upstream future and releases
-its permits. TLS-provider integration against an external service is not
-exercised in this repository; deterministic policy, decoder, credential
-redaction, and URL validation tests are local. Multi-deployment saturation and
-remote TLS fixture tests remain pending.
+The local HTTPS fixture exercises real Reqwest completion and SSE through the
+capability transport. Workerd integration tests cover standalone and hosted
+grants and lifecycle renewal. See [current status](status.md) for observed
+results.

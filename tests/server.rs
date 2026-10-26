@@ -1,4 +1,4 @@
-//! Multi-app acceptance tests use actual Deno processes and the public gateway.
+//! Multi-app acceptance tests use actual workerd processes and the public gateway.
 #![cfg(unix)]
 use std::{
     fs::{self, File},
@@ -13,7 +13,9 @@ use std::{
 use tempfile::TempDir;
 
 const APP: &str = r#"
+let instanceId;
 export default {async fetch(request, context) {
+  instanceId ??= crypto.randomUUID();
   const url = new URL(request.url);
   switch (url.pathname) {
     case "/": return new Response(`<link rel="stylesheet" href="style.css"><a href="${context.basePath}next">Next</a>`);
@@ -21,7 +23,7 @@ export default {async fetch(request, context) {
     case "/redirect": return new Response(null, {status: 302, headers: {location: `${context.basePath}next?from=redirect`}});
     case "/relative": return new Response(null, {status: 302, headers: {location: "next"}});
     case "/next": return new Response("arrived");
-    case "/inspect": return Response.json({path: url.pathname, query: url.search, base: context.basePath, body: await request.text(), method: request.method, host: url.host, pid: Deno.pid, header: request.headers.get("x-test"), forwarded: request.headers.get("x-forwarded-host")});
+    case "/inspect": return Response.json({path: url.pathname, query: url.search, base: context.basePath, body: await request.text(), method: request.method, host: url.host, instanceId, header: request.headers.get("x-test"), forwarded: request.headers.get("x-forwarded-host")});
     case "/hang": return await new Promise(() => {});
     case "/throw": throw new Error("request failure");
     default: return new Response("app missing", {status: 404});
@@ -33,6 +35,7 @@ struct Server {
     child: Child,
     dir: TempDir,
     port: u16,
+    log_path: std::path::PathBuf,
     control_root: std::sync::Arc<TempDir>,
 }
 impl Server {
@@ -85,10 +88,26 @@ impl Server {
             child,
             dir,
             port,
+            log_path: logs.to_owned(),
             control_root,
         }
     }
     fn spawn(dir: &Path, config: &Path, port: u16, logs: &Path, control_root: &Path) -> Child {
+        let workerd = std::env::var_os("WORKERD_BIN")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from("node_modules/.bin/workerd"));
+        let workerd = workerd.canonicalize().unwrap();
+        let version = Command::new(&workerd).arg("--version").output().unwrap();
+        let version = String::from_utf8(version.stdout)
+            .unwrap()
+            .trim()
+            .strip_prefix("workerd ")
+            .unwrap()
+            .to_owned();
+        let mut paths = vec![std::env::current_dir().unwrap().join("node_modules/.bin")];
+        paths.extend(std::env::split_paths(
+            &std::env::var_os("PATH").unwrap_or_default(),
+        ));
         Command::new(env!("CARGO_BIN_EXE_paraco"))
             .arg("--log-dir")
             .arg(logs)
@@ -103,6 +122,9 @@ impl Server {
             .env("ALL_PROXY", "http://127.0.0.1:1")
             // The Unix control socket must not share an ambient /tmp namespace.
             .env("TMPDIR", control_root)
+            .env("PARACO_WORKERD", &workerd)
+            .env("PARACO_WORKERD_VERSION", version)
+            .env("PATH", std::env::join_paths(paths).unwrap())
             .stdin(Stdio::null())
             .stdout(File::create(dir.join("stdout")).unwrap())
             .stderr(File::create(dir.join("stderr")).unwrap())
@@ -174,8 +196,89 @@ impl Server {
         }
     }
     fn inspect(&self, name: &str) -> serde_json::Value {
-        let response = self.wait_for(&format!("/apps/{name}/inspect"), "\"pid\"");
+        let response = self.wait_for(&format!("/apps/{name}/inspect"), "\"instanceId\"");
         serde_json::from_str(response.split_once("\r\n\r\n").unwrap().1).unwrap()
+    }
+    // The guest isolate cannot report an operating-system pid. The log store
+    // records the host guardian pid for each app; on Linux its direct child is
+    // the workerd process whose readiness marker also appears in stdout.
+    fn guardian_pid(&self, name: &str) -> i32 {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            let records =
+                fs::read_to_string(self.log_path.join("current.jsonl")).unwrap_or_default();
+            if let Some(pid) = records.lines().rev().find_map(|line| {
+                let record: serde_json::Value = serde_json::from_str(line).ok()?;
+                (record["app"] == name && record["event"] == "spawned")
+                    .then(|| record["pid"].as_i64())
+                    .flatten()
+            }) {
+                return pid as i32;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "no host pid recorded for {name}: {}",
+                self.logs()
+            );
+            thread::sleep(Duration::from_millis(25));
+        }
+    }
+    fn runtime_pid(&self, name: &str) -> i32 {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let guardian = self.guardian_pid(name);
+            let output = Command::new("ps")
+                .args(["-eo", "pid=,ppid=,comm="])
+                .output()
+                .unwrap();
+            let rows = String::from_utf8(output.stdout).unwrap();
+            let processes: Vec<(i32, i32, &str)> = rows
+                .lines()
+                .filter_map(|line| {
+                    let mut fields = line.split_whitespace();
+                    Some((
+                        fields.next()?.parse().ok()?,
+                        fields.next()?.parse().ok()?,
+                        fields.next()?,
+                    ))
+                })
+                .collect();
+            let mut descendants = vec![guardian];
+            for _ in 0..8 {
+                let children: Vec<_> = processes
+                    .iter()
+                    .filter(|(_, parent, _)| descendants.contains(parent))
+                    .collect();
+                if let Some((pid, _, _)) = children
+                    .iter()
+                    .find(|(_, _, command)| command.contains("workerd") || *command == "runtime")
+                {
+                    return *pid;
+                }
+                if children.is_empty() {
+                    break;
+                }
+                descendants.extend(children.iter().map(|(pid, _, _)| *pid));
+            }
+            assert!(
+                Instant::now() < deadline,
+                "no runtime descendant for {name} guardian {guardian}"
+            );
+            thread::sleep(Duration::from_millis(25));
+        }
+    }
+    fn sandbox_pid(&self, name: &str) -> i32 {
+        let guardian = self.guardian_pid(name);
+        let output = Command::new("ps")
+            .args(["-o", "pid=", "--ppid", &guardian.to_string()])
+            .output()
+            .unwrap();
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .split_whitespace()
+            .next()
+            .and_then(|pid| pid.parse().ok())
+            .unwrap_or_else(|| panic!("no sandbox child for {name} guardian {guardian}"))
     }
     fn command(&self, action: &str, app: Option<&str>) -> std::process::Output {
         let mut command = Command::new(env!("CARGO_BIN_EXE_paraco"));
@@ -319,7 +422,11 @@ fn free_port() -> u16 {
         .port()
 }
 fn assert_reaped(pid: i32) {
-    assert_eq!(unsafe { libc::kill(pid, 0) }, -1, "Deno {pid} still exists");
+    assert_eq!(
+        unsafe { libc::kill(pid, 0) },
+        -1,
+        "runtime process {pid} still exists"
+    );
     assert_eq!(
         std::io::Error::last_os_error().raw_os_error(),
         Some(libc::ESRCH)
@@ -336,7 +443,7 @@ fn routes_two_apps_assets_bodies_queries_and_redirects() {
     );
     let one = server.inspect("one");
     let two = server.inspect("two");
-    assert_ne!(one["pid"], two["pid"]);
+    assert_ne!(one["instanceId"], two["instanceId"]);
     assert_eq!(one["base"], "/");
     assert_eq!(two["base"], "/");
     let root = server.wait_for("/", "2 of 2 apps running");
@@ -401,8 +508,8 @@ fn routes_two_apps_assets_bodies_queries_and_redirects() {
             .ends_with("\r\n\r\n")
     );
     server.stop(libc::SIGINT);
-    assert_reaped(one["pid"].as_i64().unwrap() as i32);
-    assert_reaped(two["pid"].as_i64().unwrap() as i32);
+    assert_reaped(server.guardian_pid("one"));
+    assert_reaped(server.guardian_pid("two"));
 }
 
 #[test]
@@ -413,8 +520,8 @@ fn failures_and_hanging_requests_leave_other_apps_and_dashboard_available() {
         ("broken", "export default {};"),
     ]);
     server.ready();
-    let healthy = server.inspect("healthy");
-    let crash = server.inspect("crash");
+    server.inspect("healthy");
+    server.inspect("crash");
     server.wait_for("/", "application exited during startup");
     assert!(server.request("GET", "/apps/broken/", "").contains("503"));
     assert!(
@@ -422,7 +529,7 @@ fn failures_and_hanging_requests_leave_other_apps_and_dashboard_available() {
             .request("GET", "/apps/healthy/throw", "")
             .contains("500")
     );
-    let crash_pid = crash["pid"].as_i64().unwrap() as i32;
+    let crash_pid = server.runtime_pid("crash");
     unsafe {
         libc::kill(crash_pid, libc::SIGKILL);
     }
@@ -442,7 +549,7 @@ fn failures_and_hanging_requests_leave_other_apps_and_dashboard_available() {
     );
     assert!(server.request("GET", "/", "").contains("Your local apps"));
     server.stop(libc::SIGTERM);
-    assert_reaped(healthy["pid"].as_i64().unwrap() as i32);
+    assert_reaped(server.guardian_pid("healthy"));
     assert_reaped(crash_pid);
 }
 
@@ -510,20 +617,13 @@ fn empty_dashboard_and_repository_ai_example() {
 
 #[test]
 fn shutdown_during_startup_reaps_every_child() {
-    let source = "console.log(`CHILD:${Deno.pid}`); setInterval(() => {}, 1000); await new Promise(() => {});";
+    let source = "while (true) {}";
     let mut server = Server::run(&[("slow-one", source), ("slow-two", source)]);
     server.ready();
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while server.logs().matches("CHILD:").count() != 2 {
-        assert!(Instant::now() < deadline, "{}", server.logs());
-        thread::sleep(Duration::from_millis(25));
-    }
-    let pids: Vec<i32> = server
-        .logs()
-        .lines()
-        .filter_map(|line| line.strip_prefix("CHILD:"))
-        .map(|pid| pid.parse().unwrap())
-        .collect();
+    let pids = [
+        server.guardian_pid("slow-one"),
+        server.guardian_pid("slow-two"),
+    ];
     server.stop(libc::SIGINT);
     for pid in pids {
         assert_reaped(pid);
@@ -581,13 +681,14 @@ fn gateway_rejects_foreign_hosts_upgrades_and_oversized_bodies() {
 fn lifecycle_commands_isolate_apps_and_reap_replaced_processes() {
     let mut server = Server::run(&[("one", APP), ("two", APP)]);
     server.ready();
-    let first = server.inspect("one")["pid"].as_i64().unwrap() as i32;
-    let other = server.inspect("two")["pid"].clone();
+    let first = server.guardian_pid("one");
+    let first_instance = server.inspect("one")["instanceId"].clone();
+    let other = server.inspect("two")["instanceId"].clone();
     assert_eq!(server.control("status", None).as_array().unwrap().len(), 2);
     for _ in 0..3 {
         server.control("start", Some("one"));
     }
-    assert_eq!(server.inspect("one")["pid"], first);
+    assert_eq!(server.inspect("one")["instanceId"], first_instance);
     for _ in 0..3 {
         server.control("stop", Some("one"));
     }
@@ -595,20 +696,20 @@ fn lifecycle_commands_isolate_apps_and_reap_replaced_processes() {
     assert_reaped(first);
     assert!(server.request("GET", "/apps/one/", "").contains("503"));
     assert!(server.request("GET", "/", "").contains("stopped"));
-    assert_eq!(server.inspect("two")["pid"], other);
+    assert_eq!(server.inspect("two")["instanceId"], other);
     thread::sleep(Duration::from_millis(150));
     assert_eq!(server.control("status", Some("one"))[0]["state"], "stopped");
     server.control("start", Some("one"));
     server.state("one", "running");
-    let second = server.inspect("one")["pid"].as_i64().unwrap() as i32;
+    let second = server.guardian_pid("one");
     assert_ne!(first, second);
     assert_eq!(server.inspect("one")["base"], "/");
     server.control("restart", Some("one"));
     server.state("one", "running");
     assert_reaped(second);
-    let third = server.inspect("one")["pid"].as_i64().unwrap() as i32;
+    let third = server.guardian_pid("one");
     assert_ne!(second, third);
-    assert_eq!(server.inspect("two")["pid"], other);
+    assert_eq!(server.inspect("two")["instanceId"], other);
     let missing = server.command("start", Some("missing"));
     assert!(!missing.status.success());
     assert!(String::from_utf8_lossy(&missing.stderr).contains("unknown application"));
@@ -623,11 +724,11 @@ fn failed_apps_can_be_fixed_and_started_without_restarting_server() {
     let mut server = Server::run(&[("broken", "export default {};"), ("healthy", APP)]);
     server.ready();
     assert_eq!(server.state("broken", "failed")["desired"], "running");
-    let healthy = server.inspect("healthy")["pid"].clone();
+    let healthy = server.inspect("healthy")["instanceId"].clone();
     fs::write(server.dir.path().join("broken/main.ts"), APP).unwrap();
     server.control("start", Some("broken"));
     server.state("broken", "running");
-    let pid = server.inspect("broken")["pid"].as_i64().unwrap() as i32;
+    let pid = server.runtime_pid("broken");
     unsafe {
         libc::kill(pid, libc::SIGKILL);
     }
@@ -637,21 +738,20 @@ fn failed_apps_can_be_fixed_and_started_without_restarting_server() {
     assert_reaped(pid);
     server.control("restart", Some("broken"));
     server.state("broken", "running");
-    assert_ne!(server.inspect("broken")["pid"], pid);
-    assert_eq!(server.inspect("healthy")["pid"], healthy);
+    assert_ne!(
+        server.inspect("broken")["instanceId"],
+        serde_json::Value::Null
+    );
+    assert_eq!(server.inspect("healthy")["instanceId"], healthy);
     server.stop(libc::SIGTERM);
 }
 
 #[test]
 fn stop_cancels_startup_and_latest_command_wins_without_orphans() {
-    let source = "console.log(`CHILD:${Deno.pid}`); setInterval(() => {}, 1000); await new Promise(() => {});";
+    let source = "while (true) {}";
     let mut server = Server::run(&[("slow", source), ("healthy", APP)]);
     server.ready();
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while !server.logs().contains("CHILD:") {
-        assert!(Instant::now() < deadline);
-        thread::sleep(Duration::from_millis(25));
-    }
+    let initial_pid = server.guardian_pid("slow");
     let start = Instant::now();
     server.control("stop", Some("slow"));
     server.state("slow", "stopped");
@@ -660,13 +760,7 @@ fn stop_cancels_startup_and_latest_command_wins_without_orphans() {
         server.control(action, Some("slow"));
     }
     server.state("slow", "stopped");
-    for pid in server
-        .logs()
-        .lines()
-        .filter_map(|line| line.strip_prefix("CHILD:"))
-    {
-        assert_reaped(pid.parse().unwrap());
-    }
+    assert_reaped(initial_pid);
     server.inspect("healthy");
     fs::write(server.dir.path().join("slow/main.ts"), APP).unwrap();
     server.control("start", Some("slow"));
@@ -753,8 +847,10 @@ fn ai_capability_is_recreated_and_released_on_lifecycle_changes() {
     fs::write(
         app.join("main.ts"),
         r#"
+let instanceId;
 export default { async fetch(_request, context) {
- return Response.json({pid: Deno.pid, result: await context.ai.complete({prompt: "hello"})});
+ instanceId ??= crypto.randomUUID();
+ return Response.json({instanceId, result: await context.ai.complete({prompt: "hello"})});
 }};
 "#,
     )
@@ -775,12 +871,11 @@ export default { async fetch(_request, context) {
     fs::write(server.dir.path().join("ai.json"), format!(r#"{{"credentials":{{"fake":"fake"}},"routes":[{{"selection":{{"provider":"fake","model":"test"}},"credential":"fake"}}],"apps":{{"{deployment_id}":{{"credential_grants":["fake"]}}}},"default":{{"provider":"fake","model":"test"}}}}"#)).unwrap();
     server.control("restart", Some("ai"));
     server.state("ai", "running");
-    let first = server.wait_for("/apps/ai/", "Fake AI response");
-    let first: serde_json::Value =
-        serde_json::from_str(first.split_once("\r\n\r\n").unwrap().1).unwrap();
+    let first_pid = server.guardian_pid("ai");
+    server.wait_for("/apps/ai/", "Fake AI response");
     server.control("restart", Some("ai"));
     server.state("ai", "running");
-    assert_reaped(first["pid"].as_i64().unwrap() as i32);
+    assert_reaped(first_pid);
     server.wait_for("/apps/ai/", "Fake AI response");
     #[cfg(target_os = "linux")]
     let ports = server.capability_ports();
@@ -805,12 +900,10 @@ export default { async fetch(_request, context) {
 
 #[test]
 fn slow_stop_keeps_control_and_other_apps_responsive() {
-    let source = format!(
-        "{APP}\nDeno.addSignalListener('SIGTERM', () => {{}}); setInterval(() => {{}}, 1000);"
-    );
-    let mut server = Server::run(&[("stubborn", &source), ("healthy", APP)]);
+    let mut server = Server::run(&[("stubborn", APP), ("healthy", APP)]);
     server.ready();
-    let pid = server.inspect("stubborn")["pid"].as_i64().unwrap() as i32;
+    let pid = server.sandbox_pid("stubborn");
+    assert_eq!(unsafe { libc::kill(pid, libc::SIGSTOP) }, 0);
     let start = Instant::now();
     server.control("stop", Some("stubborn"));
     let status = server.control("status", Some("stubborn"));
@@ -861,18 +954,16 @@ fn occupied_control_socket_is_preserved_and_launches_no_apps() {
 
 #[test]
 fn forced_death_then_immediate_restart_waits_for_apps_and_recovers_socket() {
-    let stubborn = format!("{APP}\nsetInterval(() => {{}}, 1000);");
-    let mut server = Server::run(&[("one", &stubborn), ("two", APP)]);
+    let stubborn = APP;
+    let mut server = Server::run(&[("one", stubborn), ("two", APP)]);
     server.ready();
-    let pids = [
-        server.inspect("one")["pid"].as_i64().unwrap() as i32,
-        server.inspect("two")["pid"].as_i64().unwrap() as i32,
-    ];
+    let pids = [server.runtime_pid("one"), server.runtime_pid("two")];
+    let guardians = [server.guardian_pid("one"), server.guardian_pid("two")];
     // The guardian also owns the adapter/cache directory after runtime death.
     let temporary: Vec<_> = fs::read_dir(server.control_root.path())
         .unwrap()
         .map(|entry| entry.unwrap().path())
-        .filter(|path| path.join("paraco-deno-host.ts").exists())
+        .filter(|path| path.join("adapter.js").exists())
         .collect();
     assert_eq!(temporary.len(), 2);
     assert_eq!(
@@ -892,11 +983,22 @@ fn forced_death_then_immediate_restart_waits_for_apps_and_recovers_socket() {
     for pid in pids {
         assert_reaped(pid);
     }
+    for pid in guardians {
+        assert_reaped(pid);
+    }
+    let cleanup_deadline = Instant::now() + Duration::from_secs(5);
+    while temporary.iter().any(|path| path.exists()) {
+        assert!(
+            Instant::now() < cleanup_deadline,
+            "runtime temporary directory was not cleaned"
+        );
+        thread::sleep(Duration::from_millis(25));
+    }
     for path in temporary {
         assert!(!path.exists(), "orphan runtime temporary directory");
     }
     for name in ["one", "two"] {
-        assert!(!pids.contains(&(server.inspect(name)["pid"].as_i64().unwrap() as i32)));
+        assert_ne!(server.guardian_pid(name), pids[0]);
     }
     server.stop(libc::SIGTERM);
 }
@@ -905,7 +1007,7 @@ fn forced_death_then_immediate_restart_waits_for_apps_and_recovers_socket() {
 fn a_second_runtime_cannot_disturb_the_live_runtime() {
     let mut live = Server::run(&[("one", APP)]);
     live.ready();
-    let pid = live.inspect("one")["pid"].clone();
+    let pid = live.inspect("one")["instanceId"].clone();
     let dir = Server::fixture(&[(
         "unexpected",
         "console.log('UNEXPECTED_START'); export default {};",
@@ -916,7 +1018,7 @@ fn a_second_runtime_cannot_disturb_the_live_runtime() {
         Server::start_with_control(dir, &config, live.port, &logs, live.control_root.clone());
     assert!(!other.wait_exit().success());
     assert!(!other.logs().contains("UNEXPECTED_START"));
-    assert_eq!(live.inspect("one")["pid"], pid);
+    assert_eq!(live.inspect("one")["instanceId"], pid);
     assert_eq!(live.control("status", Some("one"))[0]["state"], "running");
     live.stop(libc::SIGTERM);
 }
@@ -982,8 +1084,8 @@ fn control_rejects_insecure_or_symlinked_directories() {
 fn browser_management_controls_apps_and_releases_listener() {
     let mut server = Server::run(&[("hello", APP), ("other", APP)]);
     server.ready();
-    let old_pid = server.inspect("hello")["pid"].as_u64().unwrap() as i32;
-    let other_pid = server.inspect("other")["pid"].clone();
+    let old_pid = server.guardian_pid("hello");
+    let other_pid = server.inspect("other")["instanceId"].clone();
     let (port, token) = server.management();
     assert_ne!(port, server.port);
     let headers = format!(
@@ -1013,7 +1115,7 @@ fn browser_management_controls_apps_and_releases_listener() {
         ("restart", "running"),
     ] {
         let before = if action == "restart" {
-            Some(server.inspect("hello")["pid"].clone())
+            Some(server.inspect("hello")["instanceId"].clone())
         } else {
             None
         };
@@ -1022,10 +1124,10 @@ fn browser_management_controls_apps_and_releases_listener() {
         assert!(response.starts_with("HTTP/1.0 200"), "{response}");
         server.state("hello", state);
         if let Some(before) = before {
-            assert_ne!(server.inspect("hello")["pid"], before);
-            assert_reaped(before.as_u64().unwrap() as i32);
+            assert_ne!(server.inspect("hello")["instanceId"], before);
+            assert_reaped(old_pid);
         }
-        assert_eq!(server.inspect("other")["pid"], other_pid);
+        assert_eq!(server.inspect("other")["instanceId"], other_pid);
     }
     assert_reaped(old_pid);
     server.stop(libc::SIGTERM);
@@ -1037,7 +1139,7 @@ fn browser_management_controls_apps_and_releases_listener() {
 fn browser_management_rejects_unauthorized_cross_origin_and_invalid_commands() {
     let mut server = Server::run(&[("hello", APP)]);
     server.ready();
-    let pid = server.inspect("hello")["pid"].clone();
+    let pid = server.inspect("hello")["instanceId"].clone();
     let (port, token) = server.management();
     let origin = format!("Origin: http://127.0.0.1:{port}\r\n");
     let auth = format!("Authorization: Bearer {token}\r\n");
@@ -1094,17 +1196,22 @@ fn browser_management_rejects_unauthorized_cross_origin_and_invalid_commands() {
             .request("POST", "/api/apps", command)
             .starts_with("HTTP/1.0 404")
     );
-    assert_eq!(server.inspect("hello")["pid"], pid);
+    assert_eq!(server.inspect("hello")["instanceId"], pid);
     server.stop(libc::SIGTERM);
 }
 
 #[test]
 fn persistent_logs_identify_apps_and_launches_and_survive_server_exit() {
-    let source = format!("console.log('startup-out'); console.error('startup-error');\n{APP}");
+    let source = format!(
+        "console.log('startup-out'); console.error('startup-error'); console.error('startup-failure-detail');\n{APP}"
+    );
     let mut server = Server::run(&[
         ("hello", &source),
         ("other", APP),
-        ("broken", "throw new Error('startup-failure-detail');"),
+        (
+            "broken",
+            "throw new Error('startup-failure-detail'); export default {fetch() {return new Response('unreachable')}};",
+        ),
     ]);
     server.ready();
     server.inspect("hello");
@@ -1246,21 +1353,34 @@ mod log_store;
 
 #[test]
 fn automatic_recovery_is_bounded_cancellable_and_isolated() {
-    let crash = "setTimeout(() => Deno.exit(9), 300); export default {fetch() {return new Response('up');}};";
+    let crash = "export default {fetch() {return new Response('up');}};";
     let dir = Server::fixture(&[("crash", crash), ("healthy", APP)]);
     let config = dir.path().join("server.json");
     fs::write(&config, r#"{"apps":[{"path":"crash","restart":{"onFailure":true,"maxRetries":2,"backoffMs":500,"maxBackoffMs":1000}},{"path":"healthy"}]}"#).unwrap();
     let mut server = Server::start(dir, &config, free_port());
     server.ready();
-    server.state("crash", "backoff");
+    server.state("crash", "running");
+    unsafe {
+        assert_eq!(libc::kill(server.runtime_pid("crash"), libc::SIGKILL), 0);
+    }
     server.wait_for("/apps/healthy/next", "arrived");
     // Correct the app before its scheduled retry, then confirm recovery.
     fs::write(server.dir.path().join("crash/main.ts"), APP).unwrap();
     server.state("crash", "running");
     server.wait_for("/apps/crash/next", "arrived");
-    // A manual restart resets the budget; repeated crashes exhaust it.
+    // A manual restart resets the budget; host-side kills exercise recovery.
     fs::write(server.dir.path().join("crash/main.ts"), crash).unwrap();
     server.control("restart", Some("crash"));
+    for _ in 0..2 {
+        server.state("crash", "running");
+        unsafe {
+            assert_eq!(libc::kill(server.runtime_pid("crash"), libc::SIGKILL), 0);
+        }
+    }
+    server.state("crash", "running");
+    unsafe {
+        assert_eq!(libc::kill(server.runtime_pid("crash"), libc::SIGKILL), 0);
+    }
     let failed = server.state("crash", "failed");
     assert!(
         failed["error"]
@@ -1290,8 +1410,9 @@ fn automatic_recovery_is_bounded_cancellable_and_isolated() {
     let count = launches();
     thread::sleep(Duration::from_millis(1200));
     assert_eq!(launches(), count);
+    fs::write(server.dir.path().join("crash/main.ts"), "while (true) {}").unwrap();
     server.control("start", Some("crash"));
-    server.state("crash", "backoff");
+    server.state("crash", "starting");
     server.control("stop", Some("crash"));
     server.state("crash", "stopped");
     let count = launches();

@@ -49,8 +49,11 @@ The installed `paraco-install.json` records the approval and provenance. It is a
 receipt, not a signature or a launch-time integrity guarantee. Installed sources
 remain editable, like other local apps. For verified offline runtime artifacts,
 use the existing `paraco prepare` and `paraco run-prepared` commands after install.
-Source packages do not bundle Deno or dependency caches. Dependencies should be
-vendored for reproducibility; installation does not resolve or execute imports.
+Source packages do not bundle workerd or esbuild. App package dependencies are
+bundled into browser ES modules during compile or preparation; there are no runtime
+downloads. Use `paraco prepare` and `paraco run-prepared` to create a relocatable
+format-3 artifact with digest-verified workerd and compiled code. The app cannot
+access ambient files or Node/Deno globals.
 
 ## Catalog v1
 
@@ -146,5 +149,5 @@ python3 scripts/verify-marketplace.py
 The integration check packages the template, installs through the public CLI,
 launches the installed app, probes its page and health endpoint, and verifies that
 checksum corruption and reinstall attempts fail. It uses temporary directories
-and requires Deno on PATH. GitHub download verification is separate and requires
+and requires workerd `2026-10-26` and esbuild `0.28.2` on PATH. GitHub download verification is separate and requires
 the published release.

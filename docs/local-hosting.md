@@ -6,12 +6,15 @@ Run several app directories and local dashboards in one foreground server:
 cargo run -- serve --config ./examples/server.json
 ```
 
-Open `http://127.0.0.1:3000/`. Use `--port 8787` to choose another port. Deno must
-be on `PATH`. The terminal also prints a private management dashboard link on a
+Open `http://127.0.0.1:3000/`. Use `--port 8787` to choose another port. Source
+development requires workerd and esbuild on `PATH`; a bundle supplies both. The
+terminal also prints a private management dashboard link on a
 separate loopback port, with start, stop, and restart controls. See
 [local lifecycle](local-lifecycle.md#browser-management) for authorization.
-There is no runtime installation or service registration in this
-increment. Ctrl+C or SIGTERM stops the server and all its apps on Unix.
+Linux execution requires `/usr/bin/bwrap` with unprivileged user and network
+namespaces. macOS fails closed by default because secure containment is not
+implemented; `PARACO_ALLOW_UNSANDBOXED=1` permits trusted development code only.
+Ctrl+C or SIGTERM stops the server and its apps on Unix.
 
 ## Configuration
 
@@ -103,10 +106,10 @@ cache its status. It is read-only and requires no external assets or services.
 Running means the adapter bound its listener and the process has not exited;
 it is not an application health probe.
 
-Each app runs in its own supervised Deno process, using the same owner and cleanup
-implementation as `paraco run`. Deno chooses an ephemeral loopback port and reports
-that port after binding. This avoids allocating a free port and hoping it remains
-free before startup. The public gateway binds before any app is launched.
+Each app runs in a supervised workerd process, using the same guardian and cleanup
+implementation as `paraco run`. The Rust host passes an inherited TCP listener to
+workerd; the app service accepts only the configured HTTP binding. This avoids allocating a free port and hoping it remains free before startup.
+The public gateway binds before any app is launched.
 
 Startup happens independently: a slow import does not prevent the dashboard or
 another app from serving. Startup times out after ten seconds. A failed or crashed
@@ -131,14 +134,15 @@ of the remaining M1 cron/scheduler gates.
 Use `paraco logs <app>` even after the server stops.
 
 On shutdown, supervisors stop apps concurrently, send SIGTERM on Unix, and force
-termination after five seconds if needed. Every Deno child is reaped and its
+termination after five seconds if needed. Every workerd child is reaped and its
 capability listener and temporary files are cleaned up. Apps still starting are
 also cleaned up. The gateway stops accepting connections; in-flight requests may
-be interrupted. Background operation and OS service integration come later.
+be interrupted. Optional user-service setup is available; its native release verification remains pending.
 
 ## Current limits
 
-- This is loopback-only hosting for trusted local apps. Each hosted app uses a
+- The public gateway is loopback-only. Apps run in the configured workerd
+  containment; see [workerd migration limits](workerd-migration.md). Each hosted app uses a
   distinct `.localhost` browser origin, and cross-origin `Origin` requests are
   rejected without CORS headers. The gateway drops response cookies that request
   a `Domain` attribute and gives every app launch a private loopback authorization
@@ -160,7 +164,7 @@ be interrupted. Background operation and OS service integration come later.
 
 ## Verification
 
-With Deno on `PATH`, run:
+With workerd and esbuild on `PATH` (provided by `npm ci` for development), run:
 
 ```sh
 cargo fmt --check

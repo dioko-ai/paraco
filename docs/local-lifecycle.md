@@ -92,8 +92,10 @@ any `TMPDIR` override). Management commands do not use browser cookies, HTTP
 routes, or application capability tokens.
 
 This provides a local user boundary; it does not isolate other programs running
-as that user. Apps are still trusted local code under the existing documented
-Deno permission limits. The gateway dashboard remains read-only. Browser management uses a separate
+as that user. Apps are not isolated from the same OS user. Linux app execution uses bubblewrap
+with unprivileged user and network namespaces; macOS currently fails closed for
+normal execution. Trusted development can explicitly set
+`PARACO_ALLOW_UNSANDBOXED=1`. See [workerd migration limits](workerd-migration.md). The gateway dashboard remains read-only. Browser management uses a separate
 loopback origin with a per-server credential, as described below.
 
 Control messages have size limits and timeouts. Normal server shutdown removes
@@ -108,10 +110,10 @@ Do not delete ownership lock files: their stable inode coordinates all owners.
 
 Each app runs beneath a small Rust guardian process. The runtime keeps a private
 pipe open to that guardian; closing the pipe or killing the runtime closes the
-ownership channel. The guardian sends Deno SIGTERM, allows five seconds for
+ownership channel. The guardian sends workerd SIGTERM, allows five seconds for
 graceful exit, then kills and reaps it if necessary. This also works during app
-import and when JavaScript's event loop is blocked. The guardian owns the temporary
-adapter/cache directory and removes it after Deno exits. Persistent logs remain.
+startup and when JavaScript's event loop is blocked. The guardian owns the
+temporary host/runtime files and removes them after workerd exits. Persistent logs remain.
 
 For `serve`, guardians retain the endpoint ownership lock until cleanup completes.
 An immediate restart waits for them before recovering the stale socket and
@@ -186,12 +188,12 @@ Integration tests cover independent app control, repeated requests, changed
 process identities, process reaping, failure repair, startup cancellation, rapid
 command changes, slow shutdown, management access restrictions, malformed and
 stalled clients, occupied sockets, and AI policy/restart paths. The Rust/unit
-suite does not itself establish Deno-process integration evidence.
+suite does not itself establish workerd process integration evidence.
 Crash tests kill the runtime during startup and with a blocked app event loop,
-restart immediately with multiple apps, verify Deno reaping and temporary-directory
+restart immediately with multiple apps, verify workerd reaping and temporary-directory
 cleanup, and preserve live or unexpected control endpoints. These tests run in the
-Unix suite for Linux and macOS when its Deno prerequisite is available. The
-current pinned target is Deno 2.2.5. See [current status](status.md) for
+Unix suite with npm-installed workerd `2026-10-26` and esbuild `0.28.2`; trusted
+macOS development runs require `PARACO_ALLOW_UNSANDBOXED=1`. See [current status](status.md) for
 current implementation commands and retained observations. September
 Linux/macOS lifecycle evidence remains dated in
 [the verification record](verification-2026-09-21.md); it does not establish
@@ -205,7 +207,7 @@ npm run test:installer
 npm run test:bundle-contract
 ```
 
-Cron runtime checks require the pinned Deno runtime; browser checks require the
+Cron runtime checks require the pinned workerd runtime and esbuild compiler; browser checks require the
 configured Node/Playwright/Chromium tools. The Unix lifecycle suite requires
 local sockets and subprocess signals.
 
