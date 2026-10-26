@@ -181,7 +181,7 @@ mod tests {
         std::os::unix::fs::symlink(bin.join("paraco"), &launcher).unwrap();
         assert_eq!(
             resolve_from_executable(&launcher).unwrap(),
-            lib.join("deno")
+            lib.join("deno").canonicalize().unwrap()
         );
     }
     #[test]

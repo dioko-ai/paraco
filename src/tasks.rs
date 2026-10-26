@@ -502,7 +502,9 @@ impl Tasks {
             .prefix(".prepare-")
             .tempdir_in(&self.root)
             .map_err(err)?;
-        let dir = staging.path();
+        // Pass the same physical path to Deno and the graph validator. macOS
+        // temporary directories can be reached through the /var symlink.
+        let dir = staging.path().canonicalize().map_err(err)?;
         let source = dir.join("task.ts");
         fs::write(&source, &draft.source).map_err(err)?;
         // A narrow initial dependency contract: self-contained TypeScript only.
@@ -534,7 +536,7 @@ impl Tasks {
         }
         let graph: Value =
             serde_json::from_str(&graph).map_err(|_| "invalid dependency graph".to_string())?;
-        let entry = url::Url::from_file_path(source.canonicalize().map_err(err)?)
+        let entry = url::Url::from_file_path(&source)
             .map_err(|_| "invalid source path")?
             .to_string();
         let modules = graph
@@ -2002,6 +2004,14 @@ mod tests {
     #[test]
     fn offline_preparation_checks_without_executing_top_level_and_rejects_imports() {
         let (_dir, tasks) = fixture();
+        // Exercise the same directory alias that macOS uses for /var even on
+        // hosts whose temporary directory already has a physical path.
+        #[cfg(unix)]
+        let tasks = {
+            let alias = _dir.path().join("alias");
+            std::os::unix::fs::symlink(_dir.path(), &alias).unwrap();
+            Tasks::open(&alias, tasks.deno.clone()).unwrap()
+        };
         if Command::new(&tasks.deno)
             .arg("--version")
             .stdout(Stdio::null())

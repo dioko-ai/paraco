@@ -109,7 +109,7 @@ fn parse_catalog(bytes: &[u8]) -> Result<Catalog, String> {
     if bytes.len() as u64 > MAX_CATALOG {
         return Err("catalog exceeds size limit".into());
     }
-    let catalog: Catalog = serde_yaml_ng::from_slice(bytes).map_err(error)?;
+    let catalog: Catalog = serde_norway::from_slice(bytes).map_err(error)?;
     if catalog.schema_version != 1 || catalog.apps.len() > 1000 {
         return Err("unsupported catalog schema or too many entries".into());
     }

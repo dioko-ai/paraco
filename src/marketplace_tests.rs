@@ -168,7 +168,7 @@ fn catalog_rejects_duplicate_versions_and_unknown_fields() {
             entry(&sample.name, &sample.version, sample.sha256.clone(), &[]),
         ],
     };
-    let bytes = serde_yaml_ng::to_string(&duplicate).unwrap();
+    let bytes = serde_norway::to_string(&duplicate).unwrap();
     assert!(
         parse_catalog(bytes.as_bytes())
             .err()

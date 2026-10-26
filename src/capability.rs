@@ -841,8 +841,17 @@ mod tests {
 
         let app_root = tempfile::tempdir().unwrap();
         let host_root = tempfile::tempdir().unwrap();
+        let root_certificate = host_root.path().join("root.pem");
+        let root_key = host_root.path().join("root-key.pem");
         let certificate = host_root.path().join("cert.pem");
         let key = host_root.path().join("key.pem");
+        let request = host_root.path().join("cert.csr");
+        let extensions = host_root.path().join("server-extensions.cnf");
+        std::fs::write(
+            &extensions,
+            "[req]\ndistinguished_name=dn\n[dn]\n[root_cert]\nbasicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign,cRLSign\n[server_cert]\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nsubjectAltName=IP:127.0.0.1\n",
+        )
+        .unwrap();
         assert!(
             Command::new("openssl")
                 .args([
@@ -852,17 +861,67 @@ mod tests {
                     "rsa:2048",
                     "-nodes",
                     "-keyout",
-                    key.to_str().unwrap(),
+                    root_key.to_str().unwrap(),
                     "-out",
-                    certificate.to_str().unwrap(),
+                    root_certificate.to_str().unwrap(),
                     "-subj",
-                    "/CN=127.0.0.1",
-                    "-addext",
-                    "subjectAltName=IP:127.0.0.1",
-                    "-addext",
-                    "basicConstraints=critical,CA:FALSE",
+                    "/CN=paraco TLS fixture root",
+                    "-config",
+                    extensions.to_str().unwrap(),
+                    "-extensions",
+                    "root_cert",
                     "-days",
                     "1",
+                ])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            Command::new("openssl")
+                .args([
+                    "req",
+                    "-new",
+                    "-newkey",
+                    "rsa:2048",
+                    "-nodes",
+                    "-keyout",
+                    key.to_str().unwrap(),
+                    "-out",
+                    request.to_str().unwrap(),
+                    "-subj",
+                    "/CN=127.0.0.1",
+                    "-config",
+                    extensions.to_str().unwrap(),
+                ])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            Command::new("openssl")
+                .args([
+                    "x509",
+                    "-req",
+                    "-in",
+                    request.to_str().unwrap(),
+                    "-CA",
+                    root_certificate.to_str().unwrap(),
+                    "-CAkey",
+                    root_key.to_str().unwrap(),
+                    "-CAcreateserial",
+                    "-out",
+                    certificate.to_str().unwrap(),
+                    "-days",
+                    "1",
+                    "-extfile",
+                    extensions.to_str().unwrap(),
+                    "-extensions",
+                    "server_cert",
                 ])
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
@@ -915,7 +974,7 @@ for _ in range(2):
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o600)).unwrap();
         let config = host_root.path().join("ai.json");
-        std::fs::write(&config, format!(r#"{{"credentials":{{"fixture":"fixture"}},"credential_files":{{"fixture":"{}"}},"provider_endpoints":{{"fixture":"https://127.0.0.1:{port}/v1/chat/completions"}},"provider_test_root":"{}","routes":[{{"selection":{{"provider":"fixture","model":"test"}},"credential":"fixture"}}],"apps":{{"deployment-tls":{{"credential_grants":["fixture"]}}}},"default":{{"provider":"fixture","model":"test"}}}}"#, secret.display(), certificate.display())).unwrap();
+        std::fs::write(&config, format!(r#"{{"credentials":{{"fixture":"fixture"}},"credential_files":{{"fixture":"{}"}},"provider_endpoints":{{"fixture":"https://127.0.0.1:{port}/v1/chat/completions"}},"provider_test_root":"{}","routes":[{{"selection":{{"provider":"fixture","model":"test"}},"credential":"fixture"}}],"apps":{{"deployment-tls":{{"credential_grants":["fixture"]}}}},"default":{{"provider":"fixture","model":"test"}}}}"#, secret.display(), root_certificate.display())).unwrap();
         let app = App {
             name: "fixture".into(),
             root: app_root.path().canonicalize().unwrap(),

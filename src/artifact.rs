@@ -267,7 +267,10 @@ fn validate_graph_specifier(specifier: &str, root: &Path) -> Result<(), String> 
             let path = path
                 .canonicalize()
                 .map_err(|_| format!("unavailable file dependency {specifier}"))?;
-            if path.starts_with(root) {
+            let root = root
+                .canonicalize()
+                .map_err(|_| "unavailable application root".to_string())?;
+            if path.starts_with(&root) {
                 Ok(())
             } else {
                 Err(format!(
@@ -404,6 +407,24 @@ mod tests {
             .is_ok()
         );
         assert!(validate_graph_specifier("file:///tmp/secret.ts", root.path()).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn graph_specifiers_compare_physical_paths_and_reject_symlink_escapes() {
+        let root = tempfile::tempdir().unwrap();
+        let app = root.path().join("app");
+        fs::create_dir(&app).unwrap();
+        fs::write(app.join("main.ts"), "export default 1").unwrap();
+        let alias = root.path().join("alias");
+        std::os::unix::fs::symlink(&app, &alias).unwrap();
+        let entry = url::Url::from_file_path(alias.join("main.ts")).unwrap();
+        assert!(validate_graph_specifier(entry.as_str(), &alias).is_ok());
+
+        fs::write(root.path().join("private.ts"), "export default 2").unwrap();
+        std::os::unix::fs::symlink(root.path().join("private.ts"), app.join("escape.ts")).unwrap();
+        let escape = url::Url::from_file_path(alias.join("escape.ts")).unwrap();
+        assert!(validate_graph_specifier(escape.as_str(), &alias).is_err());
     }
 
     #[test]
