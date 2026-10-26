@@ -209,3 +209,18 @@ SQLite migration, scoped cron-draft storage, backup/export, and authenticated
 `paraco open` are described in [durable state and services](docs/durable-state.md).
 See [retained verification evidence](docs/verification-2026-09-21.md) for the
 observed platform checks and gates that still require native machines.
+
+## Approved app marketplace
+
+Browse the curated catalog and install an exact approved package:
+
+```sh
+cargo run -- marketplace list
+cargo run -- marketplace install hello-world --output ./installed/hello-world
+cargo run -- run ./installed/hello-world
+```
+
+See [marketplace design and packaging](docs/marketplace.md) for approval, local
+package testing, repository templates and the release workflow. The
+[Hello World v0.1.0 release](https://github.com/dioko-ai/paraco-hello-world/releases/tag/v0.1.0)
+is published and its catalog download has been verified end to end.

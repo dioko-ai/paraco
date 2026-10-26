@@ -7,6 +7,7 @@ mod control;
 mod guardian;
 mod logs;
 mod manifest;
+mod marketplace;
 mod reference;
 mod runner;
 mod runtime;
@@ -29,6 +30,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Browse and install versions approved by a host-owned marketplace catalog.
+    Marketplace {
+        #[command(subcommand)]
+        command: marketplace::Command,
+    },
     /// Run the bundled cron app; no checkout or separate app download required.
     Cron {
         #[arg(long, default_value_t = 3000)]
@@ -206,6 +212,7 @@ fn main() {
 
 fn execute(cli: Cli) -> Result<(), String> {
     match cli.command {
+        Command::Marketplace { command } => marketplace::execute(command),
         Command::Cron {
             port,
             ai_config,

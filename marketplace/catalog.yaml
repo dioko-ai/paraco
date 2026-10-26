@@ -1,0 +1,13 @@
+# Maintainers approve exact package bytes by reviewing changes to this file.
+# Publishing an app repository or release alone never grants catalog membership.
+schemaVersion: 1
+apps:
+  - name: hello-world
+    title: Hello World
+    description: A self-contained welcome page and health endpoint for Paraco.
+    repository: https://github.com/dioko-ai/paraco-hello-world
+    version: "0.1.0"
+    commit: 607d763014b7cb6a88ccd57835ea5699d59c2865
+    package: https://github.com/dioko-ai/paraco-hello-world/releases/download/v0.1.0/hello-world.paraco.json
+    sha256: 4975bc9ee40466da1f0a452eb5048fa64fe7180bdeaa7b7b61e384aa90db24bf
+    capabilities: []
