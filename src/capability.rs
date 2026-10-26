@@ -646,6 +646,7 @@ mod tests {
             requests_ai: true,
             requests_storage: false,
             requests_tasks: false,
+            requests_system: false,
             supported_targets: vec!["local".into()],
             outputs: Default::default(),
         };
@@ -685,6 +686,7 @@ mod tests {
             requests_ai: true,
             requests_storage: false,
             requests_tasks: false,
+            requests_system: false,
             supported_targets: vec!["local".into()],
             outputs: Default::default(),
         };
@@ -766,6 +768,7 @@ mod tests {
             requests_ai: true,
             requests_storage: false,
             requests_tasks: false,
+            requests_system: false,
             supported_targets: vec!["local".into()],
             outputs: Default::default(),
         };
@@ -807,6 +810,7 @@ mod tests {
             requests_ai: true,
             requests_storage: false,
             requests_tasks: false,
+            requests_system: false,
             supported_targets: vec!["local".into()],
             outputs: Default::default(),
         };
@@ -990,6 +994,7 @@ for _ in range(2):
             requests_ai: true,
             requests_storage: false,
             requests_tasks: false,
+            requests_system: false,
             supported_targets: vec!["local".into()],
             outputs: Default::default(),
         };
@@ -1019,6 +1024,7 @@ for _ in range(2):
             requests_ai: true,
             requests_storage: false,
             requests_tasks: false,
+            requests_system: false,
             supported_targets: vec!["local".into()],
             outputs: Default::default(),
         };
@@ -1095,6 +1101,7 @@ mod config_tests {
             requests_ai: true,
             requests_storage: false,
             requests_tasks: false,
+            requests_system: false,
             supported_targets: vec!["local".into()],
             outputs: Default::default(),
         };

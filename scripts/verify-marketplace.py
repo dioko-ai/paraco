@@ -29,7 +29,7 @@ with tempfile.TemporaryDirectory(prefix="paraco-marketplace-") as temporary:
     # A changed template is a new candidate, not the bytes already published at v0.1.0.
     # Use a local explicit approval fixture; never rewrite the shipped release digest.
     catalog = root / "catalog.yaml"
-    catalog.write_text(re.sub(r"sha256: [0-9a-f]{64}", "sha256: " + hashlib.sha256(package.read_bytes()).hexdigest(), (ROOT / "marketplace/catalog.yaml").read_text()))
+    catalog.write_text(re.sub(r"sha256: [0-9a-f]{64}", "sha256: " + hashlib.sha256(package.read_bytes()).hexdigest(), (ROOT / "marketplace/catalog.yaml").read_text(), count=1))
     installed = root / "installed"
     command = [BINARY, "marketplace", "install", "hello-world", "--catalog", catalog, "--package", package, "--output", installed]
     run(*command)

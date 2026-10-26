@@ -242,6 +242,10 @@ impl RunningApp {
     ) -> Result<Self, String> {
         app.validate_target("local")
             .map_err(|error| error.to_string())?;
+        durable
+            .lock()
+            .map_err(|_| "state unavailable")?
+            .check_capabilities(deployment_id, &app, false)?;
         let capability = if app.requests_ai {
             Some(Capability::start(&app, deployment_id, ai_config)?)
         } else {
@@ -293,6 +297,7 @@ impl RunningApp {
         }
         let bootstrap = serde_json::json!({
             "basePath": base_path,
+            "system": app.requests_system,
             "identity": {"applicationId": app.name, "installationId": deployment_id, "target": "local"},
             "tasks": tasks.as_ref().map(|s| serde_json::json!({"address":s.address,"token":s.token})),
             "storage": storage.as_ref().map(|s| serde_json::json!({"address":s.address,"token":s.token})),

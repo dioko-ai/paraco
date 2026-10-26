@@ -259,3 +259,44 @@ fn rejects_file_directory_conflicts_in_either_order() {
         assert!(!output.exists());
     }
 }
+
+#[test]
+fn bundled_catalog_approves_all_eight_showcase_packages() {
+    let catalog = catalog(None).unwrap();
+    for name in [
+        "system-vitals",
+        "prompt-regression-lab",
+        "cron-time-machine",
+        "json-yaml-workbench",
+        "ai-memory-curator",
+        "local-uptime-sentry",
+        "github-pulse",
+        "scientific-lab-notebook",
+    ] {
+        let entry = select(&catalog, name, Some("0.1.0")).unwrap();
+        assert_eq!(
+            entry.repository,
+            "https://github.com/dioko-ai/paraco-plugins"
+        );
+        if name == "system-vitals" {
+            assert_eq!(entry.capabilities, ["system"]);
+        }
+    }
+}
+
+#[test]
+fn installs_approved_system_capability_without_weakening_capability_checks() {
+    let bytes = valid_package("system-vitals", "0.1.0", &["system"]);
+    let (_directory, approved, output) =
+        install_fixture(&bytes, "system-vitals", "0.1.0", &["system"]);
+    install(&approved, &bytes, &output).unwrap();
+    assert!(crate::manifest::load(&output).unwrap().requests_system);
+    let (_directory, missing_grant, output) =
+        install_fixture(&bytes, "system-vitals", "0.1.0", &[]);
+    assert!(
+        install(&missing_grant, &bytes, &output)
+            .unwrap_err()
+            .contains("name/capabilities")
+    );
+    assert!(!output.exists());
+}

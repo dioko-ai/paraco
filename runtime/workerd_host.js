@@ -28,6 +28,7 @@ export default {
       set:(key,value) => call('storage',{namespace,key,value,operation:'set'}),
       delete:key => call('storage',{namespace,key,operation:'delete'})
     });
+    if (settings.system) context.system = Object.freeze({snapshot:() => call('system',{})});
     if (settings.tasks) context.tasks = Object.freeze({command:(action,body={}) => call('tasks',{action,body})});
     try {
       if (typeof app?.fetch !== 'function') throw new Error('App must export fetch(request, context)');

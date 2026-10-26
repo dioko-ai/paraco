@@ -155,7 +155,7 @@ fn parse_catalog(bytes: &[u8]) -> Result<Catalog, String> {
         }
         let mut caps = BTreeSet::new();
         for cap in &entry.capabilities {
-            if !["ai", "storage", "tasks"].contains(&cap.as_str()) || !caps.insert(cap) {
+            if !["ai", "storage", "tasks", "system"].contains(&cap.as_str()) || !caps.insert(cap) {
                 return Err("invalid or duplicate capability".into());
             }
         }
@@ -357,6 +357,7 @@ fn install(entry: &Entry, bytes: &[u8], output: &Path) -> Result<(), String> {
         ("ai", app.requests_ai),
         ("storage", app.requests_storage),
         ("tasks", app.requests_tasks),
+        ("system", app.requests_system),
     ]
     .into_iter()
     .filter_map(|(c, requested)| requested.then_some(c))
@@ -401,13 +402,22 @@ pub fn execute(command: Command) -> Result<(), String> {
                     .block_on(download(&entry.package))?,
             };
             install(entry, &bytes, &output)?;
-            println!(
-                "Installed {} {} at {}. Run with: paraco run {}",
-                entry.name,
-                entry.version,
-                output.display(),
-                output.display()
-            );
+            if entry.capabilities.iter().any(|cap| cap == "tasks") {
+                println!(
+                    "Installed {} {} at {}. Use paraco serve with taskAuthoring enabled; see the installed README for configuration.",
+                    entry.name,
+                    entry.version,
+                    output.display()
+                );
+            } else {
+                println!(
+                    "Installed {} {} at {}. Run with: paraco run {}",
+                    entry.name,
+                    entry.version,
+                    output.display(),
+                    output.display()
+                );
+            }
             Ok(())
         }
     }

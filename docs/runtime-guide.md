@@ -225,3 +225,7 @@ See [marketplace design and packaging](marketplace.md) for approval, local
 package testing, repository templates and the release workflow. The
 [Hello World v0.1.0 release](https://github.com/dioko-ai/paraco-hello-world/releases/tag/v0.1.0)
 is published and its catalog download has been verified end to end.
+
+## System monitoring
+
+Local Linux applications may request the read-only `system` capability for aggregate metrics and socket discovery. See [system monitoring](system-monitoring.md) for the API, installation permissions and platform limits.

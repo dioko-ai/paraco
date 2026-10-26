@@ -174,6 +174,7 @@ impl Store {
             ("ai", app.requests_ai),
             ("storage", app.requests_storage),
             ("tasks", app.requests_tasks),
+            ("system", app.requests_system),
         ]
         .into_iter()
         .filter_map(|(name, wanted)| wanted.then_some(name))

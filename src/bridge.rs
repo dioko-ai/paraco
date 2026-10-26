@@ -94,7 +94,7 @@ fn handle(
         return Err("POST required".into());
     }
     let cap = first.next().unwrap_or("").trim_start_matches('/');
-    if !["ai", "storage", "tasks", "network"].contains(&cap) {
+    if !["ai", "storage", "tasks", "network", "system"].contains(&cap) {
         return Err("unknown capability".into());
     }
     let config = &settings[cap];
@@ -113,6 +113,12 @@ fn handle(
     let mut body = vec![0; length];
     stream.read_exact(&mut body).map_err(|e| e.to_string())?;
     let mut body: serde_json::Value = serde_json::from_slice(&body).map_err(|e| e.to_string())?;
+    if cap == "system" {
+        if config.as_bool() != Some(true) {
+            return Err("system capability not granted".into());
+        }
+        return Ok(serde_json::json!({"value": crate::telemetry::snapshot()?}));
+    }
     if cap == "network" {
         return outbound(&body, config);
     }

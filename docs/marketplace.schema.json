@@ -68,7 +68,8 @@
               "enum": [
                 "ai",
                 "storage",
-                "tasks"
+                "tasks",
+                "system"
               ]
             }
           }

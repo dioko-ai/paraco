@@ -5,6 +5,7 @@ const Ajv2020 = require("ajv/dist/2020");
 const schema = JSON.parse(readFileSync("docs/paraco-manifest.schema.json", "utf8"));
 const validate = new Ajv2020({ strict: true }).compile(schema);
 for (const fixture of [
+  { name: "vitals", entrypoint: "main.ts", capabilities: ["system"], targets: ["local"] },
   { name: "hello", entrypoint: "main.ts", capabilities: [] },
   { schemaVersion: 1, name: "ai-example", entrypoint: "main.ts", capabilities: ["ai"] },
   { name: "targets", entrypoint: "main.ts", capabilities: [], targets: ["local", "cloudflare"], outputs: { report: { mediaType: "application/json", schema: { type: "object" } } } },
@@ -21,3 +22,6 @@ for (const fixture of [
   { name: "hello", entrypoint: "main.ts", capabilities: [], outputs: { report: { mediaType: " " } } },
 ]) assert.equal(validate(fixture), false, `fixture unexpectedly accepted: ${JSON.stringify(fixture)}`);
 console.log("manifest schema fixtures passed");
+
+const marketplaceSchema = JSON.parse(readFileSync("docs/marketplace.schema.json", "utf8"));
+assert.deepEqual([...marketplaceSchema.properties.apps.items.properties.capabilities.items.enum].sort(), [...schema.properties.capabilities.items.enum].sort(), "marketplace and manifest must agree on capability names");

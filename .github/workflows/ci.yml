@@ -51,6 +51,7 @@ jobs:
           python3 scripts/verify-foundation.py 2>&1 | tee verification-artifacts/foundation.log
           python3 scripts/verify-prepared.py 2>&1 | tee verification-artifacts/prepared.log
           python3 scripts/verify-marketplace.py 2>&1 | tee verification-artifacts/marketplace.log
+          python3 scripts/verify-showcase-marketplace.py 2>&1 | tee verification-artifacts/showcase-marketplace.log
           node --experimental-strip-types --test templates/hello-world/main_test.ts
       - name: Verify native archive composition
         run: |

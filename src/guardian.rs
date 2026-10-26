@@ -147,7 +147,7 @@ fn supervise() -> Result<i32, String> {
         serde_json::from_slice(&bootstrap).map_err(|e| e.to_string())?;
     let bridge = crate::bridge::Bridge::start(settings.clone(), &dir)?;
     let public = serde_json::json!({"basePath":settings["basePath"], "identity":settings["identity"], "backendToken":settings["backendToken"], "nonce":nonce, "hostToken":bridge.token,
-        "ai":!settings["ai"].is_null(), "storage":!settings["storage"].is_null(), "tasks":!settings["tasks"].is_null()});
+        "system":settings["system"].as_bool().unwrap_or(false), "ai":!settings["ai"].is_null(), "storage":!settings["storage"].is_null(), "tasks":!settings["tasks"].is_null()});
     std::fs::write(
         dir.join("adapter.js"),
         include_str!("../runtime/workerd_host.js"),

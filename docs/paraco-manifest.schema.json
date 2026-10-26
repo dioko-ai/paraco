@@ -12,10 +12,10 @@
     "capabilities": {
       "type": "array",
       "uniqueItems": true,
-      "items": { "enum": ["ai", "storage", "tasks"] }
+      "items": { "enum": ["ai", "storage", "tasks", "system"] }
     },
     "targets": {
-      "description": "Optional deployment targets. Defaults to local and cloudflare, except manifests requesting tasks default to local.",
+      "description": "Optional deployment targets. Defaults to local and cloudflare, except manifests requesting tasks or system default to local.",
       "type": "array",
       "minItems": 1,
       "uniqueItems": true,

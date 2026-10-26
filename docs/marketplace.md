@@ -57,7 +57,7 @@ access ambient files or Node/Deno globals.
 
 ## Catalog v1
 
-See [the catalog](../marketplace/catalog.yaml) for the complete initial entry.
+See [the catalog](../marketplace/catalog.yaml) for the approved entries.
 The top-level fields are `schemaVersion: 1` and `apps`. Each entry requires:
 
 Editor schemas are provided for the [catalog](marketplace.schema.json) and
@@ -131,7 +131,7 @@ the package, then add its digest and capability set to the catalog in a reviewed
 change. The checksum verifies the approved bytes; the installer does not prove
 that a publisher built those bytes from the declared source commit.
 
-The sibling repository is `../paraco-hello-world`, published at
+The Hello World sibling repository is `../paraco-plugins/paraco-hello-world`, published at
 [dioko-ai/paraco-hello-world](https://github.com/dioko-ai/paraco-hello-world).
 Its [v0.1.0 release](https://github.com/dioko-ai/paraco-hello-world/releases/tag/v0.1.0)
 is live. The public asset was downloaded through `paraco marketplace install`,
@@ -151,3 +151,24 @@ launches the installed app, probes its page and health endpoint, and verifies th
 checksum corruption and reinstall attempts fail. It uses temporary directories
 and requires workerd `2026-10-26` and esbuild `0.28.2` on PATH. GitHub download verification is separate and requires
 the published release.
+
+## Ecosystem applications
+
+The [paraco-plugins repository](https://github.com/dioko-ai/paraco-plugins) publishes
+all eight applications in its [v0.1.0 release](https://github.com/dioko-ai/paraco-plugins/releases/tag/v0.1.0):
+System Vitals + Port Scout, Prompt Regression Lab, Cron Time Machine,
+JSON / YAML Workbench, AI Memory Curator, Local Uptime Sentry, GitHub Pulse,
+and Scientific Lab Notebook. Each catalog entry pins the reviewed source commit,
+individual package checksum and exact capability set. Reproduce the release with
+`python3 scripts/package.py --version 0.1.0 --output dist` from that source commit.
+Packages include their own runtime assets, license and standalone setup guide.
+
+System Vitals requires Linux and the read-only `system` capability. Task apps
+require hosted operation with explicit task authoring; Uptime Sentry also needs
+exact target network grants. GitHub Pulse uses public repositories. AI requests
+require host provider configuration. Installation does not configure any of those
+grants. See each installed README and [system monitoring](system-monitoring.md).
+
+Run `python3 scripts/verify-showcase-marketplace.py --packages /path/to/release`
+to check every showcase package against the bundled catalog and launch the
+installed applications. Omit `--packages` to verify public release downloads.

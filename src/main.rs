@@ -19,6 +19,7 @@ mod state;
 mod storage;
 mod task_api;
 mod tasks;
+mod telemetry;
 mod worker;
 
 #[derive(Parser)]

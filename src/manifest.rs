@@ -10,6 +10,7 @@ pub struct App {
     pub requests_ai: bool,
     pub requests_storage: bool,
     pub requests_tasks: bool,
+    pub requests_system: bool,
     pub root: PathBuf,
     pub entrypoint: PathBuf,
     pub supported_targets: Vec<String>,
@@ -31,6 +32,11 @@ impl App {
             .any(|supported| supported == target)
         {
             return Err(Error::UnsupportedTarget(target.into()));
+        }
+        if target == "cloudflare" && self.requests_system {
+            return Err(Error::UnsupportedTarget(
+                "cloudflare (system monitoring is local only)".into(),
+            ));
         }
         if target == "cloudflare" && self.requests_tasks {
             return Err(Error::TasksUnsupportedTarget(target.into()));
@@ -176,14 +182,15 @@ pub fn load(app_dir: &Path) -> Result<App, Error> {
     if paraco::slug::validate(&manifest.name).is_err() {
         return Err(Error::InvalidName);
     }
-    if let Some(capability) = manifest
-        .capabilities
-        .iter()
-        .find(|c| c.as_str() != "ai" && c.as_str() != "storage" && c.as_str() != "tasks")
-    {
+    if let Some(capability) = manifest.capabilities.iter().find(|c| {
+        c.as_str() != "ai"
+            && c.as_str() != "storage"
+            && c.as_str() != "tasks"
+            && c.as_str() != "system"
+    }) {
         return Err(Error::UnsupportedCapability(capability.clone()));
     }
-    for capability in ["ai", "storage", "tasks"] {
+    for capability in ["ai", "storage", "tasks", "system"] {
         if manifest
             .capabilities
             .iter()
@@ -208,7 +215,13 @@ pub fn load(app_dir: &Path) -> Result<App, Error> {
             targets
         }
         Some(_) => return Err(Error::InvalidTargets),
-        None if manifest.capabilities.iter().any(|c| c == "tasks") => vec!["local".into()],
+        None if manifest
+            .capabilities
+            .iter()
+            .any(|c| c == "tasks" || c == "system") =>
+        {
+            vec!["local".into()]
+        }
         None => vec!["local".into(), "cloudflare".into()],
     };
     let mut outputs = BTreeMap::new();
@@ -261,6 +274,7 @@ pub fn load(app_dir: &Path) -> Result<App, Error> {
         requests_ai: manifest.capabilities.iter().any(|c| c == "ai"),
         requests_storage: manifest.capabilities.iter().any(|c| c == "storage"),
         requests_tasks: manifest.capabilities.iter().any(|c| c == "tasks"),
+        requests_system: manifest.capabilities.iter().any(|c| c == "system"),
         name: manifest.name,
         root: app_dir,
         entrypoint,
@@ -295,6 +309,27 @@ mod tests {
         assert!(app.entrypoint.ends_with("main.ts"));
         assert_eq!(app.supported_targets, ["local", "cloudflare"]);
         assert!(app.validate_target("local").is_ok());
+    }
+
+    #[test]
+    fn system_monitoring_is_local_only() {
+        let directory = app_dir(
+            r#"{"name":"vitals","entrypoint":"main.ts","capabilities":["system"]}"#,
+            true,
+        );
+        let app = load(directory.path()).unwrap();
+        assert!(app.requests_system);
+        assert_eq!(app.supported_targets, ["local"]);
+        assert!(app.validate_target("cloudflare").is_err());
+        std::fs::write(
+            directory.path().join("paraco.json"),
+            r#"{"name":"vitals","entrypoint":"main.ts","capabilities":["system","system"]}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            load(directory.path()),
+            Err(Error::DuplicateCapability(_))
+        ));
     }
 
     #[test]

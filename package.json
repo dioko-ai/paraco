@@ -13,7 +13,7 @@
     "test:browser": "node tests/browser-smoke.cjs",
     "check:schema": "node tests/schema-contract.cjs",
     "check:types": "tsc --noEmit --strict --lib es2022,dom runtime/paraco.d.ts runtime/cloudflare.ts runtime/d1-service.ts runtime/artifact-picker.ts runtime/cloudflare-binding.ts",
-    "check": "npm run check:core && npm run check:tools && cargo test --tests && npm run test:browser && npm run test:cron-runtime && npm run test:cron-browser && npm run test:security && npm run test:cloudflare-contract && npm run test:artifact-picker && npm run test:platform-runtime",
+    "check": "npm run check:core && npm run check:tools && cargo test --tests && npm run test:browser && npm run test:cron-runtime && npm run test:cron-browser && npm run test:security && npm run test:cloudflare-contract && npm run test:artifact-picker && npm run test:platform-runtime && npm run test:system-runtime",
     "check:rust": "cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test --lib --bin paraco",
     "check:core": "npm run check:rust && npm run check:schema && npm run check:types && npm run test:management && npm run test:cron-ui && npm run test:platform",
     "test:installer": "bash tests/install-archive.sh",
@@ -26,6 +26,7 @@
     "test:cloudflare-contract": "node tests/cloudflare-contract.cjs",
     "test:platform": "node --test tests/platform-d1.test.cjs",
     "test:artifact-picker": "node --test tests/artifact-picker.test.cjs",
-    "test:platform-runtime": "cargo build --locked && node tests/platform-runtime.cjs"
+    "test:platform-runtime": "cargo build --locked && node tests/platform-runtime.cjs",
+    "test:system-runtime": "cargo build --locked && node --test tests/system-runtime.cjs"
   }
 }

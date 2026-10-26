@@ -11,3 +11,75 @@ apps:
     package: https://github.com/dioko-ai/paraco-hello-world/releases/download/v0.1.0/hello-world.paraco.json
     sha256: 4975bc9ee40466da1f0a452eb5048fa64fe7180bdeaa7b7b61e384aa90db24bf
     capabilities: []
+  - name: ai-memory-curator
+    title: "AI Memory Curator"
+    description: "Keep useful context accurate, organized and ready to reuse."
+    repository: "https://github.com/dioko-ai/paraco-plugins"
+    version: "0.1.0"
+    commit: "b49f6c2e3f3e17aa3ff9cc06235acdc7847eb21d"
+    package: "https://github.com/dioko-ai/paraco-plugins/releases/download/v0.1.0/ai-memory-curator.paraco.json"
+    sha256: "c7d3e92d0b9f1cfe4cb24ba08485402064793d18d7a5c0c00d7c8d730aae6de9"
+    capabilities: ["storage", "ai"]
+  - name: cron-time-machine
+    title: "Cron Time Machine"
+    description: "See exactly when a schedule runs, across dates and time zones."
+    repository: "https://github.com/dioko-ai/paraco-plugins"
+    version: "0.1.0"
+    commit: "b49f6c2e3f3e17aa3ff9cc06235acdc7847eb21d"
+    package: "https://github.com/dioko-ai/paraco-plugins/releases/download/v0.1.0/cron-time-machine.paraco.json"
+    sha256: "0ddc13281008ad7ab2c886ae5c94309c23ba0711e814fd43992cd2818d6b3e2d"
+    capabilities: ["tasks", "storage"]
+  - name: github-pulse
+    title: "GitHub Pulse"
+    description: "Follow issues, pull requests and releases across your public repositories."
+    repository: "https://github.com/dioko-ai/paraco-plugins"
+    version: "0.1.0"
+    commit: "b49f6c2e3f3e17aa3ff9cc06235acdc7847eb21d"
+    package: "https://github.com/dioko-ai/paraco-plugins/releases/download/v0.1.0/github-pulse.paraco.json"
+    sha256: "03e82959a50b4e4ab146c6ce32eefc6abee785ae0ce07179b7cc07f67808d580"
+    capabilities: ["tasks"]
+  - name: json-yaml-workbench
+    title: "JSON / YAML Workbench"
+    description: "Format, convert and explore structured data in one quiet workspace."
+    repository: "https://github.com/dioko-ai/paraco-plugins"
+    version: "0.1.0"
+    commit: "b49f6c2e3f3e17aa3ff9cc06235acdc7847eb21d"
+    package: "https://github.com/dioko-ai/paraco-plugins/releases/download/v0.1.0/json-yaml-workbench.paraco.json"
+    sha256: "b489f79d6a7766126d3c0ff9aec25f40a2d238806f2116b0aefb60238d522ab2"
+    capabilities: []
+  - name: local-uptime-sentry
+    title: "Local Uptime Sentry"
+    description: "Know which services are responding, and when something changes."
+    repository: "https://github.com/dioko-ai/paraco-plugins"
+    version: "0.1.0"
+    commit: "b49f6c2e3f3e17aa3ff9cc06235acdc7847eb21d"
+    package: "https://github.com/dioko-ai/paraco-plugins/releases/download/v0.1.0/local-uptime-sentry.paraco.json"
+    sha256: "074f9359ff6526d96032cccaf6df4b67a2f2362dcc66f16a596c17605c1f3647"
+    capabilities: ["tasks"]
+  - name: prompt-regression-lab
+    title: "Prompt Regression Lab"
+    description: "Catch changes in model behavior before they reach your workflow."
+    repository: "https://github.com/dioko-ai/paraco-plugins"
+    version: "0.1.0"
+    commit: "b49f6c2e3f3e17aa3ff9cc06235acdc7847eb21d"
+    package: "https://github.com/dioko-ai/paraco-plugins/releases/download/v0.1.0/prompt-regression-lab.paraco.json"
+    sha256: "709644b8ed86b43a42624e59360b05a2faa25f51f3673080d7d6e5d9bb061eed"
+    capabilities: ["ai", "storage"]
+  - name: scientific-lab-notebook
+    title: "Scientific Lab Notebook"
+    description: "A thoughtful place for questions, experiments and observations."
+    repository: "https://github.com/dioko-ai/paraco-plugins"
+    version: "0.1.0"
+    commit: "b49f6c2e3f3e17aa3ff9cc06235acdc7847eb21d"
+    package: "https://github.com/dioko-ai/paraco-plugins/releases/download/v0.1.0/scientific-lab-notebook.paraco.json"
+    sha256: "c953458e44711fd37d6a613c4a14cd374e268b19e0145d8a90e2cdb498af68ef"
+    capabilities: ["storage"]
+  - name: system-vitals
+    title: "System Vitals + Port Scout"
+    description: "A clear view of your computer, from CPU activity to listening ports."
+    repository: "https://github.com/dioko-ai/paraco-plugins"
+    version: "0.1.0"
+    commit: "b49f6c2e3f3e17aa3ff9cc06235acdc7847eb21d"
+    package: "https://github.com/dioko-ai/paraco-plugins/releases/download/v0.1.0/system-vitals.paraco.json"
+    sha256: "7488f4b837101ba408896dac87945abde787f1b51543fd4725092738f850cc0f"
+    capabilities: ["system"]

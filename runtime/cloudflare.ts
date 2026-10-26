@@ -12,7 +12,7 @@ interface Environment {
 export function cloudflare(app: ParacoApp, capabilities: Capability[] = [], manifest?: ParacoManifest) {
   if (capabilities.includes('tasks')) throw new Error('Cloudflare task scheduling is not supported');
   if (manifest?.targets && !manifest.targets.includes('cloudflare')) throw new Error('Application does not support cloudflare');
-  if (manifest && (manifest.capabilities.includes('tasks') || manifest.capabilities.some(c => !capabilities.includes(c)))) throw new Error('Required capability is unsupported or missing');
+  if (manifest && (manifest.capabilities.includes('tasks') || manifest.capabilities.some(c => !capabilities.some(supported => supported === c)))) throw new Error('Required capability is unsupported or missing');
   return {
     async fetch(request: Request, env: Environment): Promise<Response> {
       if (capabilities.length && !env.PARACO) {

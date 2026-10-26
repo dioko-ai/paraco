@@ -6,7 +6,7 @@ export interface ParacoManifest {
   entrypoint: string;
   targets?: Array<"local" | "cloudflare">;
   outputs?: Record<string, {mediaType: string; schema?: unknown}>;
-  capabilities: Array<"ai" | "storage" | "tasks">;
+  capabilities: Array<"ai" | "storage" | "tasks" | "system">;
 }
 
 export interface AiCompletionRequest {
@@ -27,6 +27,8 @@ export interface ScopedStorage {
   delete(key: string): Promise<unknown>;
 }
 export interface AppContext {
+  /** Read-only local system metrics; requires the system manifest capability. */
+  system?: {snapshot(): Promise<SystemSnapshot>};
   identity?: Readonly<{applicationId: string; installationId: string; target: "local" | "cloudflare"}>;
   /** Versioned private or explicitly host-granted shared datasets; requires storage. */
   datasets?: {open(alias?: string): Dataset};
@@ -129,4 +131,13 @@ export interface Dataset {
     delete(key: string, expectedVersion: number | null): Promise<VersionedRecord>;
   };
   artifacts: Artifacts;
+}
+
+export interface SystemSnapshot {
+  sampledAt: number; hostname: string; platform: string; cores: number;
+  cpu: {total: number; idle: number};
+  memory: {total: number; available: number; swapTotal: number; swapFree: number};
+  load: number[]; uptime: number;
+  ports: {address: string; port: number; protocol: string; state: string}[];
+  warnings: string[];
 }
