@@ -38,7 +38,7 @@ exit code and an error on stderr.
 Lifecycle commands acknowledge the request immediately; success means the
 request was accepted, not that the app has finished starting or stopping. Use
 `status <name>` to observe completion or failure. The management dashboard displays desired and observed state every two seconds.
-The read-only gateway dashboard continues refreshing every five seconds.
+The main dashboard refreshes app status every two seconds.
 
 Desired state is `running` or `stopped`. Observed state is `starting`, `running`,
 `stopping`, `stopped`, `backoff`, or `failed`. Apps deliberately stopped stay
@@ -95,8 +95,7 @@ This provides a local user boundary; it does not isolate other programs running
 as that user. Apps are not isolated from the same OS user. Linux app execution uses bubblewrap
 with unprivileged user and network namespaces; macOS currently fails closed for
 normal execution. Trusted development can explicitly set
-`PARACO_ALLOW_UNSANDBOXED=1`. See [workerd migration limits](workerd-migration.md). The gateway dashboard remains read-only. Browser management uses a separate
-loopback origin with a per-server credential, as described below.
+`PARACO_ALLOW_UNSANDBOXED=1`. See [workerd migration limits](workerd-migration.md). The main dashboard includes browser controls on the gateway port, as described below.
 
 Control messages have size limits and timeouts. Normal server shutdown removes
 its socket. A private `<port>.lock` file establishes exclusive endpoint ownership;
@@ -130,39 +129,23 @@ restart and cleanup evidence is retained in the [current verification record](ve
 
 ## Browser management
 
-`serve` prints a separate link such as
-`http://127.0.0.1:<management-port>/#<access-token>`. Open the exact terminal link
-in your browser. The management port is allocated by the OS; `--port` continues
-to identify the app gateway and CLI endpoint. The original gateway dashboard
-remains available at `/` as a read-only overview.
+Open `http://localhost:3000/` (or the port selected with `--port`). This main
+dashboard provides Start, Stop, Restart, logs, and plugin download and uninstall
+controls. `127.0.0.1` and `[::1]` also work. `paraco open [--port N]` opens the same
+page; no separate management listener or access token is required.
 
-The management page provides Start, Stop, and Restart for each app, displays
-desired and observed state plus failure details, and refreshes every two seconds.
-Actions use the same supervisor operations as the CLI. An acknowledgment means
-the operation was requested; watch status for completion. App links open the
-app gateway in a separate tab without an opener or referrer.
+Status refreshes every two seconds. Actions use the same supervisor operations as
+the CLI; an acknowledgment means the operation was requested. App links open their
+isolated `.localhost` origins in another tab. Downloaded plugins can be stopped
+and uninstalled from the dashboard; manually configured apps remain managed by
+the server configuration.
 
-The URL fragment holds a random 256-bit bearer token. The page immediately removes
-it from the address bar and keeps it in tab-scoped session storage, so refreshes
-remain authorized. If browser storage is disabled, the current page still works,
-but a refresh requires reopening the original link. Closing the tab normally
-ends that tab's access; browser session restoration may retain it. Restarting
-Paraco rotates the credential. Keep the printed link private: anyone with the
-link and local network access can manage this server. It appears in terminal
-output and any file to which that output is redirected.
-
-The server never embeds the token in a page, app response, or cookie. Status and
-commands require an authorization header. Commands additionally require an exact
-management Origin and JSON content type. Host validation, Fetch Metadata checks,
-no CORS permissions, a restrictive content security policy, and no-store responses
-protect the browser boundary. Requests have a 4 KiB body limit and a two-second
-body-read deadline. App text is rendered as text, not HTML. This does not protect
-against another program running as the same OS user, browser extensions with
-access, or compromise of the browser or host.
-
-Both loopback listeners bind before apps launch and close when the server stops.
-Browser controls do not require the Unix CLI socket, so their transport also
-works on platforms without Unix sockets; only Linux is verified so far.
+Browser commands require an Origin matching the dashboard address and JSON
+content type. Host validation, Fetch Metadata checks, no CORS permissions, and a
+restrictive content security policy keep hosted app pages and other websites
+from issuing dashboard commands. Requests have a 4 KiB body limit and a two-second
+body-read deadline. These controls are available to local programs; there is no
+browser login or bearer credential.
 
 ## Scope and verification
 
@@ -174,7 +157,7 @@ desired state is running. Bounded persistent
 logs are available through the [log CLI and dashboard](local-logs.md).
 ## User-service definitions
 
-`paraco service render --platform linux|macos --entry /absolute/paraco --config /absolute/config.json --state /absolute/state` renders a private user-service definition using absolute paths and a ten-second graceful-stop bound. `paraco service setup|remove|status --platform linux|macos --config /absolute/config.json` explicitly operates an owned user registration; setup atomically installs the stable `~/.paraco/service/paraco` launcher pointing to the current immutable executable and uses `~/.paraco/state`, so future service launches do not depend on PATH, terminal CWD, or a release-specific definition. Replacing that launcher does not affect a process already running its immutable executable. It never invokes `sudo`, refuses foreign definitions or launcher files, and removal preserves configuration and state. Native-manager invocations are bounded to ten seconds and report an actionable error when unavailable. There is no `paraco open` command: the current private management entry is intentionally printed only by a running server, rather than recovering or logging its rotating bearer token.
+`paraco service render --platform linux|macos --entry /absolute/paraco --config /absolute/config.json --state /absolute/state` renders a private user-service definition using absolute paths and a ten-second graceful-stop bound. `paraco service setup|remove|status --platform linux|macos --config /absolute/config.json` explicitly operates an owned user registration; setup atomically installs the stable `~/.paraco/service/paraco` launcher pointing to the current immutable executable and uses `~/.paraco/state`, so future service launches do not depend on PATH, terminal CWD, or a release-specific definition. Replacing that launcher does not affect a process already running its immutable executable. It never invokes `sudo`, refuses foreign definitions or launcher files, and removal preserves configuration and state. Native-manager invocations are bounded to ten seconds and report an actionable error when unavailable. `paraco open` opens the main dashboard of the running server.
 
 A Linux systemd user unit normally starts when the user session is available; unattended boot requires user-controlled `loginctl enable-linger` and is not enabled by Paraco. A macOS LaunchAgent runs at user login, not before login. A current Linux systemd run observed startup, unexpected-death recovery, terminal independence, stopped-intent preservation, and graceful shutdown; see the [October verification record](verification-2026-10-25.md). Machine reboot and macOS manager behavior remain unverified, as does the public service setup/removal flow in a dedicated account.
 

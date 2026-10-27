@@ -375,6 +375,20 @@ fn install(entry: &Entry, bytes: &[u8], output: &Path) -> Result<(), String> {
     publish_new(staging.path(), &output)?;
     Ok(())
 }
+pub(crate) fn dashboard_catalog() -> Result<serde_json::Value, String> {
+    serde_json::to_value(catalog(None)?).map_err(error)
+}
+pub(crate) async fn dashboard_install(
+    name: &str,
+    version: &str,
+    output: &Path,
+) -> Result<(), String> {
+    let catalog = catalog(None)?;
+    let entry = select(&catalog, name, Some(version))?;
+    let bytes = download(&entry.package).await?;
+    install(entry, &bytes, output)
+}
+
 pub fn execute(command: Command) -> Result<(), String> {
     match command {
         Command::List { catalog: path } => {

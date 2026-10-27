@@ -19,7 +19,7 @@ function browser({ hash = '#secret', status = 200, error = null, stored = null, 
     focus() { document.activeElement = this; }
   }
   const nodes = { '#summary': new Element('p'), '#message': new Element('p'), '#apps': new Element('ul') };
-  for (const id of ['logs', 'log-title', 'log-output', 'log-launch', 'log-refresh']) { nodes['#' + id] = new Element('div'); nodes['#' + id].value = ''; }
+  for (const id of ['logs', 'log-title', 'log-output', 'log-launch', 'log-refresh', 'catalog-refresh', 'plugin-message', 'plugins']) { nodes['#' + id] = new Element('div'); nodes['#' + id].value = ''; }
   document = { querySelector: id => nodes[id], createElement: tag => new Element(tag), activeElement: null };
   const context = vm.createContext({
     document, location: { hash }, history: { replaceState: (...args) => history.push(args) },
@@ -41,12 +41,10 @@ function browser({ hash = '#secret', status = 200, error = null, stored = null, 
 }
 const flush = () => new Promise(resolve => setImmediate(resolve));
 
-test('fragment authorization, lifecycle buttons, polling and keyboard focus', async () => {
+test('plain dashboard loads lifecycle buttons, polls and preserves keyboard focus', async () => {
   const b = browser();
   await flush();
-  assert.equal(b.history[0][2], '/');
-  assert.equal(b.storage.get('paraco-token'), 'secret');
-  assert.equal(b.requests[0].headers.Authorization, 'Bearer secret');
+  assert.equal(b.requests[0].headers.Authorization, undefined);
   assert.equal(b.requests[0].credentials, 'omit');
   const buttons = b.nodes['#apps'].querySelectorAll('button');
   assert.equal(buttons.length, 4);
@@ -63,16 +61,14 @@ test('fragment authorization, lifecycle buttons, polling and keyboard focus', as
   assert.equal(b.requests.at(-1).method, 'GET');
 });
 
-test('missing or revoked credentials stop polling and explain authorization', async () => {
-  const missing = browser({ hash: '' });
-  const revoked = browser({ hash: '', stored: 'expired', status: 401 });
+test('plain URL works without a token and errors allow polling to recover', async () => {
+  const plain = browser({hash: '', storageDisabled: true});
+  const failed = browser({hash: '', status: 503});
   await flush();
-  assert.equal(missing.requests.length, 0);
-  for (const b of [missing, revoked]) {
-    assert.match(b.nodes['#message'].textContent, /management link/);
-    assert.equal(b.timers.length, 0);
-  }
-  assert.equal(revoked.storage.has('paraco-token'), false);
+  assert.equal(plain.requests.length, 1);
+  assert.equal(plain.nodes['#apps'].querySelectorAll('button').length, 4);
+  assert.match(failed.nodes['#message'].textContent, /503/);
+  assert.equal(failed.timers.length, 1);
 });
 
 test('error output is rendered as text and storage-disabled tabs still work', async () => {
@@ -101,4 +97,32 @@ test('logs render hostile content as text, filter launches, refresh and show emp
   vm.runInContext('request = async () => { throw Error("offline"); }', b.context);
   await b.nodes['#log-refresh'].listeners.click();
   assert.match(b.nodes['#log-output'].textContent, /Unable to load logs: offline/);
+});
+
+test('catalog displays capabilities and installs the selected exact version', async () => {
+  const b = browser();
+  await flush();
+  vm.runInContext(`request = async (command, path) => {
+    if (command) { globalThis.pluginCommand = command; return {}; }
+    if (path === "/api/plugins") return {apps: [{name: "sample", title: "Sample", version: "1.2.3", description: "<script>unsafe</script>", capabilities: ["system"]}]};
+    return {apps: []};
+  }`, b.context);
+  await b.nodes['#catalog-refresh'].listeners.click();
+  assert.equal(b.nodes['#plugins'].children[0].children[0].children[1].textContent, '<script>unsafe</script>');
+  assert.match(b.nodes['#plugins'].children[0].children[0].children[2].textContent, /system/);
+  await b.nodes['#plugins'].querySelectorAll('button')[0].listeners.click();
+  assert.deepEqual(JSON.parse(JSON.stringify(b.context.pluginCommand)), {action: 'install', name: 'sample', version: '1.2.3'});
+  assert.match(b.nodes['#plugin-message'].textContent, /installed/);
+});
+
+test('uninstall requires a stopped downloaded plugin and reports failures', async () => {
+  const b = browser();
+  await flush();
+  vm.runInContext('render({apps: [{name: "sample", desired: "running", state: "running", uninstallable: true}]})', b.context);
+  assert.equal(b.nodes['#apps'].querySelectorAll('button').at(-1).disabled, true);
+  vm.runInContext('render({apps: [{name: "sample", desired: "stopped", state: "stopped", uninstallable: true}]}); request = async () => { throw Error("Disk unavailable"); }', b.context);
+  const uninstall = b.nodes['#apps'].querySelectorAll('button').at(-1);
+  assert.equal(uninstall.disabled, false);
+  await uninstall.listeners.click();
+  assert.match(b.nodes['#plugin-message'].textContent, /Disk unavailable/);
 });

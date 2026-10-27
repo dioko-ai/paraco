@@ -1,4 +1,4 @@
-// Real Chromium smoke test for the authenticated management dashboard.
+// Real Chromium smoke test for the main dashboard.
 // It is intentionally independent of the DOM-unit tests in management.test.cjs.
 const assert = require("node:assert/strict");
 const { mkdir, mkdtemp, writeFile } = require("node:fs/promises");
@@ -68,8 +68,8 @@ async function freePort() {
   try {
     const url = await waitFor(() => {
       if (child.exitCode !== null) throw new Error(`server exited before readiness: ${output}`);
-      return output.match(/management dashboard (http:\/\/[^\s]+)/)?.[1];
-    }, "management URL");
+      return output.match(/dashboard listening on (http:\/\/[^\s]+)/)?.[1];
+    }, "dashboard URL");
     const browser = await chromium.launch({ headless: true });
     try {
       const page = await browser.newPage();
@@ -98,8 +98,8 @@ async function freePort() {
       assert.doesNotMatch(await second.evaluate(() => document.cookie), /hostonly=one/);
       const gateway = `http://127.0.0.1:${new URL(origins[0]).port}/`;
       await page.goto(gateway);
-      await page.locator('a[href*=".localhost:"]').first().click();
-      await page.getByRole('heading', { name: 'hello' }).waitFor({ timeout });
+      const [fromDashboard] = await Promise.all([page.context().waitForEvent('page'), page.locator('a[href*=".localhost:"]').first().click()]);
+      await fromDashboard.getByRole('heading', { name: 'hello' }).waitFor({ timeout });
       await page.goto(url);
       await page.getByRole("button", { name: "logs hello" }).click();
       await page.getByText("Logs: hello").waitFor({ timeout });

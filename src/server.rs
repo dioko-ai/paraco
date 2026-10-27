@@ -121,12 +121,13 @@ struct Gateway {
     client: reqwest::Client,
     port: u16,
     admission: Arc<Semaphore>,
+    dashboard: management::Management,
 }
 
 /// Supervisors own their app resources; all stop concurrently before joining.
 struct Supervisors {
     stop: Arc<AtomicBool>,
-    threads: Vec<thread::JoinHandle<()>>,
+    threads: Arc<Mutex<Vec<thread::JoinHandle<()>>>>,
     apps: Inventory,
 }
 impl Drop for Supervisors {
@@ -135,7 +136,7 @@ impl Drop for Supervisors {
         for app in self.apps.read().unwrap().values() {
             app.cancel.store(true, Ordering::Relaxed);
         }
-        for worker in self.threads.drain(..) {
+        for worker in self.threads.lock().unwrap().drain(..) {
             let _ = worker.join();
         }
     }
@@ -185,9 +186,29 @@ pub fn serve(config: &Path, port: u16, log_dir: &Path) -> Result<(), String> {
     if port == 0 {
         return Err("port must be from 1 through 65535".into());
     }
-    let apps = load(config)?;
+    let mut apps = load(config)?;
     let state_root = state_root(config, log_dir)?;
     let durable = open_state(&state_root)?;
+    let plugins = state_root.join("plugins");
+    std::fs::create_dir_all(&plugins).map_err(|e| e.to_string())?;
+    for entry in std::fs::read_dir(&plugins).map_err(|e| e.to_string())? {
+        let path = entry.map_err(|e| e.to_string())?.path();
+        if path.join("paraco-install.json").is_file() {
+            let app = manifest::load(&path).map_err(|e| e.to_string())?;
+            if apps.iter().any(|existing| existing.app.name == app.name) || apps.len() >= 50 {
+                return Err(
+                    "downloaded plugin conflicts with configured apps or exceeds 50 apps".into(),
+                );
+            }
+            apps.push(PreparedApp {
+                app,
+                task_authoring: false,
+                task_network: vec![],
+                restart: RestartPolicy::default(),
+                ai_config: None,
+            });
+        }
+    }
     let store = logs::Store::open(log_dir)?;
     for prepared in &apps {
         store.outside(&prepared.app.root)?;
@@ -301,17 +322,35 @@ async fn host(
         .timeout(Duration::from_secs(30))
         .build()
         .map_err(|e| e.to_string())?;
-    let mut supervisors = Supervisors {
+    let supervisors = Supervisors {
         stop: stop.clone(),
-        threads: vec![],
+        threads: Arc::new(Mutex::new(vec![])),
         apps: inventory.clone(),
     };
-    // Bind management before starting children; a conflicting endpoint starts none.
+    // Browser controls share the gateway dashboard; app origins remain isolated.
     let control_apps = inventory.clone();
     let control_durable = durable.clone();
-    let (management_listener, management_router, management_url) =
-        management::bind(inventory.clone(), durable.clone(), port, store.clone()).await?;
-    let private_url = management_url.clone();
+    let dashboard = management::new(
+        inventory.clone(),
+        durable.clone(),
+        port,
+        store.clone(),
+        state_root
+            .join("plugins")
+            .canonicalize()
+            .map_err(|e| e.to_string())?,
+        stop.clone(),
+        supervisors.threads.clone(),
+    );
+    let dashboard_url = format!(
+        "http://{}/",
+        if port == 80 {
+            "localhost".into()
+        } else {
+            format!("localhost:{port}")
+        }
+    );
+    let private_url = dashboard_url.clone();
     let control = control::Server::start(port, move |command| {
         if matches!(command.action, control::Action::Open) {
             return Ok(control::Reply {
@@ -333,17 +372,21 @@ async fn host(
         let app_stop = stop.clone();
         let app_store = store.clone();
         let app_durable = durable.clone();
-        supervisors.threads.push(thread::spawn(move || {
-            supervise(
-                prepared,
-                app_durable,
-                states,
-                app_stop,
-                app_store,
-                port,
-                Some(Arc::new(state_lease)),
-            );
-        }));
+        supervisors
+            .threads
+            .lock()
+            .unwrap()
+            .push(thread::spawn(move || {
+                supervise(
+                    prepared,
+                    app_durable,
+                    states,
+                    app_stop,
+                    app_store,
+                    port,
+                    Some(Arc::new(state_lease)),
+                );
+            }));
     }
     if let Some(tasks) = &tasks {
         tasks.start();
@@ -353,23 +396,17 @@ async fn host(
         client,
         port,
         admission: Arc::new(Semaphore::new(64)),
+        dashboard,
     };
     let app = Router::new().fallback(dispatch).with_state(gateway);
     let app_v6 = app.clone();
     let mut serving = tokio::spawn(async move { axum::serve(listener, app).await });
     let mut serving_v6 = tokio::spawn(async move { axum::serve(listener_v6, app_v6).await });
-    let mut managing =
-        tokio::spawn(async move { axum::serve(management_listener, management_router).await });
     runner::announce(
         false,
-        format!("paraco: management dashboard {management_url}"),
-    );
-    runner::announce(
-        false,
-        format!("paraco: dashboard listening on http://127.0.0.1:{port}"),
+        format!("paraco: dashboard listening on {dashboard_url}"),
     );
     let result = tokio::select! {
-        result = &mut managing => result.map_err(|e| e.to_string())?.map_err(|e| e.to_string()),
         result = &mut serving_v6 => result.map_err(|e| e.to_string())?.map_err(|e| e.to_string()),
         result = &mut serving => result.map_err(|e| e.to_string())?.map_err(|e| e.to_string()),
         _ = async { while !stop.load(Ordering::Relaxed) { tokio::time::sleep(Duration::from_millis(25)).await; } } => Ok(()),
@@ -377,7 +414,6 @@ async fn host(
     // Stop accepting requests and cancel in-flight proxy calls on shutdown.
     serving.abort();
     serving_v6.abort();
-    managing.abort();
     // Cancel validation and task work before dropping app capability workers,
     // so an in-flight publication cannot hold shutdown until its deadline.
     if let Some(tasks) = &tasks {
@@ -396,10 +432,17 @@ async fn dispatch(State(gateway): State<Gateway>, request: Request) -> Response 
         .and_then(|h| h.to_str().ok())
         .unwrap_or("")
         .to_ascii_lowercase();
+    let gateway_authority = |host: &str| {
+        if gateway.port == 80 {
+            host.to_string()
+        } else {
+            format!("{host}:{}", gateway.port)
+        }
+    };
     let gateway_hosts = [
-        format!("127.0.0.1:{}", gateway.port),
-        format!("localhost:{}", gateway.port),
-        format!("[::1]:{}", gateway.port),
+        gateway_authority("127.0.0.1"),
+        gateway_authority("localhost"),
+        gateway_authority("[::1]"),
     ];
     let app_name = gateway
         .apps
@@ -420,24 +463,8 @@ async fn dispatch(State(gateway): State<Gateway>, request: Request) -> Response 
         let suffix = path.trim_start_matches('/').to_owned();
         return proxy_app(&gateway, request, &name, &suffix).await;
     }
-    if path == "/" {
-        if request.method() != Method::GET && request.method() != Method::HEAD {
-            return (
-                StatusCode::METHOD_NOT_ALLOWED,
-                [(header::ALLOW, "GET, HEAD")],
-                "Read-only dashboard",
-            )
-                .into_response();
-        }
-        let mut response = dashboard(&gateway.apps, gateway.port).into_response();
-        response
-            .headers_mut()
-            .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-        response.headers_mut().insert(header::CONTENT_SECURITY_POLICY, HeaderValue::from_static("default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'"));
-        if request.method() == Method::HEAD {
-            *response.body_mut() = Body::empty();
-        }
-        return response;
+    if path == "/" || path == "/dashboard.js" || path.starts_with("/api/") {
+        return management::dispatch(gateway.dashboard.clone(), request).await;
     }
     let Some(tail) = path.strip_prefix("/apps/") else {
         return StatusCode::NOT_FOUND.into_response();
@@ -637,7 +664,11 @@ async fn proxy_app(gateway: &Gateway, request: Request, name: &str, suffix: &str
 }
 
 fn app_host(slug: &str, port: u16) -> String {
-    format!("{slug}.localhost:{port}")
+    if port == 80 {
+        format!("{slug}.localhost")
+    } else {
+        format!("{slug}.localhost:{port}")
+    }
 }
 
 /// Cross-origin applications may be followed as top-level documents. They may
@@ -685,47 +716,6 @@ fn strip_hop_headers(headers: &mut HeaderMap) {
     }
 }
 
-fn escape(text: &str) -> String {
-    text.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#39;")
-}
-
-fn dashboard(apps: &Inventory, port: u16) -> Html<String> {
-    let apps = apps.read().unwrap();
-    let rows: String = apps.iter().map(|(name, app)| {
-        let (label, detail) = match &app.state {
-            AppState::Starting => ("starting", "Starting application".to_string()),
-            AppState::Running(_, _) => ("running", "Application has an isolated .localhost origin".into()),
-            AppState::Failed(error) => ("failed", escape(error)),
-            AppState::Backoff(error) => ("backoff", escape(error)),
-            AppState::Stopping => ("stopping", "Stopping application".into()),
-            AppState::Stopped => ("stopped", "Application is stopped".into()),
-        };
-        let url = format!("http://{}", app_host(name, port));
-        format!("<li class=\"app\"><div><h2>{name}</h2><a class=\"path\" href=\"{url}\">{url}</a></div><span class=\"status {label}\">{label}</span><div class=\"detail\">{detail}</div></li>")
-    }).collect();
-    let running = apps
-        .values()
-        .filter(|s| matches!(s.state, AppState::Running(_, _)))
-        .count();
-    let rows = if rows.is_empty() {
-        "<li class=\"empty\">No apps configured yet. Add an app directory to your server configuration.</li>".into()
-    } else {
-        rows
-    };
-    Html(
-        include_str!("../runtime/dashboard.html")
-            .replace(
-                "{{summary}}",
-                &format!("{running} of {} apps running", apps.len()),
-            )
-            .replace("{{apps}}", &rows),
-    )
-}
-
 // Each worker remains alive after failure or stop and owns at most one process.
 // Commands invalidate an attempt before cancelling it. Stale attempts must clean
 // up their resources before the worker can launch another generation.
@@ -740,6 +730,11 @@ fn supervise(
 ) {
     let name = prepared.app.name;
     let root = prepared.app.root;
+    let identity = apps
+        .read()
+        .unwrap()
+        .get(&name)
+        .map(|app| app.deployment_id.clone());
     let base = "/".to_string();
     let mut handled = None;
     let mut retry_generation = None;
@@ -747,7 +742,12 @@ fn supervise(
     while !stop.load(Ordering::Relaxed) {
         let (generation, desired, cancel, deployment_id) = {
             let records = apps.read().unwrap();
-            let app = &records[&name];
+            let Some(app) = records.get(&name) else {
+                break;
+            };
+            if Some(&app.deployment_id) != identity.as_ref() {
+                break;
+            }
             (
                 app.generation,
                 app.desired,
@@ -925,6 +925,7 @@ mod origin_tests {
     use axum::http::{HeaderMap, HeaderValue, Method};
     #[test]
     fn origin_uses_application_slug() {
+        assert_eq!(app_host("hello", 80), "hello.localhost");
         assert_eq!(app_host("hello", 8787), "hello.localhost:8787");
         assert_ne!(app_host("d123", 8787), app_host("d456", 8787));
     }

@@ -71,7 +71,7 @@ records.
 
 ## Loss diagnostics
 
-The authenticated management log view labels truncated records and shows nonzero
+The dashboard log view labels truncated records and shows nonzero
 **store** loss counters for the current runtime/store scope: queue drops,
 truncations, write failures, known shutdown discards, and flush-barrier timeout
 or enqueue failures. A flush timeout is an unknown persistence outcome, not a
@@ -147,14 +147,14 @@ isolated log directories and do not write into the user's default store.
 
 ## Dashboard viewer
 
-Open the authenticated management link printed by `serve`, then choose **View
+Open the main dashboard at `http://localhost:3000/`, then choose **View
 logs** on an app. The viewer shows the latest 100 retained records, refreshes every
 five seconds, and supports manual refresh. Paste a launch ID from a record into
 the launch filter to restrict results. Switching apps clears that filter. Empty
 results and retrieval errors have explicit messages; log text is rendered as text.
 
 `GET /api/logs?app=hello&limit=100&run_id=<launch-id>` requires the same bearer
-authorization and browser-origin checks as management status. `app` is required
+browser-origin checks as dashboard status. `app` is required
 and must be configured on this server; the server also filters by gateway port.
 `run_id` is optional (32 hexadecimal characters); `limit` defaults to 100 and
 accepts 0–500. Results are JSON `{ "records": [...] }`, oldest first within the

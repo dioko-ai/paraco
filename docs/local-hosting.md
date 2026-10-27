@@ -8,9 +8,9 @@ cargo run -- serve --config ./examples/server.json
 
 Open `http://127.0.0.1:3000/`. Use `--port 8787` to choose another port. Source
 development requires workerd and esbuild on `PATH`; a bundle supplies both. The
-terminal also prints a private management dashboard link on a
-separate loopback port, with start, stop, and restart controls. See
-[local lifecycle](local-lifecycle.md#browser-management) for authorization.
+main dashboard includes start, stop, restart, logs, and plugin download and
+uninstall controls. No separate address or access link is needed. See
+[local lifecycle](local-lifecycle.md#browser-management).
 Linux execution requires `/usr/bin/bwrap` with unprivileged user and network
 namespaces. macOS fails closed by default because secure containment is not
 implemented; `PARACO_ALLOW_UNSANDBOXED=1` permits trusted development code only.
@@ -101,8 +101,9 @@ browser URL resolution rules.
 The gateway root dashboard shows configured app names, routes, and starting/running/failed
 states, plus stopping and stopped states after lifecycle commands. Running apps
 have an Open app link. Failed apps show a supervisor error;
-other apps continue serving. The page refreshes every five seconds and does not
-cache its status. It is read-only and requires no external assets or services.
+other apps continue serving. Status refreshes every two seconds without caching.
+The same page provides app controls, logs, and plugin downloads and uninstall.
+It requires no external assets; downloading a plugin retrieves its catalog package.
 Running means the adapter bound its listener and the process has not exited;
 it is not an application health probe.
 

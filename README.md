@@ -83,3 +83,24 @@ Applications can use versioned records, immutable output artifacts, and explicit
 shared local or cloud-backed datasets. See [platform evolution](docs/platform-evolution.md)
 for contracts, permissions, Cloudflare D1 provisioning, and limits, or run the
 [Artifact Notebook example](examples/artifacts/README.md).
+
+### Dashboard plugin downloads
+
+Open `http://localhost:3000/` or use `paraco open`. Select **Browse plugins**
+to view the bundled catalog, versions, and requested capabilities. **Download and
+install** verifies the catalog SHA-256 and manifest before starting the plugin.
+Downloads persist in the server's private state directory and load on restart.
+AI providers and task scheduling still require host configuration; downloading
+a plugin does not enable those services. To remove a downloaded plugin, stop it,
+wait for **stopped**, then select **Uninstall**. Its downloaded source is removed;
+stored application data is retained. Apps supplied by the server configuration
+remain managed through that configuration.
+
+### Local URLs without a port
+
+Run `paraco serve --config server.json --port 80` to use URLs such as
+`http://hello-world.localhost`. Port 80 must be available on both IPv4 and IPv6
+loopback, and your OS must permit binding it. Keep Paraco running as your normal
+user; if privileged-port access is required, configure a local forwarding service
+instead of running the runtime as root. The dashboard uses the same gateway port.
+Other gateway ports remain explicit in URLs.

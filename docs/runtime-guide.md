@@ -2,7 +2,7 @@
 
 Paraco is a local-first runtime for portable applications. This repository is
 a Rust host that runs apps on workerd and serves them through a local gateway,
-with a separate authenticated management dashboard. Bundles include workerd
+with controls in the main dashboard. Bundles include workerd
 `2026-10-26` and native esbuild `0.28.2`.
 
 ## Run the cron app
@@ -51,9 +51,8 @@ loopback addresses; if either is occupied, choose another port. This runs in the
 Ctrl+C stops all apps. Configuration paths resolve relative to the configuration
 file, and each app's validated manifest name determines its URL (for example,
 `http://hello.localhost:3000`). Private deployment IDs remain separate from URLs. The dashboard
-refreshes app statuses every five seconds. To start, stop, or restart apps in the browser,
-open the separate `management dashboard` URL printed in the terminal. That page
-refreshes status every two seconds; its private access link changes each server session.
+at `http://localhost:3000/` includes app controls, logs, and plugin downloads.
+It refreshes status every two seconds and requires no separate management link.
 
 See [local hosting](local-hosting.md) for the configuration, app base-path
 contract, and limits. [Current status](status.md) records implementation
@@ -72,8 +71,7 @@ cargo run -- restart hello
 
 Commands print JSON status and acknowledge lifecycle requests immediately. Use
 `status hello` to check completion; add the server's `--port` if it differs from
-3000. CLI management uses a private local socket. Browser controls use the separate
-authorized management dashboard; the gateway dashboard stays read-only.
+3000. CLI management uses a private local socket. Browser controls use the main dashboard on the same gateway port.
 See [local lifecycle](local-lifecycle.md) for state, security, and recovery
 semantics. Deployment identity and desired state persist across server sessions.
 App guardians clean up workerd after a runtime crash, and restarting `serve`
@@ -162,12 +160,11 @@ the archive bundle workflow, CLI installer, and platform packaging plan.
 
 ## Current scope
 
-The runtime supports foreground single-app and multi-app hosting, authenticated
-browser lifecycle controls, Unix CLI lifecycle controls, and a local fake AI
-capability, plus bounded persistent logs and CLI log queries. Authenticated dashboard logs and opt-in bounded automatic recovery are available.
+The runtime supports foreground single-app and multi-app hosting, browser lifecycle controls, Unix CLI lifecycle controls, and a local fake AI
+capability, plus bounded persistent logs and CLI log queries. Dashboard logs and opt-in bounded automatic recovery are available.
 Hosted apps use distinct canonical `.localhost` browser origins. They cannot use
 shared-domain cookies; cross-origin subresource requests are rejected, while the
-separate management origin remains authenticated. Output-loss counters in the
+dashboard remains on its own origin, separate from hosted apps. Output-loss counters in the
 management log view distinguish storage and console loss. Hosted admission is
 bounded (50 apps, 64 gateway responses, 8 per app, and 4 log reads); these are
 safety limits rather than CPU/RSS quotas.

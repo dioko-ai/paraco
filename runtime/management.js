@@ -1,13 +1,4 @@
 "use strict";
-// A fragment never reaches the HTTP server. Keep authorization out of cookies,
-// links, and app origins; sessionStorage preserves it only in this browser tab.
-const fragment = location.hash.slice(1);
-history.replaceState(null, "", "/");
-let token = fragment;
-try {
-  token ||= sessionStorage.getItem("paraco-token") || "";
-  if (fragment) sessionStorage.setItem("paraco-token", fragment);
-} catch { /* The current tab still works when browser storage is disabled. */ }
 const summary = document.querySelector("#summary");
 const message = document.querySelector("#message");
 const list = document.querySelector("#apps");
@@ -25,18 +16,12 @@ async function request(command, path = "/api/apps") {
   const response = await fetch(path, {
     method: command ? "POST" : "GET",
     headers: {
-      Authorization: `Bearer ${token}`,
       ...(command ? { "Content-Type": "application/json" } : {}),
     },
     body: command ? JSON.stringify(command) : undefined,
     credentials: "omit",
-    signal: AbortSignal.timeout(5000),
+    signal: AbortSignal.timeout(path === "/api/plugins" && command ? 180000 : 5000),
   });
-  if (response.status === 401) {
-    try { sessionStorage.removeItem("paraco-token"); } catch { /* Storage may be disabled. */ }
-    token = "";
-    throw new Error("Open the management link printed by the running server to authorize this tab.");
-  }
   if (!response.ok) throw new Error(`Request failed (${response.status}): ${await response.text()}`);
   return await response.json();
 }
@@ -69,6 +54,16 @@ function render({ apps }) {
     logs.setAttribute("aria-label", `logs ${app.name}`);
     logs.addEventListener("click", () => showLogs(app.name));
     controls.append(logs);
+    if (app.uninstallable) {
+      const uninstall = element("button", "Uninstall");
+      uninstall.type = "button";
+      uninstall.setAttribute("aria-label", `uninstall ${app.name}`);
+      uninstall.disabled = app.state !== "stopped";
+      uninstall.setAttribute("data-stop-required", String(app.state !== "stopped"));
+      uninstall.title = "Stop this plugin before uninstalling. Stored app data is retained.";
+      uninstall.addEventListener("click", () => changePlugin({ action: "uninstall", name: app.name }));
+      controls.append(uninstall);
+    }
     row.append(detail, controls);
     return row;
   });
@@ -84,7 +79,6 @@ async function update(command) {
   clearTimeout(timer);
   list.querySelectorAll("button").forEach(button => button.disabled = true);
   try {
-    if (!token) throw new Error("Open the management link printed by the running server to authorize this tab.");
     if (command) {
       await request(command);
       message.textContent = `${command.action} requested for ${command.app}. Waiting for status.`;
@@ -95,8 +89,8 @@ async function update(command) {
     message.textContent = error.message;
   } finally {
     busy = false;
-    list.querySelectorAll("button").forEach(button => button.disabled = false);
-    if (token) timer = setTimeout(() => update(), 2000);
+    list.querySelectorAll("button").forEach(button => { button.disabled = button.getAttribute("data-stop-required") === "true"; });
+    timer = setTimeout(() => update(), 2000);
   }
 }
 update();
@@ -129,8 +123,46 @@ async function showLogs(app = logApp) {
   } catch (error) {
     if (version === logVersion) logOutput.textContent = `Unable to load logs: ${error.message}`;
   } finally {
-    if (version === logVersion && token) logTimer = setTimeout(() => showLogs(), 5000);
+    if (version === logVersion) logTimer = setTimeout(() => showLogs(), 5000);
   }
 }
 document.querySelector("#log-refresh").addEventListener("click", () => showLogs());
 logLaunch.addEventListener("change", () => showLogs());
+
+let pluginBusy = false;
+const pluginMessage = document.querySelector("#plugin-message");
+const pluginList = document.querySelector("#plugins");
+async function browsePlugins() {
+  if (pluginBusy) return;
+  try {
+    const catalog = await request(null, "/api/plugins");
+    pluginList.replaceChildren(...catalog.apps.map(plugin => {
+      const row = element("li", "", "app");
+      const info = element("div", "");
+      info.append(element("h2", `${plugin.title} ${plugin.version}`), element("p", plugin.description), element("p", `Capabilities: ${plugin.capabilities.join(", ") || "none"}`));
+      const install = element("button", "Download and install");
+      install.type = "button";
+      install.setAttribute("aria-label", `install ${plugin.name} ${plugin.version}`);
+      install.addEventListener("click", () => changePlugin({ action: "install", name: plugin.name, version: plugin.version }));
+      row.append(info, install);
+      return row;
+    }));
+    pluginMessage.textContent = "Choose a plugin to download and install.";
+  } catch (error) { pluginMessage.textContent = error.message; }
+}
+async function changePlugin(command) {
+  if (pluginBusy) return;
+  pluginBusy = true;
+  pluginList.querySelectorAll("button").forEach(button => button.disabled = true);
+  pluginMessage.textContent = command.action === "install" ? `Downloading and verifying ${command.name}…` : `Uninstalling ${command.name}…`;
+  try {
+    await request(command, "/api/plugins");
+    pluginMessage.textContent = `${command.name} ${command.action === "install" ? "installed" : "uninstalled. Stored app data retained"}.`;
+    await update();
+  } catch (error) { pluginMessage.textContent = error.message; }
+  finally {
+    pluginBusy = false;
+    pluginList.querySelectorAll("button").forEach(button => button.disabled = false);
+  }
+}
+document.querySelector("#catalog-refresh")?.addEventListener("click", browsePlugins);

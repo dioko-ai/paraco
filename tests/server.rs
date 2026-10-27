@@ -337,30 +337,16 @@ impl Server {
                     return None;
                 }
                 let port = u16::from_str_radix(fields[1].split_once(':')?.1, 16).ok()?;
-                (port != self.port && port != self.management().0).then_some(port)
+                (port != self.port).then_some(port)
             })
             .collect()
-    }
-    fn management(&self) -> (u16, String) {
-        let logs = self.logs();
-        let url = logs
-            .lines()
-            .find_map(|line| line.strip_prefix("paraco: management dashboard "))
-            .unwrap();
-        let (address, token) = url.split_once("/#").unwrap();
-        (
-            address.rsplit_once(':').unwrap().1.parse().unwrap(),
-            token.into(),
-        )
     }
     fn app_url(&self, name: &str) -> String {
         self.maybe_app_url(name).unwrap()
     }
     fn maybe_app_url(&self, name: &str) -> Option<String> {
-        let (port, token) = self.management();
-        let headers = format!(
-            "Authorization: Bearer {token}\r\nOrigin: http://127.0.0.1:{port}\r\nSec-Fetch-Site: same-origin\r\n"
-        );
+        let port = self.port;
+        let headers = format!("Origin: http://127.0.0.1:{port}\r\nSec-Fetch-Site: same-origin\r\n");
         let response = self.browser_request("GET", "/api/apps", &headers, "");
         let body = response.split_once("\r\n\r\n").unwrap().1;
         let apps: serde_json::Value = serde_json::from_str(body).unwrap();
@@ -373,7 +359,7 @@ impl Server {
             .map(str::to_owned)
     }
     fn browser_request(&self, method: &str, path: &str, headers: &str, body: &str) -> String {
-        let port = self.management().0;
+        let port = self.port;
         let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
         stream
             .set_read_timeout(Some(Duration::from_secs(5)))
@@ -446,15 +432,11 @@ fn routes_two_apps_assets_bodies_queries_and_redirects() {
     assert_ne!(one["instanceId"], two["instanceId"]);
     assert_eq!(one["base"], "/");
     assert_eq!(two["base"], "/");
-    let root = server.wait_for("/", "2 of 2 apps running");
-    assert!(root.contains(&format!(
-        "href=\"http://{}\"",
-        server.app_url("one").strip_prefix("http://").unwrap()
-    )));
-    assert!(root.contains(&format!(
-        "href=\"http://{}\"",
-        server.app_url("two").strip_prefix("http://").unwrap()
-    )));
+    let root = server.request("GET", "/", "");
+    assert!(root.contains("dashboard.js"));
+    let apps = server.request("GET", "/api/apps", "");
+    assert!(apps.contains(&server.app_url("one")));
+    assert!(apps.contains(&server.app_url("two")));
     assert!(root.contains("no-store"));
     assert!(
         server
@@ -522,7 +504,7 @@ fn failures_and_hanging_requests_leave_other_apps_and_dashboard_available() {
     server.ready();
     server.inspect("healthy");
     server.inspect("crash");
-    server.wait_for("/", "application exited during startup");
+    server.wait_for("/api/apps", "application exited during startup");
     assert!(server.request("GET", "/apps/broken/", "").contains("503"));
     assert!(
         server
@@ -533,7 +515,7 @@ fn failures_and_hanging_requests_leave_other_apps_and_dashboard_available() {
     unsafe {
         libc::kill(crash_pid, libc::SIGKILL);
     }
-    server.wait_for("/", "application exited unexpectedly");
+    server.wait_for("/api/apps", "application exited unexpectedly");
     assert!(server.request("GET", "/apps/crash/", "").contains("503"));
     let mut hanging = TcpStream::connect(("127.0.0.1", server.port)).unwrap();
     write!(
@@ -578,7 +560,7 @@ fn rejects_duplicate_names_invalid_configuration_and_occupied_gateway() {
 fn empty_dashboard_and_repository_ai_example() {
     let mut empty = Server::run(&[]);
     empty.ready();
-    assert!(empty.request("GET", "/", "").contains("No apps configured"));
+    assert!(empty.request("GET", "/", "").contains("id=\"apps\""));
     empty.stop(libc::SIGINT);
     let dir = tempfile::tempdir().unwrap();
     let examples = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
@@ -611,7 +593,7 @@ fn empty_dashboard_and_repository_ai_example() {
     server.control("restart", Some("ai-example"));
     server.state("ai-example", "running");
     server.wait_for("/apps/ai-example/", "Fake AI response");
-    server.wait_for("/", "2 of 2 apps running");
+    assert!(server.request("GET", "/", "").contains("dashboard.js"));
     server.stop(libc::SIGINT);
 }
 
@@ -695,7 +677,7 @@ fn lifecycle_commands_isolate_apps_and_reap_replaced_processes() {
     assert_eq!(server.state("one", "stopped")["desired"], "stopped");
     assert_reaped(first);
     assert!(server.request("GET", "/apps/one/", "").contains("503"));
-    assert!(server.request("GET", "/", "").contains("stopped"));
+    assert!(server.request("GET", "/api/apps", "").contains("stopped"));
     assert_eq!(server.inspect("two")["instanceId"], other);
     thread::sleep(Duration::from_millis(150));
     assert_eq!(server.control("status", Some("one"))[0]["state"], "stopped");
@@ -910,7 +892,7 @@ fn slow_stop_keeps_control_and_other_apps_responsive() {
     assert_eq!(status[0]["state"], "stopping");
     assert_eq!(status[0]["desired"], "stopped");
     server.inspect("healthy");
-    assert!(server.request("GET", "/", "").contains("stopping"));
+    assert!(server.request("GET", "/api/apps", "").contains("stopping"));
     assert!(start.elapsed() < Duration::from_secs(3));
     server.state("stubborn", "stopped");
     assert_reaped(pid);
@@ -1086,18 +1068,17 @@ fn browser_management_controls_apps_and_releases_listener() {
     server.ready();
     let old_pid = server.guardian_pid("hello");
     let other_pid = server.inspect("other")["instanceId"].clone();
-    let (port, token) = server.management();
-    assert_ne!(port, server.port);
+    let port = server.port;
+    assert_eq!(port, server.port);
     let headers = format!(
-        "Authorization: Bearer {token}\r\nOrigin: http://127.0.0.1:{port}\r\nContent-Type: application/json\r\nSec-Fetch-Site: same-origin\r\n"
+        "Origin: http://127.0.0.1:{port}\r\nContent-Type: application/json\r\nSec-Fetch-Site: same-origin\r\n"
     );
     let page = server.browser_request("GET", "/", "", "");
     assert!(page.starts_with("HTTP/1.0 200"), "{page}");
     assert!(page.contains("dashboard.js"));
     assert!(page.contains("frame-ancestors 'none'"));
     assert!(page.contains("referrer-policy: no-referrer"));
-    assert!(!page.contains(&token));
-    assert!(!server.request("GET", "/", "").contains(&token));
+    assert!(server.request("GET", "/", "").contains("catalog-refresh"));
     let script = server.browser_request("GET", "/dashboard.js", "", "");
     assert!(script.contains("text/javascript"));
     let status = server.browser_request("GET", "/api/apps", &headers, "");
@@ -1136,21 +1117,63 @@ fn browser_management_controls_apps_and_releases_listener() {
 }
 
 #[test]
-fn browser_management_rejects_unauthorized_cross_origin_and_invalid_commands() {
+fn main_dashboard_aliases_share_controls_and_open_has_no_token() {
+    let mut server = Server::run(&[]);
+    server.ready();
+    for (address, host) in [
+        ("127.0.0.1", "localhost"),
+        ("127.0.0.1", "127.0.0.1"),
+        ("::1", "[::1]"),
+    ] {
+        for (method, path, body, expected) in [
+            ("GET", "/", "", "catalog-refresh"),
+            ("GET", "/api/plugins", "", "schemaVersion"),
+            (
+                "POST",
+                "/api/apps",
+                r#"{"action":"status"}"#,
+                r#""apps":[]"#,
+            ),
+        ] {
+            let mut stream = TcpStream::connect((address, server.port)).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            write!(stream, "{method} {path} HTTP/1.0\r\nHost: {host}:{}\r\nOrigin: http://{host}:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", server.port, server.port, body.len()).unwrap();
+            let mut response = String::new();
+            stream.read_to_string(&mut response).unwrap();
+            assert!(response.starts_with("HTTP/1.0 200"), "{response}");
+            assert!(response.contains(expected), "{response}");
+        }
+    }
+    let output = Command::new(env!("CARGO_BIN_EXE_paraco"))
+        .args(["open", "--port", &server.port.to_string(), "--print"])
+        .env("TMPDIR", server.control_root.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap().trim(),
+        format!("http://localhost:{}/", server.port)
+    );
+    assert!(!server.logs().contains("management dashboard"));
+    server.stop(libc::SIGINT);
+}
+
+#[test]
+fn dashboard_rejects_cross_origin_and_invalid_commands() {
     let mut server = Server::run(&[("hello", APP)]);
     server.ready();
     let pid = server.inspect("hello")["instanceId"].clone();
-    let (port, token) = server.management();
+    let port = server.port;
     let origin = format!("Origin: http://127.0.0.1:{port}\r\n");
-    let auth = format!("Authorization: Bearer {token}\r\n");
+    let auth = String::new();
     let valid = format!("{auth}{origin}Content-Type: application/json\r\n");
     let command = r#"{"action":"stop","app":"hello"}"#;
     for (headers, code) in [
-        (String::new(), 401),
-        (format!("{origin}Authorization: Bearer wrong\r\n"), 401),
-        (auth.clone(), 403),
+        (String::new(), 403),
         (
-            format!("{auth}Origin: http://127.0.0.1:{}\r\n", server.port),
+            format!("{auth}Origin: http://hello.localhost:{}\r\n", server.port),
             403,
         ),
         (format!("{auth}Origin: null\r\n"), 403),
@@ -1167,7 +1190,7 @@ fn browser_management_rejects_unauthorized_cross_origin_and_invalid_commands() {
     assert!(
         server
             .browser_request("GET", "/api/apps", "", "")
-            .starts_with("HTTP/1.0 401")
+            .starts_with("HTTP/1.0 200")
     );
     assert!(
         server
@@ -1194,7 +1217,7 @@ fn browser_management_rejects_unauthorized_cross_origin_and_invalid_commands() {
     assert!(
         server
             .request("POST", "/api/apps", command)
-            .starts_with("HTTP/1.0 404")
+            .starts_with("HTTP/1.0 403")
     );
     assert_eq!(server.inspect("hello")["instanceId"], pid);
     server.stop(libc::SIGTERM);
@@ -1268,7 +1291,6 @@ fn persistent_logs_identify_apps_and_launches_and_survive_server_exit() {
     let raw = fs::read_to_string(server.dir.path().join("logs/current.jsonl")).unwrap();
     assert!(raw.contains("startup-failure-detail"));
     assert!(!raw.contains("PARACO_READY:"));
-    assert!(!raw.contains(&server.management().1));
 }
 
 #[test]
@@ -1305,16 +1327,15 @@ fn independent_servers_share_one_persistent_log_store() {
 }
 
 #[test]
-fn dashboard_logs_are_authenticated_filtered_and_rotation_safe() {
+fn dashboard_logs_are_filtered_and_rotation_safe() {
     let mut server = Server::run(&[("one", APP), ("two", APP)]);
     server.ready();
     server.state("one", "running");
-    let token = server.management().1;
-    let auth = format!("Authorization: Bearer {token}\r\n");
+    let auth = String::new();
     assert!(
         server
             .browser_request("GET", "/api/logs?app=one", "", "")
-            .contains("401 Unauthorized")
+            .contains("200 OK")
     );
     let store = log_store::Store::open(&server.dir.path().join("logs")).unwrap();
     let launch = store.app("one", "serve", server.port).unwrap();

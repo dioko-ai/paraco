@@ -76,9 +76,8 @@ restore. Never replace a live database or restore over a newer schema.
 ## Browser entry and native operation
 
 `paraco open [--port N]` asks the private same-user control socket for the current
-authenticated management URL and launches the default browser. `--print` supports
-headless/manual use. Treat that output as a credential. Gateway HTTP requests and
-app-scoped capabilities cannot retrieve it. It rotates on restart.
+main dashboard URL and launches the default browser. `--print` supports
+headless/manual use. The URL uses the gateway port and needs no access token.
 
 User services are explicit opt-in. Linux uses a systemd user unit; macOS uses a
 LaunchAgent in the GUI login domain. Definitions use absolute executable/config

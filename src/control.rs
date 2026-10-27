@@ -1,4 +1,4 @@
-//! Private local CLI transport. Management never shares an HTTP origin with apps.
+//! Private local CLI transport. Dashboard controls never share an HTTP origin with apps.
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Deserialize, Serialize)]
@@ -61,7 +61,7 @@ pub fn open(port: u16, print: bool) -> Result<(), String> {
     if let Some(error) = reply.error {
         return Err(error);
     }
-    let url = reply.url.ok_or("server did not return a management URL")?;
+    let url = reply.url.ok_or("server did not return a dashboard URL")?;
     if print {
         println!("{url}");
         return Ok(());

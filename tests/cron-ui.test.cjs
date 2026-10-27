@@ -107,7 +107,7 @@ test('real Cron browser lifecycle uses explicit review and immutable revision pu
   let browser;
   const wait=async(fn,label)=>{const end=Date.now()+30000;while(Date.now()<end){if(child.exitCode!==null)throw Error('runtime exited: '+output);if(await fn())return;await new Promise(resolve=>setTimeout(resolve,50));}throw Error('Timed out: '+label+'\n'+output);};
   try {
-    await wait(()=>output.includes('management dashboard'),'server readiness');
+    await wait(()=>output.includes('dashboard listening'),'server readiness');
     browser=await chromium.launch({headless:true,args:['--no-sandbox']});const page=await browser.newPage();
     page.on('dialog',dialog=>dialog.accept());
     await page.goto(`http://cron.localhost:${port}/`);await page.getByRole('heading',{name:'Cron',exact:true}).waitFor();

@@ -62,7 +62,7 @@ enum Command {
         #[arg(long)]
         allow_task_network: Vec<String>,
     },
-    /// Open the authenticated dashboard through the private local control socket.
+    /// Open the main dashboard in your browser.
     Open {
         #[arg(long, default_value_t = 3000)]
         port: u16,
