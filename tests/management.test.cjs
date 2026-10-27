@@ -47,12 +47,12 @@ test('plain dashboard loads lifecycle buttons, polls and preserves keyboard focu
   assert.equal(b.requests[0].headers.Authorization, undefined);
   assert.equal(b.requests[0].credentials, 'omit');
   const buttons = b.nodes['#apps'].querySelectorAll('button');
-  assert.equal(buttons.length, 4);
+  assert.equal(buttons.length, 3);
   const link = b.nodes['#apps'].querySelectorAll('a')[0];
   assert.equal(link.href, 'http://hello.localhost:3000/');
   assert.equal(link.rel, 'noopener noreferrer');
-  buttons[1].focus();
-  await buttons[1].listeners.click();
+  buttons[0].focus();
+  await buttons[0].listeners.click();
   const post = b.requests.find(request => request.method === 'POST');
   assert.deepEqual(JSON.parse(post.body), { action: 'stop', app: 'hello' });
   assert.equal(post.headers['Content-Type'], 'application/json');
@@ -66,7 +66,7 @@ test('plain URL works without a token and errors allow polling to recover', asyn
   const failed = browser({hash: '', status: 503});
   await flush();
   assert.equal(plain.requests.length, 1);
-  assert.equal(plain.nodes['#apps'].querySelectorAll('button').length, 4);
+  assert.equal(plain.nodes['#apps'].querySelectorAll('button').length, 3);
   assert.match(failed.nodes['#message'].textContent, /503/);
   assert.equal(failed.timers.length, 1);
 });
@@ -85,7 +85,7 @@ test('logs render hostile content as text, filter launches, refresh and show emp
   const b = browser();
   await flush();
   vm.runInContext(`request = async (_, path) => { globalThis.logPath = path; return {records: [{timestamp_unix_ms: 0, run_id: "abc", stream: "stderr", event: "output", message: "<script>alert(1)</script>"}]}; }`, b.context);
-  await b.nodes['#apps'].querySelectorAll('button')[3].listeners.click();
+  await b.nodes['#apps'].querySelectorAll('button')[2].listeners.click();
   assert.match(b.nodes['#log-output'].textContent, /<script>/);
   assert.equal(b.nodes['#log-output'].children.length, 0);
   b.nodes['#log-launch'].value = 'a'.repeat(32);
@@ -125,4 +125,36 @@ test('uninstall requires a stopped downloaded plugin and reports failures', asyn
   assert.equal(uninstall.disabled, false);
   await uninstall.listeners.click();
   assert.match(b.nodes['#plugin-message'].textContent, /Disk unavailable/);
+});
+
+test('install source labels distinguish local configuration from dashboard downloads', async () => {
+  const b = browser();
+  await flush();
+  for (const uninstallable of [false, true]) {
+    vm.runInContext(`render({apps: [{name: "sample", desired: "stopped", state: "stopped", uninstallable: ${uninstallable}}]})`, b.context);
+    const label = b.nodes['#apps'].querySelectorAll('span').find(node => node.className === 'install-source');
+    assert.equal(label.textContent, uninstallable ? 'Dashboard install' : 'Local install');
+    assert.match(label.title, uninstallable ? /uninstall it here/ : /server configuration/);
+    const buttons = b.nodes['#apps'].querySelectorAll('button');
+    assert.equal(buttons.some(button => button.textContent === 'Uninstall'), uninstallable);
+  }
+});
+
+test('lifecycle controls match running, stopped, failed, and transitional states', async () => {
+  const b = browser();
+  await flush();
+  for (const [state, labels] of Object.entries({
+    running: ['Stop', 'Restart', 'View logs'],
+    stopped: ['Start', 'View logs'],
+    failed: ['Start', 'View logs'],
+    starting: ['Cancel start', 'View logs'],
+    backoff: ['Cancel retry', 'View logs'],
+    stopping: ['View logs'],
+  })) {
+    vm.runInContext(`render({apps: [{name: "sample", desired: "running", state: "${state}"}]})`, b.context);
+    assert.deepEqual(b.nodes['#apps'].querySelectorAll('button').map(button => button.textContent), labels, state);
+  }
+  vm.runInContext('render({apps: [{name: "sample", state: "starting"}]}); update = async command => { globalThis.cancelCommand = command; }', b.context);
+  await b.nodes['#apps'].querySelectorAll('button')[0].listeners.click();
+  assert.deepEqual(JSON.parse(JSON.stringify(b.context.cancelCommand)), {action: 'stop', app: 'sample'});
 });

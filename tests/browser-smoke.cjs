@@ -75,6 +75,8 @@ async function freePort() {
       const page = await browser.newPage();
       await page.goto(url);
       await page.getByText("2 of 2 apps running").waitFor({ timeout });
+      assert.equal(await page.getByText("Local install", { exact: true }).count(), 2);
+      assert.equal(await page.getByRole("button", { name: "start hello", exact: true }).count(), 0);
       const origins = await page.locator('a[href*=".localhost:"]').evaluateAll(links => links.map(link => link.href));
       assert.equal(origins.length, 2);
       assert.deepEqual(origins.map(url => new URL(url).hostname), ["hello.localhost", "other.localhost"]);
@@ -107,6 +109,11 @@ async function freePort() {
       await page.getByText("restart requested for hello", { exact: false }).waitFor({ timeout });
       await page.getByText("2 of 2 apps running").waitFor({ timeout });
       assert.match(await page.locator("#log-output").textContent(), /browser smoke|No retained logs/);
+      await page.getByRole("button", { name: "stop hello", exact: true }).click();
+      await page.getByRole("button", { name: "start hello", exact: true }).waitFor({ timeout });
+      assert.equal(await page.getByRole("button", { name: "stop hello", exact: true }).count(), 0);
+      await page.getByRole("button", { name: "start hello", exact: true }).click();
+      await page.getByText("2 of 2 apps running").waitFor({ timeout });
     } finally { await browser.close(); }
   } finally { await stop(); }
 })().catch(error => { console.error(error); process.exitCode = 1; });

@@ -33,6 +33,11 @@ function render({ apps }) {
     const row = element("li", "", "app");
     const title = element("div", "");
     title.append(element("h2", app.name), element("p", `Desired: ${app.desired}`, "path"));
+    const source = element("span", app.uninstallable ? "Dashboard install" : "Local install", "install-source");
+    source.title = app.uninstallable
+      ? "Downloaded through the dashboard. Stop this app to uninstall it here."
+      : "Loaded from your server configuration. Remove it from that configuration to uninstall it.";
+    title.append(source);
     row.append(title, element("span", app.state, `status ${app.state}`));
     const detail = element("div", app.error || "", "detail");
     if (app.state === "running") {
@@ -43,10 +48,18 @@ function render({ apps }) {
       detail.append(link);
     }
     const controls = element("div", "", "controls");
-    for (const action of ["start", "stop", "restart"]) {
-      const button = element("button", action[0].toUpperCase() + action.slice(1));
+    const actions = {
+      running: [["stop", "Stop"], ["restart", "Restart"]],
+      stopped: [["start", "Start"]],
+      failed: [["start", "Start"]],
+      starting: [["stop", "Cancel start"]],
+      backoff: [["stop", "Cancel retry"]],
+      stopping: [],
+    };
+    for (const [action, label] of actions[app.state] || []) {
+      const button = element("button", label);
       button.type = "button";
-      button.setAttribute("aria-label", `${action} ${app.name}`);
+      button.setAttribute("aria-label", `${label.toLowerCase()} ${app.name}`);
       button.addEventListener("click", () => update({ action, app: app.name }));
       controls.append(button);
     }
