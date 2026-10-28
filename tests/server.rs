@@ -555,14 +555,38 @@ fn failures_and_hanging_requests_leave_other_apps_and_dashboard_available() {
 }
 
 #[test]
-fn rejects_duplicate_names_invalid_configuration_and_occupied_gateway() {
-    for config in [
-        r#"{"apps":[{"path":"one"},{"path":"one"}]}"#,
-        r#"{"apps":[],"extra":true}"#,
-    ] {
+fn isolates_duplicate_names_and_rejects_invalid_configuration_and_occupied_gateway() {
+    let dir = Server::fixture(&[("one", APP)]);
+    let path = dir.path().join("server.json");
+    fs::write(&path, r#"{"apps":[{"path":"one"},{"path":"one"}]}"#).unwrap();
+    let mut server = Server::start(dir, &path, free_port());
+    server.ready();
+    server.state("one", "running");
+    let failed = server.state("failed-app-1", "failed");
+    assert!(
+        failed["error"]
+            .as_str()
+            .unwrap()
+            .contains("duplicate application name")
+    );
+    assert_eq!(failed["desired"], "stopped");
+    assert!(
+        server
+            .request("GET", "/apps/failed-app-1/", "")
+            .contains("503")
+    );
+    assert_eq!(server.control("status", None).as_array().unwrap().len(), 2);
+    assert!(
+        server
+            .request("GET", "/apps/one/next", "")
+            .ends_with("arrived")
+    );
+    assert!(server.request("GET", "/", "").contains("Your local apps"));
+    server.stop(libc::SIGINT);
+    {
         let dir = Server::fixture(&[("one", APP)]);
         let path = dir.path().join("server.json");
-        fs::write(&path, config).unwrap();
+        fs::write(&path, r#"{"apps":[],"extra":true}"#).unwrap();
         let mut server = Server::start(dir, &path, free_port());
         assert!(!server.wait_exit().success());
         assert!(!server.logs().contains("dashboard listening"));
