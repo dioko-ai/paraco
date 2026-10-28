@@ -81,7 +81,9 @@ waits for cleanup before safely recovering its stale control socket.
 
 Application output and lifecycle events are retained as agent-readable JSONL in
 `~/.paraco/logs` by default (`%USERPROFILE%\.paraco\logs` on Windows). Override
-with `--log-dir <path>` or `PARACO_LOG_DIR`. A rotating five-file store caps retained
+with `--log-dir <path>` or `PARACO_LOG_DIR`. Data is independent: select its
+base with `--data-dir` or `PARACO_DATA_DIR` (default `~/.paraco`). A rotating
+five-file store caps retained
 log data at 10 MiB per directory, shared across apps and server sessions.
 
 ```sh

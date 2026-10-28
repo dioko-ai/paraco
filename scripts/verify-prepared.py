@@ -22,7 +22,7 @@ with tempfile.TemporaryDirectory(prefix='pc-offline-',dir='/tmp') as directory:
     # Run twice to ensure execution does not invalidate the artifact's digests.
     for attempt in range(2):
         with open(root/'run.log','w') as log:
-            child=subprocess.Popen([binary,'--log-dir',str(root/'logs'),'run-prepared',str(relocated),'--port',str(port)],env={'PATH':'/nonexistent','TMPDIR':'/tmp'},cwd='/',stdout=log,stderr=log)
+            child=subprocess.Popen([binary,'--data-dir',str(root),'--log-dir',str(root/'logs'),'run-prepared',str(relocated),'--port',str(port)],env={'PATH':'/nonexistent','TMPDIR':'/tmp'},cwd='/',stdout=log,stderr=log)
             try:
                 # workerd can serve before the host consumes its readiness message.
                 # Wait for host readiness before testing a normal graceful stop.

@@ -49,7 +49,7 @@ def main():
             port = listener.getsockname()[1]
         env = dict(os.environ, PATH=str(ROOT / 'node_modules/.bin') + os.pathsep + os.environ.get('PATH', ''))
         with (root / 'host.log').open('w+') as log:
-            process = subprocess.Popen([BINARY, '--log-dir', root / 'logs', 'serve', '--config', config, '--port', str(port)], env=env, stdout=log, stderr=log)
+            process = subprocess.Popen([BINARY, '--data-dir', root, '--log-dir', root / 'logs', 'serve', '--config', config, '--port', str(port)], env=env, stdout=log, stderr=log)
             try:
                 for name in APPS:
                     def request(route='/', body=None):

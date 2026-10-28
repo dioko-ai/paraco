@@ -62,7 +62,7 @@ with tempfile.TemporaryDirectory(prefix="pc-durable-", dir="/tmp") as directory:
         port = sock.getsockname()[1]
     unit = f"dev.paraco.durable.{os.getpid()}.service"
     definition = root / unit
-    rendered = run(BINARY, "service", "render", "--platform", "linux", "--entry",
+    rendered = run(BINARY, "--log-dir", str(state / "logs"), "service", "render", "--platform", "linux", "--entry",
                    BINARY, "--config", str(config), "--state", str(state)).stdout
     definition.write_text(rendered.replace(" serve --config", f" serve --port {port} --config"))
 

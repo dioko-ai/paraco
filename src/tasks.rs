@@ -66,6 +66,7 @@ pub struct Tasks {
     root: PathBuf,
     workerd: PathBuf,
     running: Mutex<HashMap<String, Running>>,
+    artifacts: Mutex<()>,
     stop: AtomicBool,
     grants: Mutex<HashMap<String, Vec<String>>>,
     lease: Mutex<Option<fs::File>>,
@@ -114,16 +115,23 @@ impl Tasks {
         db.execute("UPDATE task_runs SET status='interrupted',ended=?1,diagnostic='Runtime stopped before a result was established; not replayed' WHERE status IN ('pending','running')",[now()]).map_err(err)?;
         let root = root.join("tasks");
         fs::create_dir_all(&root).map_err(err)?;
-        Ok(Arc::new(Self {
+        let tasks = Arc::new(Self {
             db: Arc::new(Mutex::new(db)),
             root,
             workerd,
             running: Mutex::new(HashMap::new()),
+            artifacts: Mutex::new(()),
             stop: AtomicBool::new(false),
             grants: Mutex::new(HashMap::new()),
             lease: Mutex::new(None),
             scheduler: Mutex::new(None),
-        }))
+        });
+        {
+            let _artifacts = tasks.artifacts.lock().unwrap();
+            let db = tasks.db.lock().unwrap();
+            let _ = tasks.cleanup_artifacts(&db);
+        }
+        Ok(tasks)
     }
     pub fn set_grant(&self, deployment: String, network: Vec<String>) {
         self.grants.lock().unwrap().insert(deployment, network);
@@ -188,13 +196,14 @@ impl Tasks {
             "draft"=>{let draft:Draft=serde_json::from_value(body).map_err(err)?;self.draft(deployment,draft)},
             "publish"=>self.publish(deployment,&body),
             "list"=>self.rows("SELECT json_object('id',id,'name',name,'current_revision',current,'archived',json(CASE archived WHEN 1 THEN 'true' ELSE 'false' END),'next_at',next_at,'once_claimed',once_claimed) FROM task_jobs WHERE deployment=?1 ORDER BY name",deployment,None),
-            "revisions"=>{let job=string(&body,"job_id")?;self.owned(deployment,job)?;let offset=body.get("offset").and_then(Value::as_u64).unwrap_or(0).min(2000);self.rows(&format!("SELECT json_object('id',id,'job_id',job,'body',json(body),'digest',digest,'created',created,'published',published) FROM task_revisions WHERE deployment=?1 AND job=?2 ORDER BY created DESC LIMIT 10 OFFSET {offset}"),deployment,Some(job))},
-            "history"=>{let job=body.get("job_id").and_then(Value::as_str);if let Some(job)=job{self.owned(deployment,job)?;}let offset=body.get("offset").and_then(Value::as_u64).unwrap_or(0).min(1000000);self.rows(&format!("SELECT json_object('id',id,'job_id',job,'revision_id',revision,'occurrence',occurrence,'status',status,'started',started,'ended',ended,'logs',substr(logs,1,1024),'logs_preview',1,'truncated',truncated,'diagnostic',diagnostic) FROM task_runs WHERE deployment=?1 AND (?2 IS NULL OR job=?2) ORDER BY started DESC LIMIT 500 OFFSET {offset}"),deployment,job)},
+            "revisions"=>{let job=string(&body,"job_id")?;self.owned(deployment,job)?;let offset=body.get("offset").and_then(Value::as_u64).unwrap_or(0).min(2000);self.rows(&format!("SELECT json_object('id',id,'job_id',job,'body',json(body),'digest',digest,'created',created,'published',published) FROM task_revisions WHERE deployment=?1 AND job=?2 ORDER BY created DESC,rowid DESC LIMIT 10 OFFSET {offset}"),deployment,Some(job))},
+            "history"=>{let job=body.get("job_id").and_then(Value::as_str);if let Some(job)=job{self.owned(deployment,job)?;}let offset=body.get("offset").and_then(Value::as_u64).unwrap_or(0).min(1000000);self.rows(&format!("SELECT json_object('id',id,'job_id',job,'revision_id',revision,'occurrence',occurrence,'status',status,'started',started,'ended',ended,'logs',substr(logs,1,1024),'logs_preview',1,'truncated',truncated,'diagnostic',diagnostic) FROM task_runs WHERE deployment=?1 AND (?2 IS NULL OR job=?2) ORDER BY started DESC,rowid DESC LIMIT 500 OFFSET {offset}"),deployment,job)},
             "revision"=>{let revision=string(&body,"revision_id")?;let db=self.db.lock().unwrap();let result:String=db.query_row("SELECT json_object('id',id,'job_id',job,'body',json(body),'digest',digest,'created',created,'published',published) FROM task_revisions WHERE id=?1 AND deployment=?2",params![revision,deployment],|r|r.get(0)).map_err(err)?;serde_json::from_str(&result).map_err(err)},
             "logs"=>{let run=string(&body,"run_id")?;let db=self.db.lock().unwrap();let result:String=db.query_row("SELECT json_object('id',id,'logs',logs,'truncated',truncated,'diagnostic',diagnostic) FROM task_runs WHERE id=?1 AND deployment=?2",params![run,deployment],|r|r.get(0)).map_err(err)?;drop(db);let mut value:Value=serde_json::from_str(&result).map_err(err)?;self.live(&mut value,true);Ok(value)},
             "notifications"=>self.rows("SELECT json_object('id',id,'run_id',run,'message',message,'created',created,'read',read,'delivery',delivery) FROM task_notifications WHERE deployment=?1 ORDER BY created DESC LIMIT 500",deployment,None),
             "read_notification"=>{let db=self.db.lock().unwrap();db.execute("UPDATE task_notifications SET read=1 WHERE deployment=?1 AND id=?2",params![deployment,string(&body,"id")?]).map_err(err)?;Ok(json!({"ok":true}))},
             "archive"|"unarchive"=>self.archive(deployment,string(&body,"job_id")?,action=="archive"),
+            "delete"=>self.delete(deployment,string(&body,"job_id")?),
             "run"=>{let job=string(&body,"job_id")?;self.owned(deployment,job)?;let run=self.admit(job,&format!("manual:{}",id("o")?),now(),true)?;self.dispatch_pending()?;Ok(json!({"run_id":run}))},
             "cancel"=>{let run=string(&body,"run_id")?;let db=self.db.lock().unwrap();let owner:Option<String>=db.query_row("SELECT deployment FROM task_runs WHERE id=?1",[run],|r|r.get(0)).optional().map_err(err)?;if owner.as_deref()!=Some(deployment){return Err("unknown run".into())}db.execute("UPDATE task_runs SET status='cancelled',ended=?2 WHERE id=?1 AND status='pending'",params![run,now()]).map_err(err)?;drop(db);if let Some(r)=self.running.lock().unwrap().get(run){r.cancel.store(true,Ordering::Relaxed);}Ok(json!({"ok":true}))},
             "preview"=>{let schedule:Schedule=serde_json::from_value(body.get("schedule").cloned().ok_or("schedule required")?).map_err(err)?;let mut at=body.get("after").and_then(Value::as_i64).unwrap_or_else(now);let mut dates=vec![];for _ in 0..5{if let Some(next)=next(&schedule,at)?{dates.push(next);at=next;}else{break}}Ok(json!({"times":dates}))},
@@ -298,43 +307,31 @@ impl Tasks {
         if let Some(job) = &draft.job_id {
             self.owned(deployment, job)?;
         }
+        let existing_job = draft.job_id.is_some();
         let job = draft.job_id.clone().unwrap_or(id("j")?);
         draft.job_id = Some(job.clone());
         let revision = id("v")?;
+        let _artifacts = self.artifacts.lock().unwrap();
         let body = serde_json::to_string(&draft).map_err(err)?;
         let digest = format!("{:x}", Sha256::digest(body.as_bytes()));
         let mut db = self.db.lock().unwrap();
         let tx = db.transaction().map_err(err)?;
-        let (jobs,revisions,bytes):(i64,i64,i64)=tx.query_row("SELECT (SELECT count(*) FROM task_jobs WHERE deployment=?1),count(*),coalesce(sum(length(CAST(body AS BLOB))),0) FROM task_revisions WHERE deployment=?1",[deployment],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).map_err(err)?;
-        let global_jobs: i64 = tx
-            .query_row("SELECT count(*) FROM task_jobs", [], |r| r.get(0))
-            .map_err(err)?;
-        if global_jobs >= 10000
-            && !tx
+        if let Some(existing) = draft.job_id.as_deref() {
+            let owner: Option<String> = tx
                 .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM task_jobs WHERE id=?1)",
-                    [&job],
-                    |r| r.get::<_, bool>(0),
+                    "SELECT deployment FROM task_jobs WHERE id=?1",
+                    [existing],
+                    |r| r.get(0),
                 )
-                .map_err(err)?
-        {
-            return Err("runtime task quota reached (10000 jobs)".into());
-        }
-        if (jobs >= 100
-            && draft.job_id.as_ref().is_none_or(|j| {
-                !tx.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM task_jobs WHERE id=?1)",
-                    [j],
-                    |r| r.get::<_, bool>(0),
-                )
-                .unwrap_or(false)
-            }))
-            || revisions >= 2000
-            || bytes + body.len() as i64 > 32 * 1024 * 1024
-        {
-            return Err(
-                "task scope quota reached (100 jobs, 2000 revisions, 32 MiB source history)".into(),
-            );
+                .optional()
+                .map_err(err)?;
+            if owner.as_deref().is_some_and(|owner| owner != deployment) {
+                return Err("unknown job".into());
+            }
+            // A supplied job must still exist after the earlier ownership check.
+            if owner.is_none() && existing_job {
+                return Err("unknown job".into());
+            }
         }
         tx.execute(
             "INSERT OR IGNORE INTO task_jobs(id,deployment,name) VALUES(?1,?2,?3)",
@@ -346,30 +343,32 @@ impl Tasks {
             params![revision, job, deployment, body, digest, now()],
         )
         .map_err(err)?;
-        tx.execute("DELETE FROM task_revisions WHERE deployment=?1 AND published IS NULL AND id NOT IN(SELECT id FROM task_revisions WHERE deployment=?1 AND published IS NULL ORDER BY created DESC LIMIT 100)",[deployment]).map_err(err)?;
-        for entry in fs::read_dir(&self.root).map_err(err)? {
-            let entry = entry.map_err(err)?;
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if name.len() == 33
-                && name.starts_with('v')
-                && name[1..].bytes().all(|b| b.is_ascii_hexdigit())
-            {
-                let retained: bool = tx
-                    .query_row(
-                        "SELECT EXISTS(SELECT 1 FROM task_revisions WHERE id=?1)",
-                        [&name],
-                        |r| r.get(0),
-                    )
-                    .map_err(err)?;
-                if !retained {
-                    let _ = fs::remove_dir_all(entry.path());
-                }
-            }
+        // Keep each job's newest unpublished revision, current revisions, and up to
+        // 100 additional recent drafts. Rowid breaks ties when timestamps match.
+        tx.execute("DELETE FROM task_revisions WHERE deployment=?1 AND published IS NULL AND id NOT IN (SELECT current FROM task_jobs WHERE current IS NOT NULL) AND rowid NOT IN (SELECT max(rowid) FROM task_revisions WHERE deployment=?1 AND published IS NULL GROUP BY job) AND rowid NOT IN (SELECT rowid FROM task_revisions WHERE deployment=?1 AND published IS NULL ORDER BY created DESC, rowid DESC LIMIT 100)", [deployment]).map_err(err)?;
+        let usage = |tx: &rusqlite::Transaction<'_>| -> Result<(i64, i64, i64, i64), String> {
+            tx.query_row("SELECT (SELECT count(*) FROM task_jobs WHERE deployment=?1),count(*),coalesce(sum(length(CAST(body AS BLOB))),0),(SELECT count(*) FROM task_jobs) FROM task_revisions WHERE deployment=?1", [deployment], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).map_err(err)
+        };
+        let mut counts = usage(&tx)?;
+        if counts.1 > 2000 || counts.2 > 32 * 1024 * 1024 {
+            // Under pressure retain the latest draft per job and all current revisions.
+            tx.execute("DELETE FROM task_revisions WHERE deployment=?1 AND published IS NULL AND id NOT IN (SELECT current FROM task_jobs WHERE current IS NOT NULL) AND rowid NOT IN (SELECT max(rowid) FROM task_revisions WHERE deployment=?1 AND published IS NULL GROUP BY job)", [deployment]).map_err(err)?;
+            counts = usage(&tx)?;
+        }
+        if counts.3 > 10000 {
+            return Err("runtime task quota reached (10000 jobs)".into());
+        }
+        if counts.0 > 100 || counts.1 > 2000 || counts.2 > 32 * 1024 * 1024 {
+            return Err(
+                "task scope quota reached (100 jobs, 2000 revisions, 32 MiB source history)".into(),
+            );
         }
         tx.commit().map_err(err)?;
+        let _ = self.cleanup_artifacts(&db);
         Ok(json!({"revision_id":revision,"job_id":job,"digest":digest,"body":draft}))
     }
     fn publish(&self, deployment: &str, body: &Value) -> Result<Value, String> {
+        let _artifacts = self.artifacts.lock().unwrap();
         let revision = string(body, "revision_id")?;
         if !body
             .as_object()
@@ -552,6 +551,73 @@ impl Tasks {
             return Err(err(e));
         }
         Ok(())
+    }
+    // Called with the artifact lock held after committing database changes.
+    fn cleanup_artifacts(&self, db: &Connection) -> Result<(), String> {
+        for entry in fs::read_dir(&self.root).map_err(err)? {
+            let entry = entry.map_err(err)?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.len() == 33
+                && name.starts_with('v')
+                && name[1..].bytes().all(|b| b.is_ascii_hexdigit())
+            {
+                let retained: bool = db
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM task_revisions WHERE id=?1)",
+                        [&name],
+                        |r| r.get(0),
+                    )
+                    .map_err(err)?;
+                if !retained {
+                    fs::remove_dir_all(entry.path()).map_err(err)?;
+                }
+            }
+        }
+        Ok(())
+    }
+    fn delete(&self, deployment: &str, job: &str) -> Result<Value, String> {
+        let _artifacts = self.artifacts.lock().unwrap();
+        let mut db = self.db.lock().unwrap();
+        let tx = db.transaction().map_err(err)?;
+        let archived: Option<bool> = tx
+            .query_row(
+                "SELECT archived FROM task_jobs WHERE id=?1 AND deployment=?2",
+                params![job, deployment],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(err)?;
+        match archived {
+            None => return Err("unknown job".into()),
+            Some(false) => return Err("archive job before deleting it".into()),
+            Some(true) => {}
+        }
+        let busy: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM task_runs WHERE job=?1 AND status IN ('pending','running'))", [job], |r| r.get(0)).map_err(err)?;
+        if busy {
+            return Err("job has an active run".into());
+        }
+        tx.execute(
+            "DELETE FROM task_notifications WHERE run IN (SELECT id FROM task_runs WHERE job=?1)",
+            [job],
+        )
+        .map_err(err)?;
+        tx.execute("DELETE FROM task_watermarks WHERE job=?1", [job])
+            .map_err(err)?;
+        tx.execute("DELETE FROM task_runs WHERE job=?1", [job])
+            .map_err(err)?;
+        tx.execute(
+            "DELETE FROM task_revisions WHERE job=?1 AND deployment=?2",
+            params![job, deployment],
+        )
+        .map_err(err)?;
+        tx.execute(
+            "DELETE FROM task_jobs WHERE id=?1 AND deployment=?2",
+            params![job, deployment],
+        )
+        .map_err(err)?;
+        tx.commit().map_err(err)?;
+        let artifacts_cleaned = self.cleanup_artifacts(&db).is_ok();
+        Ok(json!({"ok":true,"artifacts_cleaned":artifacts_cleaned}))
     }
     fn archive(&self, deployment: &str, job: &str, archive: bool) -> Result<Value, String> {
         self.owned(deployment, job)?;
@@ -1042,6 +1108,7 @@ impl Drop for NotificationPump {
 }
 fn prune(tx: &rusqlite::Transaction<'_>, job: &str) -> Result<(), String> {
     tx.execute("UPDATE task_runs SET logs='',truncated=1,diagnostic=coalesce(diagnostic,'') || ' [Log content expired]' WHERE job=?1 AND id NOT IN(SELECT id FROM task_runs WHERE job=?1 ORDER BY started DESC LIMIT 100) AND logs<>''",[job]).map_err(err)?;
+    tx.execute("DELETE FROM task_notifications WHERE run IN (SELECT id FROM task_runs WHERE job=?1 AND status NOT IN ('pending','running') AND id NOT IN (SELECT id FROM task_runs WHERE job=?1 ORDER BY started DESC LIMIT 1000))", [job]).map_err(err)?;
     tx.execute("DELETE FROM task_runs WHERE job=?1 AND status NOT IN('pending','running') AND id NOT IN(SELECT id FROM task_runs WHERE job=?1 ORDER BY started DESC LIMIT 1000)",[job]).map_err(err)?;
     Ok(())
 }
@@ -1427,6 +1494,207 @@ mod tests {
         .unwrap();
         (job, revision)
     }
+    #[test]
+    fn draft_pruning_preserves_latest_draft_for_each_job() {
+        let (_dir, tasks) = fixture();
+        let (first, _) = installed(&tasks, Schedule::Manual, 0);
+        let make = |job_id| Draft {
+            job_id,
+            name: "draft".into(),
+            source: "export default {}".into(),
+            schedule: Schedule::Manual,
+            timeout_ms: 1000,
+            network: vec![],
+            notify_success: false,
+            notify_failure: true,
+        };
+        let old = tasks.draft("owner", make(Some(first.clone()))).unwrap();
+        let latest = tasks.draft("owner", make(Some(first.clone()))).unwrap();
+        let other = tasks.draft("owner", make(None)).unwrap()["job_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        for _ in 0..110 {
+            tasks.draft("owner", make(Some(other.clone()))).unwrap();
+        }
+        let db = tasks.db.lock().unwrap();
+        let exists: bool = db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM task_revisions WHERE id=?1)",
+                [latest["revision_id"].as_str().unwrap()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(exists);
+        let old_exists: bool = db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM task_revisions WHERE id=?1)",
+                [old["revision_id"].as_str().unwrap()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(!old_exists);
+    }
+    #[test]
+    fn deleting_archived_jobs_recovers_quota_and_removes_owned_data() {
+        let (_dir, tasks) = fixture();
+        let (job, revision) = installed(&tasks, Schedule::Manual, 0);
+        let artifact = tasks.root.join(&revision);
+        fs::create_dir(&artifact).unwrap();
+        assert!(
+            tasks
+                .command("owner", "delete", json!({"job_id":job}))
+                .is_err()
+        );
+        tasks.archive("owner", &job, true).unwrap();
+        {
+            let db = tasks.db.lock().unwrap();
+            db.execute("INSERT INTO task_runs(id,job,deployment,revision,occurrence,status,started) VALUES('busy',?1,'owner',?2,'busy','running',1)", params![job, revision]).unwrap();
+        }
+        assert!(
+            tasks
+                .command("owner", "delete", json!({"job_id":job}))
+                .is_err()
+        );
+        {
+            let db = tasks.db.lock().unwrap();
+            db.execute("UPDATE task_runs SET status='finished' WHERE id='busy'", [])
+                .unwrap();
+            db.execute(
+                "INSERT INTO task_notifications VALUES('n','owner','busy','message',1,0,'local')",
+                [],
+            )
+            .unwrap();
+            db.execute(
+                "INSERT INTO task_watermarks VALUES(?1,?2,'x')",
+                params![job, revision],
+            )
+            .unwrap();
+            for i in 0..99 {
+                db.execute("INSERT INTO task_jobs(id,deployment,name,archived) VALUES(?1,'owner','other',1)", [format!("other{i}")]).unwrap();
+            }
+        }
+        tasks.set_grant("other".into(), vec![]);
+        assert!(
+            tasks
+                .command("other", "delete", json!({"job_id":job}))
+                .is_err()
+        );
+        tasks
+            .command("owner", "delete", json!({"job_id":job}))
+            .unwrap();
+        assert!(!artifact.exists());
+        let db = tasks.db.lock().unwrap();
+        for table in [
+            "task_jobs",
+            "task_revisions",
+            "task_runs",
+            "task_notifications",
+            "task_watermarks",
+        ] {
+            let count: i64 = db
+                .query_row(
+                    &format!(
+                        "SELECT count(*) FROM {table} WHERE {}",
+                        match table {
+                            "task_jobs" => "id=?1",
+                            "task_notifications" => "run='busy' AND ?1 IS NOT NULL",
+                            _ => "job=?1",
+                        }
+                    ),
+                    [&job],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 0, "{table}");
+        }
+        drop(db);
+        let draft = Draft {
+            job_id: None,
+            name: "new".into(),
+            source: "export default {}".into(),
+            schedule: Schedule::Manual,
+            timeout_ms: 1000,
+            network: vec![],
+            notify_success: false,
+            notify_failure: true,
+        };
+        tasks.draft("owner", draft).unwrap();
+    }
+    #[test]
+    fn quota_pressure_reclaims_surplus_drafts_transactionally() {
+        let (_dir, tasks) = fixture();
+        let (job, _) = installed(&tasks, Schedule::Manual, 0);
+        let draft = Draft {
+            job_id: Some(job.clone()),
+            name: "draft".into(),
+            source: "export default {}".into(),
+            schedule: Schedule::Manual,
+            timeout_ms: 1000,
+            network: vec![],
+            notify_success: false,
+            notify_failure: true,
+        };
+        for _ in 0..99 {
+            tasks.draft("owner", draft.clone()).unwrap();
+        }
+        {
+            let db = tasks.db.lock().unwrap();
+            for i in 0..1900 {
+                db.execute(
+                    "INSERT INTO task_revisions VALUES(?1,?2,'owner','{}','digest',1,1)",
+                    params![format!("published{i}"), job],
+                )
+                .unwrap();
+            }
+        }
+        let saved = tasks.draft("owner", draft).unwrap();
+        let db = tasks.db.lock().unwrap();
+        let count: i64 = db
+            .query_row(
+                "SELECT count(*) FROM task_revisions WHERE deployment='owner'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(count < 2000);
+        let exists: bool = db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM task_revisions WHERE id=?1)",
+                [saved["revision_id"].as_str().unwrap()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(exists);
+    }
+
+    #[test]
+    fn pruning_run_history_removes_its_notifications() {
+        let (_dir, tasks) = fixture();
+        let (job, revision) = installed(&tasks, Schedule::Manual, 0);
+        let mut db = tasks.db.lock().unwrap();
+        let tx = db.transaction().unwrap();
+        for i in 0..1001 {
+            let run = format!("run{i}");
+            tx.execute("INSERT INTO task_runs(id,job,deployment,revision,occurrence,status,started) VALUES(?1,?2,'owner',?3,?1,'success',?4)", params![run, job, revision, i]).unwrap();
+            tx.execute(
+                "INSERT INTO task_notifications VALUES(?1,'owner',?1,'message',1,0,'local')",
+                [&run],
+            )
+            .unwrap();
+        }
+        prune(&tx, &job).unwrap();
+        let count: i64 = tx
+            .query_row(
+                "SELECT count(*) FROM task_notifications WHERE run='run0'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0);
+        tx.commit().unwrap();
+    }
+
     fn ts(s: &str) -> i64 {
         chrono::DateTime::parse_from_rfc3339(s)
             .unwrap()

@@ -3,21 +3,23 @@ const assert=require('node:assert/strict');
 const fs=require('node:fs');
 const vm=require('node:vm');
 const code=fs.readFileSync(new URL('../examples/cron/app.js',`file://${__filename}`),'utf8');
-function browser() {
+function browser(handler) {
   class Element {
-    constructor(){this.value='';this.checked=false;this.children=[];this.listeners={};this.hidden=false;}
+    constructor(){this.value='';this.checked=false;this.children=[];this.listeners={};this.hidden=false;this.dataset={};}
     addEventListener(event,fn){this.listeners[event]=fn;}
     append(...children){this.children.push(...children);}
     replaceChildren(...children){this.children=children;}
     setAttribute(){}
+    contains(){return false;}
     get childElementCount(){return this.children.length;}
   }
   const nodes=new Map(); const get=id=>{if(!nodes.has(id))nodes.set(id,new Element());return nodes.get(id);};
-  Object.entries({source:'export default async function(ctx) {}',name:'Test',kind:'manual',timezone:'UTC',timeout:'60'}).forEach(([id,v])=>get(id).value=v);
+  Object.entries({source:'export default async function(ctx) {}',name:'Test',kind:'manual',timezone:'UTC',timeout:'60',frequency:'daily',time:'09:00'}).forEach(([id,v])=>get(id).value=v);
   get('includeSource').checked=true;
   const requests=[]; let resolveAi;
-  const context=vm.createContext({document:{getElementById:get,createElement:()=>new Element()},AbortController,Intl,Date,confirm:()=>true,fetch:async(url,options)=>{
+  const context=vm.createContext({document:{getElementById:get,createElement:()=>new Element()},AbortController,Intl,Date,window:{addEventListener(){}},setInterval(){},confirm:()=>true,fetch:async(url,options)=>{
     requests.push({action:url.slice(5),body:JSON.parse(options.body)});
+    if (handler) { const result=handler(url.slice(5), JSON.parse(options.body)); if (result !== undefined) return await result; }
     if(url==='/api/ai')return new Promise(resolve=>{resolveAi=text=>resolve({ok:true,json:async()=>({text})});});
     let value=[];
     if(url==='/api/status')value={machine_off:'Off means off.',global_concurrency:4,last_tick:null};
@@ -52,6 +54,73 @@ test('AI context excludes logs unless explicitly selected and bounds prompts',as
   assert.match(b.requests.find(r=>r.action==='ai').body.prompt,/HISTORY AND LOGS\n\(not included\)/);
   b.fire('abortAi');b.resolveAi('late');await tick();
 });
+const response=value=>({ok:true,json:async()=>value});
+const deferred=()=>{let resolve;const promise=new Promise(r=>resolve=r);return {promise,resolve};};
+test('save keeps new job identity when edits arrive and blocks double submit',async()=>{
+  const pending=deferred();const b=browser(action=>action==='draft'?pending.promise:undefined);await tick();
+  b.fire('editor','submit');b.fire('editor','submit');await tick();
+  assert.equal(b.requests.filter(r=>r.action==='draft').length,1);
+  b.get('source').value='newer';b.fire('editor','input');
+  pending.resolve(response({job_id:'j1',revision_id:'r1',digest:'x',body:{source:'older'}}));await tick();await tick();
+  assert.equal(vm.runInContext('state.selected',b.context),'j1');
+  assert.equal(b.get('source').value,'newer');assert.equal(b.get('review').hidden,true);
+});
+test('selection clears AI history and cannot replace edits made while loading',async()=>{
+  const pending=deferred();const b=browser(action=>action==='revisions'?pending.promise:action==='history'?response([{id:'old'}]):undefined);await tick();
+  vm.runInContext("state.jobs=[{id:'j1',name:'Job',current_revision:null}];state.runs=[{id:'other-job'}]",b.context);
+  vm.runInContext("selectJob('j1')",b.context);await tick();
+  assert.equal(vm.runInContext('state.runs.length',b.context),0);
+  b.get('source').value='my edit';b.fire('editor','input');
+  pending.resolve(response([{id:'r',body:{name:'Old',source:'old',schedule:{kind:'manual'},timeout_ms:60000,network:[]}}]));await tick();await tick();
+  assert.equal(b.get('source').value,'my edit');
+});
+test('paging sends offsets and periodic refresh preserves open rows',async()=>{
+  const revisions=Array.from({length:10},(_,i)=>({id:'r'+i,created:0,body:{}}));
+  const b=browser(action=>action==='revisions'?response(revisions):action==='history'?response([]):undefined);await tick();
+  vm.runInContext("state.selected='j1'",b.context);await vm.runInContext("loadDetails('j1')",b.context);
+  b.get('revisions').children[0].open=true;
+  await vm.runInContext('refresh()',b.context);assert.equal(b.get('revisions').children[0].open,true);
+  b.fire('moreRevisions');await tick();
+  assert.equal(b.requests.filter(r=>r.action==='revisions').at(-1).body.offset,10);
+  b.fire('prevRevisions');await tick();assert.equal(b.requests.filter(r=>r.action==='revisions').at(-1).body.offset,0);
+});
+test('failed publishing remains retryable',async()=>{
+  let attempts=0;const b=browser(action=>action==='publish'&&++attempts===1?{ok:false,status:400,json:async()=>({error:'try again'})}:undefined);await tick();
+  b.fire('editor','submit');await tick();b.get('approved').checked=true;b.fire('approved','change');b.fire('publish');await tick();
+  assert.equal(b.get('publish').disabled,false);b.fire('publish');await tick();assert.equal(attempts,2);
+});
+test('older refresh responses cannot overwrite a newer refresh',async()=>{
+  const delayed=deferred();let lists=0;const b=browser(action=>action==='list'?(++lists===1?delayed.promise:response([{id:'new',name:'New'}])):undefined);
+  await vm.runInContext('refresh()',b.context);delayed.resolve(response([{id:'old',name:'Old'}]));await tick();
+  assert.equal(vm.runInContext('state.jobs[0].id',b.context),'new');
+});
+test('publishing a saved revision does not mark it dirty',async()=>{
+  const b=browser();await tick();b.fire('editor','submit');await tick();b.get('approved').checked=true;b.fire('approved','change');b.fire('publish');await tick();
+  assert.equal(vm.runInContext('state.dirty',b.context),false);
+});
+test('selection blocks saving and generation until the requested job loads',async()=>{
+  const pending=deferred();const b=browser(action=>action==='revisions'?pending.promise:undefined);await tick();
+  vm.runInContext("state.jobs=[{id:'j1',name:'Job'}]",b.context);vm.runInContext("selectJob('j1')",b.context);await tick();
+  assert.equal(b.get('save').disabled,true);assert.equal(b.get('generate').disabled,true);b.fire('editor','submit');b.fire('generate');await tick();
+  assert.equal(b.requests.some(r=>r.action==='draft'||r.action==='ai'),false);
+  pending.resolve(response([]));await tick();await tick();assert.equal(b.get('save').disabled,false);
+});
+test('newest saved draft loads even when a published revision exists',async()=>{
+  const draft={name:'Job',source:'draft code',schedule:{kind:'manual'},timeout_ms:60000,network:[],notify_success:false,notify_failure:true};
+  const b=browser(action=>action==='revisions'?response([{id:'draft',published:null,body:draft},{id:'pub',published:10,body:{...draft,source:'published'}}]):undefined);await tick();
+  vm.runInContext("state.jobs=[{id:'j1',name:'Job',current_revision:'pub'}]",b.context);await vm.runInContext("selectJob('j1')",b.context);
+  assert.equal(b.get('source').value,'draft code');assert.equal(b.get('state').textContent,'Saved draft loaded');
+});
+test('one-off timestamps preserve milliseconds on an unchanged round trip',()=>{
+  const b=browser();const at=Date.parse('2026-11-01T08:30:15.123Z');
+  b.context.testAt=at;vm.runInContext("setDraft({name:'x',source:'x',schedule:{kind:'once',at:testAt},timeout_ms:60000,network:[]})",b.context);
+  assert.equal(vm.runInContext('schedule().at',b.context),at);assert.match(b.get('at').value,/15\.123/);
+});
+test('delete reports incomplete artifact cleanup',async()=>{
+  const b=browser(action=>action==='delete'?response({ok:true,artifacts_cleaned:false}):undefined);await tick();
+  vm.runInContext("state.jobs=[{id:'j1',name:'Job',archived:true}];state.selected='j1'",b.context);b.fire('delete');await tick();await tick();
+  assert.match(b.get('message').textContent,/artifacts could not be removed/);
+});
 test('source review marks removed and added lines',()=>{
   const b=browser();assert.equal(vm.runInContext("sourceDiff('a\\nb','a\\nc')",b.context),'  a\n- b\n+ c');
 });
@@ -74,6 +143,8 @@ test('HTTP adapter rejects foreign origins and oversized inputs without invoking
     if((await app.fetch(new Request('http://cron.localhost/../../secrets'),ctx)).status!==404)throw Error('asset whitelist');
     for (const [error,status] of [
       ['publication conflict: current revision changed; review again',409],
+      ['job has an active run',409],
+      ['archive job before deleting it',409],
       ['task requests network access outside deployment grants',403],
       ['unknown revision',404],
       ['task validation failed: syntax error at file:///home/private/tasks/task.ts:2:3',400],
@@ -83,6 +154,7 @@ test('HTTP adapter rejects foreign origins and oversized inputs without invoking
       const errorCtx={tasks:{command:async()=>{throw Error(error);}},ai:ctx.ai};
       const response=await app.fetch(req('publish',{}),errorCtx);const value=await response.json();
       if(response.status!==status)throw Error('error status mapping');
+      if((error==='job has an active run'||error==='archive job before deleting it')&&value.error!==error)throw Error('delete guidance lost');
       if(value.error.includes('/home/private'))throw Error('private path leaked');
       if(error.startsWith('task validation')&&!value.error.includes('syntax error'))throw Error('validation detail lost');
       if(error.startsWith('dependency validation')&&!value.error.includes('dependency validation failed'))throw Error('dependency validation detail lost');
@@ -102,7 +174,7 @@ test('real Cron browser lifecycle uses explicit review and immutable revision pu
   const server=net.createServer();await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));const port=server.address().port;await new Promise(resolve=>server.close(resolve));
   await cp(join(process.cwd(),'examples/cron'),join(dir,'cron'),{recursive:true});await mkdir(join(dir,'tmp'));
   await writeFile(join(dir,'server.json'),JSON.stringify({apps:[{path:'cron',taskAuthoring:true,taskNetwork:[]}]}));
-  const child=spawn(process.env.PARACO_BIN||join(process.cwd(),'target/debug/paraco'),['--log-dir',join(dir,'logs'),'serve','--config',join(dir,'server.json'),'--port',String(port)],{cwd:process.cwd(),stdio:['ignore','pipe','pipe'],env:{...process.env,TMPDIR:join(dir,'tmp')}});
+  const child=spawn(process.env.PARACO_BIN||join(process.cwd(),'target/debug/paraco'),['--log-dir',join(dir,'logs'),'--data-dir',dir,'serve','--config',join(dir,'server.json'),'--port',String(port)],{cwd:process.cwd(),stdio:['ignore','pipe','pipe'],env:{...process.env,TMPDIR:join(dir,'tmp')}});
   let output='';child.stdout.on('data',data=>output+=data);child.stderr.on('data',data=>output+=data);
   let browser;
   const wait=async(fn,label)=>{const end=Date.now()+30000;while(Date.now()<end){if(child.exitCode!==null)throw Error('runtime exited: '+output);if(await fn())return;await new Promise(resolve=>setTimeout(resolve,50));}throw Error('Timed out: '+label+'\n'+output);};
@@ -126,7 +198,7 @@ test('real Cron browser lifecycle uses explicit review and immutable revision pu
     await page.locator('#revisions details').first().locator('summary').click();await page.getByRole('button',{name:'Restore as editable draft'}).first().click();
     assert.equal(await page.locator('#review').isHidden(),true);
     assert.match(await page.getByRole('status').textContent(),/Restored to the editor/);
-    await page.locator('#kind').selectOption('cron');await page.locator('#timezone').fill('America/Denver');await page.locator('#expression').fill('0 9 * * *');await page.locator('#preview').click();
+    await page.locator('#kind').selectOption('cron');await page.locator('#frequency').selectOption('advanced');await page.locator('#timezone').fill('America/Denver');await page.locator('#expression').fill('0 9 * * *');await page.locator('#preview').click();
     await wait(async()=>/T\d\d:/.test(await page.locator('#occurrences').textContent()),'timezone schedule preview');
     await page.locator('#source').fill('export default async function(ctx) { syntax error here }');await page.getByRole('button',{name:'Save draft & review',exact:true}).click();
     await page.locator('#review').waitFor({state:'visible'});await page.locator('#approved').check();
@@ -141,4 +213,61 @@ test('real Cron browser lifecycle uses explicit review and immutable revision pu
     const exited=new Promise(resolve=>child.once('exit',resolve));child.kill('SIGINT');await Promise.race([exited,new Promise(resolve=>setTimeout(resolve,5000))]);if(child.exitCode===null){child.kill('SIGKILL');await exited;}
     await rm(dir,{recursive:true,force:true});
   }
+});
+test('Chromium exercises guided schedules, races, paging and refresh', {skip: !process.env.RUN_CRON_MOCK_BROWSER, timeout: 60000}, async()=>{
+  const http=require('node:http');const {chromium}=require('@playwright/test');
+  const html=fs.readFileSync(new URL('../examples/cron/index.html',`file://${__filename}`));
+  const app=fs.readFileSync(new URL('../examples/cron/app.js',`file://${__filename}`));
+  const requests=[];let draftGate,revisionGate;let current=null;let notifications=[{id:'n',message:'Notice',created:1,read:false}];
+  const jobs=[{id:'j1',name:'Existing',current_revision:'published',archived:false}];
+  const body={name:'Existing',source:'export default async function() {}',schedule:{kind:'manual'},timeout_ms:60000,network:[],notify_success:false,notify_failure:true};
+  const revisions=Array.from({length:11},(_,i)=>({id:i===0?'published':'r'+i,body,created:i,published:i===0}));
+  const runs=Array.from({length:501},(_,i)=>({id:'run'+i,revision_id:'published',started:i,status:'success',logs:'ok'}));
+  const server=http.createServer(async(req,res)=>{
+    if(req.method==='GET'){res.setHeader('Content-Type',req.url==='/app.js'?'text/javascript':'text/html');return res.end(req.url==='/app.js'?app:html);}
+    let raw='';for await(const chunk of req)raw+=chunk;const input=JSON.parse(raw),action=req.url.slice(5);requests.push({action,input});
+    if(action==='draft'&&draftGate)await draftGate.promise;
+    if(action==='revisions'&&revisionGate)await revisionGate.promise;
+    let value=[];
+    if(action==='list')value=jobs;
+    if(action==='notifications')value=notifications;
+    if(action==='status')value={machine_off:'Ready',last_tick:null,global_concurrency:4};
+    if(action==='revisions')value=revisions.slice(input.offset||0,(input.offset||0)+10);
+    if(action==='history')value=runs.slice(input.offset||0,(input.offset||0)+500);
+    if(action==='revision')value=revisions[0];
+    if(action==='preview')value={times:[]};
+    if(action==='draft'){current=input;value={job_id:'new-job',revision_id:'new-rev',digest:'abc',body:input};if(!jobs.some(j=>j.id==='new-job'))jobs.push({id:'new-job',name:input.name,current_revision:null,archived:false});}
+    if(action==='publish')value={ok:true};
+    res.setHeader('Content-Type','application/json');res.end(JSON.stringify(value));
+  });
+  await new Promise(r=>server.listen(0,'127.0.0.1',r));let browser;
+  try {
+    browser=await chromium.launch({headless:true,args:['--no-sandbox']});const page=await browser.newPage({timezoneId:'America/Denver'});
+    await page.addInitScript(()=>{window.setInterval=fn=>{window.cronPoll=fn;return 1;};});
+    page.on('dialog',dialog=>dialog.dismiss());
+    await page.goto(`http://127.0.0.1:${server.address().port}/`);await page.getByRole('button',{name:'Existing'}).waitFor();
+    assert.equal(await page.locator('#timezone').inputValue(),'America/Denver');
+    await page.locator('#kind').selectOption('cron');await page.locator('#time').fill('14:35');await page.locator('#preview').click();
+    await page.waitForFunction(()=>document.querySelector('#occurrences').textContent.includes('Manual schedule'));
+    assert.equal(requests.filter(r=>r.action==='preview').at(-1).input.schedule.expression,'35 14 * * *');
+    await page.locator('#frequency').selectOption('weekly');await page.locator('#weekday').selectOption('2');await page.locator('#preview').click();await page.waitForTimeout(50);
+    assert.equal(requests.filter(r=>r.action==='preview').at(-1).input.schedule.expression,'35 14 * * 2');
+    await page.locator('#kind').selectOption('once');await page.locator('#at').fill('2026-12-01T09:00');await page.locator('#preview').click();await page.waitForTimeout(50);
+    assert.equal(requests.filter(r=>r.action==='preview').at(-1).input.schedule.at,Date.parse('2026-12-01T09:00:00-07:00'));
+    draftGate=deferred();await page.locator('#save').click();await page.locator('#source').fill('newer source');draftGate.resolve();draftGate=null;
+    await page.getByRole('status').filter({hasText:'newer edits'}).waitFor();assert.equal(await page.locator('#source').inputValue(),'newer source');
+    await page.locator('#save').click();await page.locator('#review').waitFor();assert.equal(requests.filter(r=>r.action==='draft').at(-1).input.job_id,'new-job');
+    await page.locator('#approved').check();await page.locator('#publish').click();await page.getByRole('status').filter({hasText:'Reviewed revision published'}).waitFor();
+    await page.locator('#source').fill('dirty edit');await page.getByRole('button',{name:'Existing'}).click();assert.equal(await page.locator('#source').inputValue(),'dirty edit');
+    page.removeAllListeners('dialog');page.on('dialog',dialog=>dialog.accept());revisionGate=deferred();await page.getByRole('button',{name:'Existing'}).click();await page.locator('#source').fill('edited while loading');revisionGate.resolve();revisionGate=null;await page.waitForTimeout(100);assert.equal(await page.locator('#source').inputValue(),'edited while loading');
+    await page.locator('#moreRevisions').click();await page.waitForTimeout(100);assert.equal(requests.filter(r=>r.action==='revisions').at(-1).input.offset,10);
+    await page.locator('#moreHistory').click();await page.waitForTimeout(100);assert.equal(requests.filter(r=>r.action==='history').at(-1).input.offset,500);
+    await page.locator('#prevHistory').click();await page.waitForTimeout(100);
+    await page.locator('#history summary').first().focus();const beforePoll=requests.filter(r=>r.action==='list').length;await page.evaluate(()=>window.cronPoll());await page.waitForTimeout(100);
+    assert.ok(requests.filter(r=>r.action==='list').length>beforePoll);
+    assert.equal(await page.evaluate(()=>document.activeElement.matches('#history summary')),true);
+    await page.getByRole('button',{name:'Mark read'}).focus();notifications=[...notifications,{id:'n2',message:'New notice',created:2,read:false}];await page.evaluate(()=>window.cronPoll());await page.waitForTimeout(100);
+    assert.equal(await page.evaluate(()=>document.activeElement.textContent),'Mark read');
+    await page.locator('#name').focus();await page.evaluate(()=>window.cronPoll());await page.getByText('New notice').waitFor();
+  } finally {if(browser)await browser.close();await new Promise(r=>server.close(r));}
 });

@@ -106,6 +106,7 @@ impl Store {
             tx.commit().map_err(|e| e.to_string())?;
         }
         crate::platform::migrate(&mut db)?;
+        db.execute_batch("CREATE TABLE IF NOT EXISTS dashboard_plugin_tombstones(source TEXT NOT NULL, name TEXT NOT NULL, id TEXT NOT NULL, PRIMARY KEY(source,name));").map_err(|e| e.to_string())?;
         let platform_config = crate::platform::Config::load(root)?;
         let deployments = {
             let mut query = db
@@ -304,6 +305,62 @@ impl Store {
         Ok(deployment)
     }
 
+    /// Restore an explicitly retired dashboard catalog installation at the same source.
+    pub fn install_plugin(&mut self, source: &Path, name: &str) -> Result<Deployment, String> {
+        use rusqlite::OptionalExtension;
+        let source = canonical_source(source)?;
+        if self.disk.deployments.contains_key(&source) {
+            return self.install(Path::new(&source));
+        }
+        let id: Option<String> = self
+            .db
+            .query_row(
+                "SELECT id FROM dashboard_plugin_tombstones WHERE source=?1 AND name=?2",
+                rusqlite::params![source, name],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+        let deployment = Deployment {
+            id: match id {
+                Some(id) => id,
+                None => fresh_id()?,
+            },
+            desired_running: true,
+        };
+        let tx = self.db.transaction().map_err(|e| e.to_string())?;
+        tx.execute(
+            "INSERT INTO deployments VALUES (?1,?2,1)",
+            rusqlite::params![source, deployment.id],
+        )
+        .map_err(|e| e.to_string())?;
+        tx.execute(
+            "DELETE FROM dashboard_plugin_tombstones WHERE source=?1 AND name=?2",
+            rusqlite::params![source, name],
+        )
+        .map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())?;
+        self.disk.deployments.insert(source, deployment.clone());
+        Ok(deployment)
+    }
+
+    /// Retire a stopped catalog plugin while retaining its data identity.
+    pub fn retire_plugin(&mut self, source: &Path, name: &str) -> Result<(), String> {
+        let source = canonical_source(source)?;
+        let deployment = self
+            .disk
+            .deployments
+            .get(&source)
+            .ok_or("unknown deployment")?;
+        let tx = self.db.transaction().map_err(|e| e.to_string())?;
+        tx.execute("INSERT INTO dashboard_plugin_tombstones VALUES (?1,?2,?3) ON CONFLICT(source,name) DO UPDATE SET id=excluded.id", rusqlite::params![source, name, deployment.id]).map_err(|e| e.to_string())?;
+        tx.execute("DELETE FROM deployments WHERE source=?1", [&source])
+            .map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())?;
+        self.disk.deployments.remove(&source);
+        Ok(())
+    }
+
     /// Retire sources absent from the current server configuration. A later
     /// re-add is an explicit new installation and receives a fresh identity.
     pub fn reconcile(&mut self, sources: impl IntoIterator<Item = PathBuf>) -> Result<(), String> {
@@ -391,6 +448,32 @@ fn fresh_id() -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn catalog_retirement_restores_identity_and_data_after_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_root = dir.path().join("state");
+        let app = dir.path().join("plugin");
+        std::fs::create_dir(&app).unwrap();
+        let id;
+        {
+            let mut store = Store::open(&state_root).unwrap();
+            id = store.install_plugin(&app, "plugin").unwrap().id;
+            store
+                .storage(&id, "data", "key", Some(serde_json::json!("saved")), false)
+                .unwrap();
+            store.stop(&app).unwrap();
+            store.retire_plugin(&app, "plugin").unwrap();
+            assert!(store.storage(&id, "data", "key", None, false).is_err());
+        }
+        let mut store = Store::open(&state_root).unwrap();
+        let restored = store.install_plugin(&app, "plugin").unwrap();
+        assert_eq!(restored.id, id);
+        assert_eq!(
+            store.storage(&id, "data", "key", None, false).unwrap(),
+            serde_json::json!("saved")
+        );
+    }
 
     #[test]
     fn identity_tracks_canonical_source_and_retirement_is_fresh() {

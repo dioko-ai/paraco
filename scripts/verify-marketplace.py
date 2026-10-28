@@ -44,7 +44,7 @@ with tempfile.TemporaryDirectory(prefix="paraco-marketplace-") as temporary:
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
     with (root / "runtime.log").open("w+") as log:
-        process = subprocess.Popen([str(BINARY), "--log-dir", str(root / "logs"), "run", str(installed), "--port", str(port)], cwd=root, stdout=log, stderr=log)
+        process = subprocess.Popen([str(BINARY), "--data-dir", str(root), "--log-dir", str(root / "logs"), "run", str(installed), "--port", str(port)], cwd=root, stdout=log, stderr=log)
         try:
             for _ in range(100):
                 try:

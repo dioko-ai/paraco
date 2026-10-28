@@ -30,7 +30,7 @@ async function freePort() { const s=net.createServer(); await new Promise(r=>s.l
    });
  }
  async function start() {
-   child=spawn(binary,['--log-dir',logs,'cron','--port',String(port)],{cwd:tmp,env:{...process.env,...(process.env.PARACO_TEST_EMPTY_PATH ? {PATH:"/nonexistent"} : {}),TMPDIR:tmp},stdio:['ignore','pipe','pipe']});
+   child=spawn(binary,['--data-dir',tmp,'--log-dir',logs,'cron','--port',String(port)],{cwd:tmp,env:{...process.env,...(process.env.PARACO_TEST_EMPTY_PATH ? {PATH:"/nonexistent"} : {}),TMPDIR:tmp},stdio:['ignore','pipe','pipe']});
    child.stdout.on('data',b=>output+=b); child.stderr.on('data',b=>output+=b);
    await until(async()=>{const r=await call('/');return r.ok&&r.text.includes('editor');},'cron readiness');
  }
@@ -88,6 +88,11 @@ async function freePort() { const s=net.createServer(); await new Promise(r=>s.l
    await fs.copyFile(backup,path.join(stateRoot,'state.sqlite3'));
    await start();
    const restored=await api('run',{job_id:once.job_id});await outcome(once.job_id,restored.run_id,'success');
-   console.log('cron runtime: publication, scope, success/error/timeout/cancel, archive, restart, SIGKILL, notifications, one-off and database-only backup restoration checks passed');
+   await api('delete',{job_id:once.job_id},false);
+   await api('archive',{job_id:once.job_id});
+   assert.equal((await api('delete',{job_id:once.job_id})).ok,true);
+   assert.ok(!(await api('list')).some(job=>job.id===once.job_id));
+   await api('history',{job_id:once.job_id},false);
+   console.log('cron runtime: deletion, publication, scope, success/error/timeout/cancel, archive, restart, SIGKILL, notifications, one-off and database-only backup restoration checks passed');
  } finally {await stop();await fs.rm(tmp,{recursive:true,force:true});}
 })().catch(e=>{console.error(e);process.exitCode=1;});

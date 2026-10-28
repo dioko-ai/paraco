@@ -6,6 +6,8 @@
  */
 const { spawn, execFileSync } = require('node:child_process');
 const fs = require('node:fs');
+const os = require('node:os');
+const pathUtil = require('node:path');
 const { performance } = require('node:perf_hooks');
 const binary = process.env.PARACO_BIN;
 const configs = process.argv.slice(2);
@@ -33,13 +35,14 @@ async function waitExit(child) {
  let timer;
  const graceful=await Promise.race([new Promise(resolve=>child.once('exit',()=>resolve(true))),new Promise(resolve=>{timer=setTimeout(()=>resolve(false),15000);})]);
  clearTimeout(timer);
- if(!graceful) { child.kill('SIGKILL'); throw new Error('workload runtime did not shut down within 15 seconds'); }
+ if(!graceful) { child.kill('SIGKILL'); await new Promise(resolve => child.once('exit', resolve)); throw new Error('workload runtime did not shut down within 15 seconds'); }
 }
 
 async function run({ path, json }, index) {
  const port = 3900 + index; let out = "";
  const launched = performance.now();
- const child = spawn(binary, ['serve', '--config', path, '--port', String(port)], {stdio:['ignore','pipe','pipe']});
+ const dataDir = fs.mkdtempSync(pathUtil.join(os.tmpdir(), 'paraco-workload-'));
+ const child = spawn(binary, ['--data-dir', dataDir, '--log-dir', pathUtil.join(dataDir, 'logs'), 'serve', '--config', path, '--port', String(port)], {stdio:['ignore','pipe','pipe']});
  child.stdout.on('data', x => { out = (out+String(x)).slice(-65536); }); child.stderr.on('data', x => { out = (out+String(x)).slice(-65536); });
  try {
   for (let end = Date.now()+10000; !out.includes('dashboard listening') && Date.now()<end; ) await sleep(50);
@@ -64,7 +67,10 @@ async function run({ path, json }, index) {
   if(!management.every(app=>app.state==='running')) throw new Error('apps failed during noisy load');
   const statusCounts = {}; for (const r of [...responses, ...noisy]) statusCounts[r.status] = (statusCounts[r.status]||0)+1;
   return {apps:json.apps.length, startupMs, managementLatencyMs, treeRssAtReadyKiB, treeRssAfterLoadKiB:treeRss(child.pid), requests:responses.length, noisyRequests:noisy.length, elapsedMs:Math.round(performance.now()-started), rssAtReadyKiB, rssAfterLoadKiB:rss(child.pid), statusCounts};
- } finally { child.kill('SIGINT'); await waitExit(child); }
+ } finally {
+  child.kill('SIGINT');
+  try { await waitExit(child); } finally { if (child.exitCode !== null || child.signalCode !== null) fs.rmSync(dataDir, {recursive:true, force:true}); }
+ }
 }
 (async () => {
  const results = [];

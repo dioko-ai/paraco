@@ -41,7 +41,7 @@ test('artifact notebook publishes, resolves, traces lineage, and retains artifac
   }
 
   async function start() {
-    child = spawn(binary, ['--log-dir', logs, 'run', app, '--port', String(port)], {
+    child = spawn(binary, ['--data-dir', temp, '--log-dir', logs, 'run', app, '--port', String(port)], {
       cwd: temp,
       env: {
         ...process.env,

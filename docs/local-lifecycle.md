@@ -37,8 +37,7 @@ exit code and an error on stderr.
 
 Lifecycle commands acknowledge the request immediately; success means the
 request was accepted, not that the app has finished starting or stopping. Use
-`status <name>` to observe completion or failure. The management dashboard displays desired and observed state every two seconds.
-The main dashboard refreshes app status every two seconds.
+`status <name>` to observe completion or failure. The main dashboard displays desired and observed state every two seconds.
 
 Desired state is `running` or `stopped`. Observed state is `starting`, `running`,
 `stopping`, `stopped`, `backoff`, or `failed`. Apps deliberately stopped stay
@@ -76,7 +75,7 @@ budget lasts until a manual restart, a start of a failed/stopped app, or server
 restart; a successful launch does not reset it. This prevents repeatedly crashing
 apps from retrying forever.
 
-Both dashboards and CLI status show `backoff` with the last failure, retry number,
+The dashboard and CLI status show `backoff` with the last failure, retry number,
 and scheduled delay. Exhaustion shows `failed` with the failure and retry limit.
 Stop cancels a pending delay or launch. Restart resets the budget and supersedes
 pending retries. Start during backoff is a no-op. Other apps and management remain
@@ -138,7 +137,10 @@ Status refreshes every two seconds. Actions use the same supervisor operations a
 the CLI; an acknowledgment means the operation was requested. App links open their
 isolated `.localhost` origins in another tab. Downloaded plugins can be stopped
 and uninstalled from the dashboard; manually configured apps remain managed by
-the server configuration.
+the server configuration. Plugins requiring AI or tasks must be installed with
+`paraco marketplace install NAME --output DIRECTORY` and added to a configured
+host with the necessary grants. The catalog explains this restriction. Reinstalling
+the same dashboard catalog plugin reattaches its retained data identity and grants.
 
 Browser commands require an Origin matching the dashboard address and JSON
 content type. Host validation, Fetch Metadata checks, no CORS permissions, and a
@@ -157,7 +159,7 @@ desired state is running. Bounded persistent
 logs are available through the [log CLI and dashboard](local-logs.md).
 ## User-service definitions
 
-`paraco service render --platform linux|macos --entry /absolute/paraco --config /absolute/config.json --state /absolute/state` renders a private user-service definition using absolute paths and a ten-second graceful-stop bound. `paraco service setup|remove|status --platform linux|macos --config /absolute/config.json` explicitly operates an owned user registration; setup atomically installs the stable `~/.paraco/service/paraco` launcher pointing to the current immutable executable and uses `~/.paraco/state`, so future service launches do not depend on PATH, terminal CWD, or a release-specific definition. Replacing that launcher does not affect a process already running its immutable executable. It never invokes `sudo`, refuses foreign definitions or launcher files, and removal preserves configuration and state. Native-manager invocations are bounded to ten seconds and report an actionable error when unavailable. `paraco open` opens the main dashboard of the running server.
+`paraco service render --platform linux|macos --entry /absolute/paraco --config /absolute/config.json --state /absolute/data` renders a private user-service definition using the selected base as `--data-dir`, absolute paths, and a ten-second graceful-stop bound. `paraco service setup|remove|status --platform linux|macos --config /absolute/config.json` explicitly operates an owned user registration; setup atomically installs the stable `~/.paraco/service/paraco` launcher pointing to the current immutable executable and uses the selected data directory (`~/.paraco` by default), so future service launches do not depend on PATH, terminal CWD, or a release-specific definition. Replacing that launcher does not affect a process already running its immutable executable. It never invokes `sudo`, refuses foreign definitions or launcher files, and removal preserves configuration and state. Native-manager invocations are bounded to ten seconds and report an actionable error when unavailable. `paraco open` opens the main dashboard of the running server.
 
 A Linux systemd user unit normally starts when the user session is available; unattended boot requires user-controlled `loginctl enable-linger` and is not enabled by Paraco. A macOS LaunchAgent runs at user login, not before login. A current Linux systemd run observed startup, unexpected-death recovery, terminal independence, stopped-intent preservation, and graceful shutdown; see the [October verification record](verification-2026-10-25.md). Machine reboot and macOS manager behavior remain unverified, as does the public service setup/removal flow in a dedicated account.
 

@@ -34,6 +34,7 @@ pub fn run(
     port: u16,
     ai_config: Option<&Path>,
     log_dir: &Path,
+    data: &crate::data::Directory,
 ) -> Result<(), String> {
     if port == 0 {
         return Err("port must be from 1 through 65535".into());
@@ -45,7 +46,7 @@ pub fn run(
     let log = store.app(&app.name, "run", port)?;
     let stop = install_interrupt_handler()?;
     let name = app.name.clone();
-    let (_state, deployment_id) = standalone_state(&app.root, log_dir)?;
+    let (_state, deployment_id) = standalone_state(&app.root, log_dir, data)?;
     let mut running = RunningApp::start(
         app,
         &deployment_id,
@@ -77,6 +78,7 @@ pub fn run_prepared(
     port: u16,
     ai_config: Option<&Path>,
     log_dir: &Path,
+    data: &crate::data::Directory,
 ) -> Result<(), String> {
     if port == 0 {
         return Err("port must be from 1 through 65535".into());
@@ -87,7 +89,7 @@ pub fn run_prepared(
     let log = store.app(&artifact.app.name, "run", port)?;
     let stop = install_interrupt_handler()?;
     let name = artifact.app.name.clone();
-    let (_state, deployment_id) = standalone_state(&artifact.app.root, log_dir)?;
+    let (_state, deployment_id) = standalone_state(&artifact.app.root, log_dir, data)?;
     let mut running = RunningApp::start_prepared(
         artifact,
         &deployment_id,
@@ -116,15 +118,15 @@ pub fn run_prepared(
 /// Allocate or discover the host-owned identity used by standalone `run`.
 /// Keeping this store open for the process also prevents a concurrent server
 /// from claiming the same lifecycle state directory.
-fn standalone_state(root: &Path, log_dir: &Path) -> Result<(state::Store, String), String> {
-    use sha2::{Digest, Sha256};
+fn standalone_state(
+    root: &Path,
+    log_dir: &Path,
+    data: &crate::data::Directory,
+) -> Result<(state::Store, String), String> {
     let source = root
         .canonicalize()
         .map_err(|e| format!("cannot canonicalize application source: {e}"))?;
-    let digest = Sha256::digest(source.as_os_str().as_encoded_bytes());
-    let state_root = log_dir
-        .with_file_name("standalone-state")
-        .join(format!("{:x}", digest));
+    let state_root = data.standalone(&source, log_dir)?;
     let mut store = state::Store::open(&state_root)?;
     let deployment = store.install(&source)?;
     Ok((store, deployment.id))
@@ -132,9 +134,13 @@ fn standalone_state(root: &Path, log_dir: &Path) -> Result<(state::Store, String
 
 /// Print the stable ID before configuring grants. This is intentionally a
 /// host command, rather than a manifest field controlled by the application.
-pub fn standalone_identity(app_path: &Path, log_dir: &Path) -> Result<String, String> {
+pub fn standalone_identity(
+    app_path: &Path,
+    log_dir: &Path,
+    data: &crate::data::Directory,
+) -> Result<String, String> {
     let app = manifest::load(app_path).map_err(|error| error.to_string())?;
-    let (_store, id) = standalone_state(&app.root, log_dir)?;
+    let (_store, id) = standalone_state(&app.root, log_dir, data)?;
     Ok(id)
 }
 

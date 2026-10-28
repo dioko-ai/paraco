@@ -18,7 +18,7 @@ with tempfile.TemporaryDirectory(prefix='pc-service-',dir='/tmp') as directory:
     config=root/'server.json'; config.write_text(json.dumps({'apps':[{'path':str(app)}]}))
     with socket.socket() as sock: sock.bind(('127.0.0.1',0)); port=sock.getsockname()[1]
     label=f'dev.paraco.verify.{os.getpid()}'; mac=sys.platform=='darwin'
-    rendered=subprocess.check_output([binary,'service','render','--platform','macos' if mac else 'linux','--entry',binary,'--config',str(config),'--state',str(state)])
+    rendered=subprocess.check_output([binary,'--log-dir',str(root/'logs'),'service','render','--platform','macos' if mac else 'linux','--entry',binary,'--config',str(config),'--state',str(state)])
     def run(*args): return subprocess.run(args,check=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
     if mac:
         definition=root/'service.plist'; content=plistlib.loads(rendered); content['Label']=label

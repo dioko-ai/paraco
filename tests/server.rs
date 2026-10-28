@@ -93,6 +93,23 @@ impl Server {
         }
     }
     fn spawn(dir: &Path, config: &Path, port: u16, logs: &Path, control_root: &Path) -> Child {
+        Self::spawn_with_data(
+            dir,
+            config,
+            port,
+            logs,
+            control_root,
+            logs.parent().unwrap(),
+        )
+    }
+    fn spawn_with_data(
+        dir: &Path,
+        config: &Path,
+        port: u16,
+        logs: &Path,
+        control_root: &Path,
+        data: &Path,
+    ) -> Child {
         let workerd = std::env::var_os("WORKERD_BIN")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| std::path::PathBuf::from("node_modules/.bin/workerd"));
@@ -109,6 +126,8 @@ impl Server {
             &std::env::var_os("PATH").unwrap_or_default(),
         ));
         Command::new(env!("CARGO_BIN_EXE_paraco"))
+            .arg("--data-dir")
+            .arg(data)
             .arg("--log-dir")
             .arg(logs)
             .arg("serve")
@@ -1493,4 +1512,84 @@ fn occupied_ipv6_gateway_fails_before_launching_apps() {
             .unwrap_or_default()
             .is_empty()
     );
+}
+
+#[test]
+fn changing_log_directory_preserves_deployment_and_stopped_state() {
+    let mut server = Server::run(&[("hello", APP)]);
+    server.ready();
+    let before = server.state("hello", "running");
+    let deployment_id = before["deployment_id"].as_str().unwrap().to_owned();
+    server.control("stop", Some("hello"));
+    server.state("hello", "stopped");
+    server.stop(libc::SIGTERM);
+
+    let new_logs = tempfile::tempdir().unwrap();
+    server.child = Server::spawn_with_data(
+        server.dir.path(),
+        &server.dir.path().join("server.json"),
+        server.port,
+        &new_logs.path().join("logs"),
+        server.control_root.path(),
+        server.dir.path(),
+    );
+    server.ready();
+    let after = server.state("hello", "stopped");
+    assert_eq!(after["desired"], "stopped");
+    assert_eq!(after["deployment_id"], deployment_id);
+    server.stop(libc::SIGTERM);
+}
+
+#[test]
+fn downloaded_plugin_restores_data_through_symlinked_data_directory() {
+    let mut server = Server::run(&[]);
+    server.ready();
+    server.stop(libc::SIGTERM);
+    let state_root = fs::read_dir(server.dir.path().join("state"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let plugin = state_root.join("plugins/hello-world");
+    fs::create_dir_all(&plugin).unwrap();
+    fs::write(
+        plugin.join("paraco.json"),
+        r#"{"name":"hello-world","entrypoint":"main.ts","capabilities":["storage"]}"#,
+    )
+    .unwrap();
+    fs::write(plugin.join("main.ts"), r#"export default { async fetch(request, context) { return Response.json(await context.data.get("kept")); } };"#).unwrap();
+    // An offline fixture stands in for a verified catalog download. The server
+    // reopens downloads by their host-owned installation marker.
+    fs::write(plugin.join("paraco-install.json"), "{}").unwrap();
+    let retained = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let db = rusqlite::Connection::open(state_root.join("state.sqlite3")).unwrap();
+    db.execute(
+        "INSERT INTO dashboard_plugin_tombstones VALUES (?1,'hello-world',?2)",
+        rusqlite::params![plugin.canonicalize().unwrap().to_str().unwrap(), retained],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO storage VALUES (?1,'data','kept','\"retained-data\"')",
+        [retained],
+    )
+    .unwrap();
+    drop(db);
+    let alias = server.dir.path().join("data-alias");
+    std::os::unix::fs::symlink(server.dir.path(), &alias).unwrap();
+    server.child = Server::spawn_with_data(
+        server.dir.path(),
+        &server.dir.path().join("server.json"),
+        server.port,
+        &server.log_path,
+        server.control_root.path(),
+        &alias,
+    );
+    server.ready();
+    assert_eq!(
+        server.state("hello-world", "running")["deployment_id"],
+        retained
+    );
+    server.wait_for("/apps/hello-world/", "retained-data");
+    server.stop(libc::SIGTERM);
 }

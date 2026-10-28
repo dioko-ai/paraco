@@ -45,6 +45,8 @@ impl App {
             let contents = fs::read_to_string(config).unwrap();
             if contents.contains("REPLACE_WITH_PARACO_IDENTITY_OUTPUT") {
                 let identity = Command::new(env!("CARGO_BIN_EXE_paraco"))
+                    .arg("--data-dir")
+                    .arg(log_dir.path())
                     .arg("--log-dir")
                     .arg(log_dir.path().join("logs"))
                     .arg("identity")
@@ -69,7 +71,11 @@ impl App {
                 .env("PARACO_WORKERD_VERSION", workerd_version())
                 .env("PATH", test_path());
         }
-        command.arg("--log-dir").arg(log_dir.path().join("logs"));
+        command
+            .arg("--data-dir")
+            .arg(log_dir.path())
+            .arg("--log-dir")
+            .arg(log_dir.path().join("logs"));
         command
             .args([
                 "run",
@@ -520,6 +526,10 @@ fn prepare_accepts_resolved_contained_parent_imports_and_ordinary_source_text() 
     let stdout = destination.path().join("stdout");
     let stderr = destination.path().join("stderr");
     let child = Command::new(env!("CARGO_BIN_EXE_paraco"))
+        .arg("--data-dir")
+        .arg(destination.path())
+        .arg("--log-dir")
+        .arg(destination.path().join("logs"))
         .args(["run-prepared", artifact.to_str().unwrap(), "--port"])
         .arg(port.to_string())
         .stdout(File::create(&stdout).unwrap())
@@ -660,4 +670,29 @@ fn persistent_single_app_logs_bound_large_lines() {
     );
     assert!(records.iter().any(|r| r["event"] == "stopped"));
     assert!(!output.contains("PARACO_READY:"));
+}
+
+#[test]
+fn service_render_uses_selected_state_directory_as_data_root() {
+    let root = tempfile::tempdir().unwrap();
+    let data = root.path().join("service state");
+    for platform in ["linux", "macos"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_paraco"))
+            .args(["service", "render", "--platform", platform, "--entry"])
+            .arg(root.path().join("paraco"))
+            .arg("--config")
+            .arg(root.path().join("server.json"))
+            .arg("--state")
+            .arg(&data)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let rendered = String::from_utf8(output.stdout).unwrap();
+        assert!(rendered.contains("--data-dir"));
+        assert!(rendered.contains(data.to_str().unwrap()));
+    }
 }

@@ -1,7 +1,7 @@
 // Real Chromium smoke test for the main dashboard.
 // It is intentionally independent of the DOM-unit tests in management.test.cjs.
 const assert = require("node:assert/strict");
-const { mkdir, mkdtemp, writeFile } = require("node:fs/promises");
+const { mkdir, mkdtemp, writeFile, rm } = require("node:fs/promises");
 const { tmpdir } = require("node:os");
 const { join } = require("node:path");
 const { spawn } = require("node:child_process");
@@ -44,7 +44,7 @@ async function freePort() {
   await writeFile(join(other, "paraco.json"), JSON.stringify({ name: "other", entrypoint: "main.ts", capabilities: [] }));
   await writeFile(join(other, "main.ts"), 'export default { fetch() { return new Response("<h1>other</h1>", {headers:{"content-type":"text/html"}}); } };');
   await writeFile(join(dir, "server.json"), JSON.stringify({ apps: [{ path: "hello" }, { path: "other" }] }));
-  const child = spawn(bin, ["--log-dir", join(dir, "logs"), "serve", "--config", join(dir, "server.json"), "--port", String(port)], {
+  const child = spawn(bin, ["--data-dir", dir, "--log-dir", join(dir, "logs"), "serve", "--config", join(dir, "server.json"), "--port", String(port)], {
     cwd: root, detached: process.platform !== "win32", stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, TMPDIR: isolatedTmp }
   });
   let output = "";
@@ -103,7 +103,12 @@ async function freePort() {
       const [fromDashboard] = await Promise.all([page.context().waitForEvent('page'), page.locator('a[href*=".localhost:"]').first().click()]);
       await fromDashboard.getByRole('heading', { name: 'hello' }).waitFor({ timeout });
       await page.goto(url);
+      const openLink = page.getByRole("link", { name: "open hello" });
+      await openLink.focus();
+      await page.waitForTimeout(2200);
+      assert.equal(await openLink.evaluate(link => document.activeElement === link), true);
       await page.getByRole("button", { name: "logs hello" }).click();
+      assert.equal(await page.locator("#log-launch").evaluate(input => document.activeElement === input), true);
       await page.getByText("Logs: hello").waitFor({ timeout });
       await page.getByRole("button", { name: "restart hello" }).click();
       await page.getByText("restart requested for hello", { exact: false }).waitFor({ timeout });
@@ -115,5 +120,5 @@ async function freePort() {
       await page.getByRole("button", { name: "start hello", exact: true }).click();
       await page.getByText("2 of 2 apps running").waitFor({ timeout });
     } finally { await browser.close(); }
-  } finally { await stop(); }
+  } finally { await stop(); await rm(dir, { recursive: true, force: true }); }
 })().catch(error => { console.error(error); process.exitCode = 1; });

@@ -50,6 +50,10 @@ restoration after SIGKILL. Set `PARACO_BIN` for a non-default build location.
 Use `scripts/verify-prepared.py` for relocated prepared-app launches and
 failed-preparation preservation.
 
+Tests and browser scripts use isolated data directories, separate from their log
+directories, to avoid touching the developer’s state. The dashboard management mock tests use fixtures; browser smoke tests also
+exercise a running host.
+
 The complete checks use `RUST_TEST_THREADS=1` in CI to avoid ephemeral-port reuse
 between unrelated integration fixtures. Application concurrency is exercised by
 the multi-app suites and workload probe. `scripts/verify-service.py` operates a

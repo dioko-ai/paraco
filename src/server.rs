@@ -78,6 +78,7 @@ impl Default for RestartPolicy {
 }
 
 struct PreparedApp {
+    dashboard_plugin: bool,
     task_authoring: bool,
     task_network: Vec<String>,
     restart: RestartPolicy,
@@ -172,6 +173,7 @@ fn load(path: &Path) -> Result<Vec<PreparedApp>, String> {
                 return Err("taskNetwork requires taskAuthoring".into());
             }
             Ok(PreparedApp {
+                dashboard_plugin: false,
                 task_authoring: entry.task_authoring,
                 task_network: entry.task_network,
                 restart: entry.restart,
@@ -182,12 +184,17 @@ fn load(path: &Path) -> Result<Vec<PreparedApp>, String> {
         .collect()
 }
 
-pub fn serve(config: &Path, port: u16, log_dir: &Path) -> Result<(), String> {
+pub fn serve(
+    config: &Path,
+    port: u16,
+    log_dir: &Path,
+    data: &crate::data::Directory,
+) -> Result<(), String> {
     if port == 0 {
         return Err("port must be from 1 through 65535".into());
     }
     let mut apps = load(config)?;
-    let state_root = state_root(config, log_dir)?;
+    let state_root = data.hosted(config, Some(log_dir))?;
     let durable = open_state(&state_root)?;
     let plugins = state_root.join("plugins");
     std::fs::create_dir_all(&plugins).map_err(|e| e.to_string())?;
@@ -201,6 +208,7 @@ pub fn serve(config: &Path, port: u16, log_dir: &Path) -> Result<(), String> {
                 );
             }
             apps.push(PreparedApp {
+                dashboard_plugin: true,
                 app,
                 task_authoring: false,
                 task_network: vec![],
@@ -242,17 +250,6 @@ fn open_state(root: &Path) -> Result<state::Store, String> {
     }
 }
 
-fn state_root(config: &Path, log_dir: &Path) -> Result<PathBuf, String> {
-    use sha2::{Digest, Sha256};
-    let config = config
-        .canonicalize()
-        .map_err(|e| format!("cannot canonicalize server configuration: {e}"))?;
-    let digest = Sha256::digest(config.as_os_str().as_encoded_bytes());
-    Ok(log_dir
-        .with_file_name("state")
-        .join(format!("{:x}", digest)))
-}
-
 async fn host(
     apps: Vec<PreparedApp>,
     port: u16,
@@ -285,7 +282,14 @@ async fn host(
     };
     let mut initial = BTreeMap::new();
     for prepared in &apps {
-        let deployment = durable.lock().unwrap().install(&prepared.app.root)?;
+        let deployment = if prepared.dashboard_plugin {
+            durable
+                .lock()
+                .unwrap()
+                .install_plugin(&prepared.app.root, &prepared.app.name)?
+        } else {
+            durable.lock().unwrap().install(&prepared.app.root)?
+        };
         if prepared.task_authoring {
             if let Some(tasks) = &tasks {
                 tasks.set_grant(deployment.id.clone(), prepared.task_network.clone());
@@ -734,7 +738,10 @@ fn supervise(
         .read()
         .unwrap()
         .get(&name)
-        .map(|app| app.deployment_id.clone());
+        .map(|app| (app.deployment_id.clone(), app.admission.clone()));
+    let Some((_, instance)) = identity.as_ref() else {
+        return;
+    };
     let base = "/".to_string();
     let mut handled = None;
     let mut retry_generation = None;
@@ -745,7 +752,9 @@ fn supervise(
             let Some(app) = records.get(&name) else {
                 break;
             };
-            if Some(&app.deployment_id) != identity.as_ref() {
+            if !identity.as_ref().is_some_and(|(id, admission)| {
+                id == &app.deployment_id && Arc::ptr_eq(admission, &app.admission)
+            }) {
                 break;
             }
             (
@@ -765,16 +774,17 @@ fn supervise(
             retries = 0;
         }
         if desired == DesiredState::Stopped {
-            publish(&apps, &name, generation, AppState::Stopped);
+            publish(&apps, &name, instance, generation, AppState::Stopped);
             continue;
         }
-        publish(&apps, &name, generation, AppState::Starting);
+        publish(&apps, &name, instance, generation, AppState::Starting);
         let log = match store.app(&name, "serve", port) {
             Ok(log) => log,
             Err(error) => {
                 if recover(
                     &apps,
                     &name,
+                    instance,
                     generation,
                     &prepared.restart,
                     &mut retries,
@@ -801,6 +811,7 @@ fn supervise(
                 if recover(
                     &apps,
                     &name,
+                    instance,
                     generation,
                     &prepared.restart,
                     &mut retries,
@@ -817,6 +828,7 @@ fn supervise(
             publish(
                 &apps,
                 &name,
+                instance,
                 generation,
                 AppState::Running(running.port, backend_token),
             );
@@ -834,6 +846,7 @@ fn supervise(
             && recover(
                 &apps,
                 &name,
+                instance,
                 generation,
                 &prepared.restart,
                 &mut retries,
@@ -861,6 +874,7 @@ fn backend_token(name: &str, generation: u64) -> String {
 fn recover(
     apps: &Inventory,
     name: &str,
+    instance: &Arc<Semaphore>,
     generation: u64,
     policy: &RestartPolicy,
     retries: &mut u32,
@@ -880,7 +894,7 @@ fn recover(
         } else {
             error
         };
-        publish(apps, name, generation, AppState::Failed(detail));
+        publish(apps, name, instance, generation, AppState::Failed(detail));
         return false;
     }
     let delay = policy
@@ -891,6 +905,7 @@ fn recover(
     publish(
         apps,
         name,
+        instance,
         generation,
         AppState::Backoff(format!(
             "{error}; retry {retries}/{} in {delay} ms",
@@ -907,10 +922,18 @@ fn recover(
     !cancel.load(Ordering::Relaxed) && !stop.load(Ordering::Relaxed)
 }
 
-fn publish(apps: &Inventory, name: &str, generation: u64, state: AppState) {
+fn publish(
+    apps: &Inventory,
+    name: &str,
+    instance: &Arc<Semaphore>,
+    generation: u64,
+    state: AppState,
+) {
     let mut records = apps.write().unwrap();
-    let app = records.get_mut(name).unwrap();
-    if app.generation == generation {
+    let Some(app) = records.get_mut(name) else {
+        return;
+    };
+    if app.generation == generation && Arc::ptr_eq(&app.admission, instance) {
         if let AppState::Failed(error) = &state {
             runner::announce(true, format!("paraco: {name}: {error}"));
         }
@@ -923,6 +946,37 @@ fn publish(apps: &Inventory, name: &str, generation: u64, state: AppState) {
 mod origin_tests {
     use super::{app_host, permitted_browser_request};
     use axum::http::{HeaderMap, HeaderValue, Method};
+    #[test]
+    fn stale_supervisor_cannot_publish_into_removed_or_reinstalled_app() {
+        use super::*;
+        let apps: Inventory = Arc::new(RwLock::new(BTreeMap::new()));
+        let stale = Arc::new(Semaphore::new(8));
+        publish(&apps, "sample", &stale, 0, AppState::Failed("old".into()));
+        let current = Arc::new(Semaphore::new(8));
+        apps.write().unwrap().insert(
+            "sample".into(),
+            AppRecord {
+                deployment_id: "restored-id".into(),
+                source: PathBuf::new(),
+                root: PathBuf::new(),
+                desired: DesiredState::Running,
+                state: AppState::Starting,
+                generation: 0,
+                cancel: Arc::new(AtomicBool::new(false)),
+                admission: current.clone(),
+            },
+        );
+        publish(&apps, "sample", &stale, 0, AppState::Failed("old".into()));
+        assert!(matches!(
+            apps.read().unwrap()["sample"].state,
+            AppState::Starting
+        ));
+        publish(&apps, "sample", &current, 0, AppState::Stopped);
+        assert!(matches!(
+            apps.read().unwrap()["sample"].state,
+            AppState::Stopped
+        ));
+    }
     #[test]
     fn origin_uses_application_slug() {
         assert_eq!(app_host("hello", 80), "hello.localhost");

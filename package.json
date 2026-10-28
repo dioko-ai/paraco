@@ -10,7 +10,7 @@
   "scripts": {
     "check:tools": "node scripts/verify-tools.cjs",
     "test:management": "node --test tests/management.test.cjs",
-    "test:browser": "node tests/browser-smoke.cjs",
+    "test:browser": "RUN_DASHBOARD_BROWSER=1 node --test tests/management.test.cjs && node tests/browser-smoke.cjs",
     "check:schema": "node tests/schema-contract.cjs",
     "check:types": "tsc --noEmit --strict --lib es2022,dom runtime/paraco.d.ts runtime/cloudflare.ts runtime/d1-service.ts runtime/artifact-picker.ts runtime/cloudflare-binding.ts",
     "check": "npm run check:core && npm run check:tools && cargo test --tests && npm run test:browser && npm run test:cron-runtime && npm run test:cron-browser && npm run test:security && npm run test:cloudflare-contract && npm run test:artifact-picker && npm run test:platform-runtime && npm run test:system-runtime",
@@ -20,7 +20,7 @@
     "test:cron-ui": "node --test tests/cron-ui.test.cjs",
     "test:cron-runtime": "cargo build --locked && node tests/cron-runtime.cjs",
     "test:bundle-contract": "bash tests/build-bundle.sh",
-    "test:cron-browser": "RUN_CRON_BROWSER=1 node --test tests/cron-ui.test.cjs",
+    "test:cron-browser": "RUN_CRON_MOCK_BROWSER=1 RUN_CRON_BROWSER=1 node --test tests/cron-ui.test.cjs",
     "test:release": "bash tests/release-verification.sh",
     "test:security": "cargo build --locked && node tests/workerd-security.cjs",
     "test:cloudflare-contract": "node tests/cloudflare-contract.cjs",

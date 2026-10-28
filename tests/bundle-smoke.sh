@@ -45,7 +45,7 @@ unset PARACO_WORKERD PARACO_WORKERD_VERSION PARACO_ESBUILD
 export PATH="$base/foreign-path:$PATH"
 cd "$base"
 port=$((20000 + RANDOM % 20000))
-"$launcher" --log-dir "$base/logs" run "$app" --port "$port" >"$base/stdout" 2>"$base/stderr" & child=$!
+"$launcher" --data-dir "$base" --log-dir "$base/logs" run "$app" --port "$port" >"$base/stdout" 2>"$base/stderr" & child=$!
 deadline=$((SECONDS + 15))
 until grep -q 'listening on http://' "$base/stdout"; do
   kill -0 "$child" 2>/dev/null || { cat "$base/stderr" >&2; exit 1; }

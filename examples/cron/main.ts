@@ -8,7 +8,7 @@ const assets = new Map([
   ["/", [html, "text/html; charset=utf-8"]],
   ["/app.js", [appJs, "text/javascript; charset=utf-8"]],
 ]);
-const actions = new Set(["list", "draft", "publish", "archive", "unarchive", "run", "cancel", "history", "logs", "revisions", "revision", "notifications", "read_notification", "preview", "status"]);
+const actions = new Set(["list", "draft", "publish", "archive", "unarchive", "delete", "run", "cancel", "history", "logs", "revisions", "revision", "notifications", "read_notification", "preview", "status"]);
 async function jsonBody(request: Request): Promise<Record<string, unknown>> {
   if (!request.headers.get("content-type")?.startsWith("application/json")) throw new Error("invalid request");
   const reader = request.body?.getReader();
@@ -35,13 +35,13 @@ async function jsonBody(request: Request): Promise<Record<string, unknown>> {
 function safeError(error: unknown): {error: string; status: number} {
   const raw = error instanceof Error ? error.message : String(error);
   // Only task validation and known policy failures are suitable for the browser.
-  const known = /^(publication conflict:|task validation failed:|dependency validation failed[:;]|task requests network access|task authoring grant|job is |global concurrency|unknown (job|run|revision)|name required|timeout must|network grants|cron |invalid (cron|timezone|time|request)|request (too large|body timed out)|schedule required|expected_current_revision|restore creates|prepared task|cannot resolve|once |source |task source|task limit|revision limit|deployment task|task scope quota|timezone must|Task dependencies are not supported yet)/i;
+  const known = /^(publication conflict:|task validation failed:|dependency validation failed[:;]|task requests network access|task authoring grant|job is |job has an active run|archive job before deleting it|global concurrency|unknown (job|run|revision)|name required|timeout must|network grants|cron |invalid (cron|timezone|time|request)|request (too large|body timed out)|schedule required|expected_current_revision|restore creates|prepared task|cannot resolve|once |source |task source|task limit|revision limit|deployment task|task scope quota|timezone must|Task dependencies are not supported yet)/i;
   let message = known.test(raw) ? raw : "Request failed. Check the fields and host configuration, then refresh before retrying.";
   message = message.replace(/\x1b\[[0-9;]*m/g, "")
     .replace(/file:\/\/[^\s)\]"']+/g, "[task source]")
     .replace(/(?:\/[A-Za-z0-9_.-]+){2,}(?::\d+(?::\d+)?)?/g, "[task source]")
     .slice(0, 2000);
-  const status = /publication conflict|job is already running|global concurrency/.test(raw) ? 409
+  const status = /publication conflict|job is already running|job has an active run|archive job before deleting it|global concurrency/.test(raw) ? 409
     : /grant|outside deployment/.test(raw) ? 403
     : /^unknown (job|run|revision)/.test(raw) ? 404
     : /body timed out/.test(raw) ? 408 : 400;

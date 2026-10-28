@@ -18,7 +18,13 @@ Open the Cron link on the local dashboard. Create a job, save it for review,
 inspect the source diff, schedule, timeout and network access, check approval,
 and publish. Saving a draft does not execute it. Manual jobs run only when Run
 now is selected. Recurring and one-off jobs become eligible after publication.
-Paraco and the machine must be running for work to execute.
+Paraco and the machine must be running for work to execute. The editor offers
+daily, weekday and weekly schedules with a time and timezone; choose custom
+cron for a five-field expression. A one-off uses the browser’s local date and
+time. Preview checks upcoming occurrences before saving. Advanced source editing
+is available in the editor. Unsaved changes prompt before switching jobs or
+leaving the page. The app refreshes status and history periodically; use the
+previous and load-more controls to browse older revisions and runs.
 
 ## Host authorization
 
@@ -102,7 +108,13 @@ and are not silently replayed. External side effects are not exactly-once.
 Archive prevents new admissions and cancels pending dispatch. Already running
 work finishes unless explicitly cancelled. Unarchive resumes future recurring
 occurrences. It does not rerun a completed one-off; Run again is explicit. The
-browser warns before unarchiving an overdue one-off.
+browser warns before unarchiving an overdue one-off. An archived job can be
+permanently deleted after confirmation. Deletion removes its revisions, runs,
+notifications and compiled artifacts; it is rejected while a run is pending
+or running. The deployment-scoped task command is `delete` with `{ "job_id":
+"..." }` and returns `{ "ok": true, "artifacts_cleaned": true }` on success. If
+artifact removal fails after the database deletion, `artifacts_cleaned` is false
+and the browser reports that cleanup needs attention.
 
 ## Limits and retention
 
@@ -113,7 +125,8 @@ clearly; scheduled conflicts record skipped outcomes. Task output is bounded to
 for an individual run. Output loss and expired content are explicit.
 
 Per deployment, authoring is bounded to 100 jobs, 2,000 revisions and 32 MiB of
-revision source. Up to 100 unpublished revisions are retained. Published history
+revision source. The newest unpublished revision of each job and the 100 most recent unpublished
+revisions are retained. Published history
 is not silently deleted to make room; capacity errors require operator action.
 Each job retains up to 1,000 run records and logs for its latest 100 runs. The
 local inbox retains 500 notifications per deployment. Outcome and script events

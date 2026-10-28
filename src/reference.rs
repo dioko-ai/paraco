@@ -39,13 +39,14 @@ struct Generated {
 pub fn serve(
     port: u16,
     log_dir: &Path,
+    data: &crate::data::Directory,
     ai_config: Option<&Path>,
     network: Vec<String>,
 ) -> Result<(), String> {
-    let generated = prepare(log_dir, ai_config, network)?;
+    let generated = prepare(&data.cron_root(log_dir)?, ai_config, network)?;
     // Keep the lock and canonical generated source location alive throughout
     // serving. Updating the binary does not allocate a new deployment identity.
-    crate::server::serve(&generated.config, port, log_dir)
+    crate::server::serve(&generated.config, port, log_dir, data)
 }
 fn error(e: impl std::fmt::Display) -> String {
     e.to_string()
@@ -148,11 +149,10 @@ fn lock_root(path: &Path, created: bool) -> Result<File, String> {
     Ok(lock)
 }
 fn prepare(
-    log_dir: &Path,
+    proposed: &Path,
     ai_config: Option<&Path>,
     network: Vec<String>,
 ) -> Result<Generated, String> {
-    let proposed = log_dir.with_file_name("cron");
     let parent = proposed
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -260,7 +260,12 @@ mod tests {
         let logs = parent.join("logs");
         let ai = parent.join("AI \"settings\".json");
         fs::write(&ai, "{}").unwrap();
-        let first = prepare(&logs, Some(&ai), vec!["example.com:443".into()]).unwrap();
+        let first = prepare(
+            &logs.with_file_name("cron"),
+            Some(&ai),
+            vec!["example.com:443".into()],
+        )
+        .unwrap();
         let config = first.config.clone();
         let root = config.parent().unwrap();
         for (file, expected) in ASSETS {
@@ -276,12 +281,12 @@ mod tests {
         fs::create_dir(root.join("state")).unwrap();
         fs::write(root.join("state/keep"), "durable").unwrap();
         assert!(
-            prepare(&logs, None, vec![])
+            prepare(&logs.with_file_name("cron"), None, vec![])
                 .unwrap_err()
                 .contains("another running launcher")
         );
         drop(first);
-        let second = prepare(&logs, None, vec![]).unwrap();
+        let second = prepare(&logs.with_file_name("cron"), None, vec![]).unwrap();
         assert_eq!(second.config, config);
         assert_eq!(
             fs::read_to_string(root.join("keep.txt")).unwrap(),
@@ -300,13 +305,13 @@ mod tests {
         let logs = temp.path().join("logs");
         create_directory(&temp.path().join("cron")).unwrap();
         fs::write(temp.path().join("cron/unrelated"), "keep").unwrap();
-        assert!(prepare(&logs, None, vec![]).is_err());
+        assert!(prepare(&logs.with_file_name("cron"), None, vec![]).is_err());
         fs::remove_dir_all(temp.path().join("cron")).unwrap();
-        let generated = prepare(&logs, None, vec![]).unwrap();
+        let generated = prepare(&logs.with_file_name("cron"), None, vec![]).unwrap();
         drop(generated);
         fs::write(temp.path().join("cron/app/main.ts"), "user edits").unwrap();
         assert!(
-            prepare(&logs, None, vec![])
+            prepare(&logs.with_file_name("cron"), None, vec![])
                 .unwrap_err()
                 .contains("modified or unowned")
         );
@@ -327,7 +332,7 @@ mod tests {
             if target == "root" {
                 symlink(&outside, temp.path().join("cron")).unwrap();
             } else {
-                drop(prepare(&logs, None, vec![]).unwrap());
+                drop(prepare(&logs.with_file_name("cron"), None, vec![]).unwrap());
                 let path = temp.path().join("cron").join(target);
                 if path.is_dir() {
                     fs::remove_dir_all(&path).unwrap();
@@ -337,7 +342,7 @@ mod tests {
                 symlink(&outside, &path).unwrap();
             }
             assert!(
-                prepare(&logs, None, vec![]).is_err(),
+                prepare(&logs.with_file_name("cron"), None, vec![]).is_err(),
                 "must refuse {target}"
             );
             assert_eq!(fs::read_dir(&outside).unwrap().count(), 0);

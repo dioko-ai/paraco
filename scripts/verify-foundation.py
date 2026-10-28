@@ -18,7 +18,7 @@ def get(p, name, method='GET', body=None):
     request = urllib.request.Request(f'http://127.0.0.1:{p}/', data=body, method=method, headers={'Host':f'{name}.localhost:{p}', 'Content-Type':'application/json'})
     with urllib.request.urlopen(request,timeout=3) as response: return json.load(response)
 with tempfile.TemporaryDirectory(prefix='pc-', dir='/tmp') as directory:
-    root = pathlib.Path(directory); env = dict(os.environ, TMPDIR=directory, PARACO_LOG_DIR=str(root/'logs'))
+    root = pathlib.Path(directory); env = dict(os.environ, TMPDIR=directory, PARACO_LOG_DIR=str(root/'logs'), PARACO_DATA_DIR=str(root))
     configs=[]
     for index in range(50):
         app=root/f'app{index}'; app.mkdir()
@@ -46,11 +46,11 @@ with tempfile.TemporaryDirectory(prefix='pc-', dir='/tmp') as directory:
         stop(signal.SIGKILL); start()
         restored=json.loads(command('status','app0'))[0]
         assert restored['desired']=='stopped' and restored['deployment_id']==first[0]['deployment_id']
-        assert command('open','--print').strip()!=url
+        assert command('open','--print').strip()==url
         command('start','app0'); wait(lambda: json.loads(command('status','app0'))[0]['state']=='running')
         assert get(p,'app0')=={'draft':{'source':'return 42'},'timezone':'UTC'}
         stop()
-        print(json.dumps({'storage':'persisted after SIGKILL and restart','isolation':'app1 cannot read app0 draft','desired_state':'stopped intent and identity restored','open':'private URL rotates after restart'}))
+        print(json.dumps({'storage':'persisted after SIGKILL and restart','isolation':'app1 cannot read app0 draft','desired_state':'stopped intent and identity restored','open':'dashboard URL stays stable after restart'}))
     except Exception:
         output.flush()
         print(re.sub(r'(management dashboard )\S+', r'\1[redacted]', (root/'output').read_text()),file=sys.stderr)

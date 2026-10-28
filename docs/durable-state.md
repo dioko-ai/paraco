@@ -15,9 +15,17 @@ commands acknowledge success. SQLite uses full synchronous durability; executabl
 artifacts, provider credentials, and application data remain separate.
 
 State directories are private to their owner. The default hosted database is
-`<log-directory-parent>/state/<sha256(canonical-server-config-path)>/state.sqlite3`.
-Standalone applications use their canonical source identity under that state
-parent. Changing a canonical configuration/source path changes its namespace.
+`<data-dir>/state/<sha256(canonical-server-config-path)>/state.sqlite3`.
+Standalone applications use `<data-dir>/standalone-state/<sha256(canonical-source-path)>`;
+cron uses `<data-dir>/cron`. The data directory defaults to `~/.paraco` and can
+be selected with `--data-dir` or `PARACO_DATA_DIR`. Log configuration is independent.
+Changing a canonical configuration/source path changes its namespace.
+
+An existing older service store at `~/.paraco/state/state/<hash>` is reused when
+it is the only store. If both old and current service stores exist, select the
+intended base explicitly with `--data-dir`; neither is moved. If data is detected
+beside a former custom log directory, startup asks for `--data-dir` pointing to
+the old log directory's parent, so the existing data remains in place.
 
 ## Scoped storage for cron drafts
 
@@ -39,9 +47,9 @@ which translates them to the existing host-scoped storage service. The binding
 is present only for apps granted storage.
 
 `examples/cron-drafts` demonstrates storing draft source and timezone across
-restarts. This stores drafts only; scheduling, publication, task history, and AI
-approval workflows remain subsequent milestones. Draft data does not authorize
-execution. Keep executable code and accepted revisions outside this mutable store.
+restarts. Draft data does not authorize execution. The task service separately
+provides reviewed publication, scheduling, and run history; see
+[tasks and cron](tasks-and-cron.md).
 
 ## Update, removal, and backup
 
@@ -56,7 +64,9 @@ formats must be prepared again; execution never downloads runtime dependencies.
 Removing an app from a hosted configuration retires its deployment identity.
 Data remains in the database for backup/export, but a later re-add receives a
 new ID and cannot silently inherit old data or grants. Stop preserves identity
-and data. There is no automatic data purge or scheduler archive operation yet.
+and data. Uninstalling a stopped dashboard catalog plugin retains its data and
+reattaches its identity when that same plugin is reinstalled at the same source;
+its existing capability grants still apply.
 Removing a user service removes its registration and preserves state/config/data.
 
 Stop the service before taking an export:
@@ -81,8 +91,8 @@ headless/manual use. The URL uses the gateway port and needs no access token.
 
 User services are explicit opt-in. Linux uses a systemd user unit; macOS uses a
 LaunchAgent in the GUI login domain. Definitions use absolute executable/config
-paths and a stable launcher, with logs/state beneath the selected service state
-directory. Launchd restarts unsuccessful exits; systemd uses `Restart=on-failure`.
+paths and a stable launcher. Service setup uses the selected data directory,
+and logs have their own configuration. Launchd restarts unsuccessful exits; systemd uses `Restart=on-failure`.
 Neither setup enables unattended pre-login operation. Linux lingering requires a
 separate administrator decision; macOS LaunchAgents require a logged-in user.
 

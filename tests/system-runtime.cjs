@@ -57,7 +57,7 @@ test('system capability is opt-in, reports host metrics, and is protected by the
   };
 
   async function start(app, port) {
-    child = spawn(binary, ['--log-dir', logs, 'run', app, '--port', String(port)], {
+    child = spawn(binary, ['--data-dir', temp, '--log-dir', logs, 'run', app, '--port', String(port)], {
       cwd: temp, env: environment, stdio: ['ignore', 'pipe', 'pipe'],
     });
     const current = child;
@@ -93,7 +93,7 @@ test('system capability is opt-in, reports host metrics, and is protected by the
 
   async function assertDenied(app, port) {
     const result = await new Promise((resolve, reject) => {
-      const denied = spawn(binary, ['--log-dir', logs, 'run', app, '--port', String(port)], {
+      const denied = spawn(binary, ['--data-dir', temp, '--log-dir', logs, 'run', app, '--port', String(port)], {
         cwd: temp, env: environment, stdio: ['ignore', 'pipe', 'pipe'],
       });
       let text = '';

@@ -5,6 +5,7 @@ mod artifact;
 mod bridge;
 mod capability;
 mod control;
+mod data;
 mod guardian;
 mod logs;
 mod manifest;
@@ -28,6 +29,9 @@ struct Cli {
     /// Persistent JSONL log directory (otherwise PARACO_LOG_DIR or ~/.paraco/logs).
     #[arg(long, global = true)]
     log_dir: Option<PathBuf>,
+    /// Application data directory (otherwise PARACO_DATA_DIR or ~/.paraco); independent of logs.
+    #[arg(long, global = true)]
+    data_dir: Option<PathBuf>,
     #[command(subcommand)]
     command: Command,
 }
@@ -226,6 +230,17 @@ fn main() {
     }
 }
 
+fn service_log_dir(path: Option<&std::path::Path>) -> Result<PathBuf, String> {
+    let path = logs::directory(path)?;
+    if path.is_absolute() {
+        Ok(path)
+    } else {
+        Ok(std::env::current_dir()
+            .map_err(|e| e.to_string())?
+            .join(path))
+    }
+}
+
 fn execute(cli: Cli) -> Result<(), String> {
     match cli.command {
         Command::Check { app, target } => {
@@ -253,6 +268,7 @@ fn execute(cli: Cli) -> Result<(), String> {
         } => reference::serve(
             port,
             &logs::directory(cli.log_dir.as_deref())?,
+            &data::Directory::resolve(cli.data_dir.as_deref())?,
             ai_config.as_deref(),
             allow_task_network,
         ),
@@ -272,22 +288,45 @@ fn execute(cli: Cli) -> Result<(), String> {
                     state,
                 },
         } => {
+            let log_dir = service_log_dir(cli.log_dir.as_deref())?;
             let rendered = match platform {
-                ServicePlatform::Linux => service::render_systemd(&entry, &config, &state),
-                ServicePlatform::Macos => service::render_launch_agent(&entry, &config, &state),
+                ServicePlatform::Linux => {
+                    service::render_systemd(&entry, &config, &state, &log_dir)
+                }
+                ServicePlatform::Macos => {
+                    service::render_launch_agent(&entry, &config, &state, &log_dir)
+                }
             }?;
             print!("{rendered}");
             Ok(())
         }
         Command::Service {
             command: ServiceCommand::Setup { platform, config },
-        } => service::operate(platform.into(), "setup", &config),
+        } => service::operate(
+            platform.into(),
+            "setup",
+            &config,
+            &data::Directory::resolve(cli.data_dir.as_deref())?,
+            &service_log_dir(cli.log_dir.as_deref())?,
+        ),
         Command::Service {
             command: ServiceCommand::Remove { platform, config },
-        } => service::operate(platform.into(), "remove", &config),
+        } => service::operate(
+            platform.into(),
+            "remove",
+            &config,
+            &data::Directory::resolve(cli.data_dir.as_deref())?,
+            &service_log_dir(cli.log_dir.as_deref())?,
+        ),
         Command::Service {
             command: ServiceCommand::Status { platform, config },
-        } => service::operate(platform.into(), "status", &config),
+        } => service::operate(
+            platform.into(),
+            "status",
+            &config,
+            &data::Directory::resolve(cli.data_dir.as_deref())?,
+            &service_log_dir(cli.log_dir.as_deref())?,
+        ),
         Command::Logs { app, tail, port } => logs::print(
             &logs::directory(cli.log_dir.as_deref())?,
             app.as_deref(),
@@ -297,7 +336,11 @@ fn execute(cli: Cli) -> Result<(), String> {
         Command::Identity { app } => {
             println!(
                 "{}",
-                runner::standalone_identity(&app, &logs::directory(cli.log_dir.as_deref())?)?
+                runner::standalone_identity(
+                    &app,
+                    &logs::directory(cli.log_dir.as_deref())?,
+                    &data::Directory::resolve(cli.data_dir.as_deref())?
+                )?
             );
             Ok(())
         }
@@ -307,9 +350,12 @@ fn execute(cli: Cli) -> Result<(), String> {
         Command::Restart { app, port } => {
             control::execute(port, control::Action::Restart, Some(app))
         }
-        Command::Serve { config, port } => {
-            server::serve(&config, port, &logs::directory(cli.log_dir.as_deref())?)
-        }
+        Command::Serve { config, port } => server::serve(
+            &config,
+            port,
+            &logs::directory(cli.log_dir.as_deref())?,
+            &data::Directory::resolve(cli.data_dir.as_deref())?,
+        ),
         Command::Run {
             app,
             port,
@@ -319,6 +365,7 @@ fn execute(cli: Cli) -> Result<(), String> {
             port,
             ai_config.as_deref(),
             &logs::directory(cli.log_dir.as_deref())?,
+            &data::Directory::resolve(cli.data_dir.as_deref())?,
         ),
         Command::RunPrepared {
             artifact,
@@ -329,6 +376,7 @@ fn execute(cli: Cli) -> Result<(), String> {
             port,
             ai_config.as_deref(),
             &logs::directory(cli.log_dir.as_deref())?,
+            &data::Directory::resolve(cli.data_dir.as_deref())?,
         ),
     }
 }

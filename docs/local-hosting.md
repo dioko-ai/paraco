@@ -1,6 +1,6 @@
 # Foreground local hosting
 
-Run several app directories and local dashboards in one foreground server:
+Run several app directories and one local dashboard in a foreground server:
 
 ```sh
 cargo run -- serve --config ./examples/server.json
@@ -103,6 +103,10 @@ states, plus stopping and stopped states after lifecycle commands. Running apps
 have an Open app link. Failed apps show a supervisor error;
 other apps continue serving. Status refreshes every two seconds without caching.
 The same page provides app controls, logs, and plugin downloads and uninstall.
+Plugins requiring AI or tasks cannot be installed from the dashboard; use
+`paraco marketplace install NAME --output DIRECTORY` and add the app to a
+configured host with the required grants. The data directory is independent of
+logs; use `--data-dir` or `PARACO_DATA_DIR` to select it.
 It requires no external assets; downloading a plugin retrieves its catalog package.
 Running means the adapter bound its listener and the process has not exited;
 it is not an application health probe.

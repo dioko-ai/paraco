@@ -13,6 +13,9 @@ Resolution order:
 2. `PARACO_LOG_DIR` environment variable.
 3. The user's home directory plus `.paraco/logs`.
 
+Log location does not select application data. Use `--data-dir` or
+`PARACO_DATA_DIR` to select data separately (default `~/.paraco`).
+
 The default is `$HOME/.paraco/logs` on Linux and macOS, and
 `%USERPROFILE%\.paraco\logs` on Windows. Use an override for a platform-specific
 service or system location; native service integration remains future work.

@@ -114,7 +114,7 @@ async function main() {
 
   try {
     assert.ok(await fs.stat(paraco).catch(() => null), 'build Paraco before running this integration test');
-    cron = spawn(paraco, ['--log-dir', path.join(tmp, 'logs'), 'cron', '--port', String(cronPort),
+    cron = spawn(paraco, ['--data-dir', tmp, '--log-dir', path.join(tmp, 'logs'), 'cron', '--port', String(cronPort),
       '--allow-task-network', `127.0.0.1:${fixture.port}`],
     {cwd: tmp, env, stdio: ['ignore', 'pipe', 'pipe']});
     cron.stdout.on('data', chunk => output += chunk);
@@ -187,7 +187,7 @@ async function main() {
       const server = net.createServer(); server.once('error', reject);
       server.listen(0, '127.0.0.1', () => { const port = server.address().port; server.close(() => resolve(port)); });
     });
-    app = spawn(paraco, ['--log-dir', path.join(tmp, 'app-logs'), 'run', sourceApp, '--port', String(appPort)],
+    app = spawn(paraco, ['--data-dir', tmp, '--log-dir', path.join(tmp, 'app-logs'), 'run', sourceApp, '--port', String(appPort)],
       {cwd: tmp, env, stdio: ['ignore', 'pipe', 'pipe']});
     let appOutput = '';
     app.stdout.on('data', chunk => appOutput += chunk);
@@ -232,7 +232,7 @@ async function main() {
       const server = net.createServer(); server.once('error', reject);
       server.listen(0, '127.0.0.1', () => { const port = server.address().port; server.close(() => resolve(port)); });
     });
-    const importChild = spawn(paraco, ['--log-dir', path.join(tmp, 'import-logs'), 'run', sourceApp, '--port', String(importPort)],
+    const importChild = spawn(paraco, ['--data-dir', tmp, '--log-dir', path.join(tmp, 'import-logs'), 'run', sourceApp, '--port', String(importPort)],
       {cwd: tmp, env, stdio: ['ignore', 'pipe', 'pipe']});
     let importOutput = '';
     importChild.stdout.on('data', chunk => importOutput += chunk);

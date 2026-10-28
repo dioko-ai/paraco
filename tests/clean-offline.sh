@@ -15,7 +15,7 @@ trap cleanup EXIT
 for mode in prepared prepared source; do
   if [[ $mode == prepared ]]; then args=(run-prepared "$artifact"); expected=dependency-ok
   else args=(run "$hello"); expected='Hello from Paraco'; fi
-  PATH=/missing TMPDIR=/tmp /tmp/paraco-offline-launcher --log-dir /tmp/paraco-clean-logs "${args[@]}" --port 18781 >/tmp/paraco-clean.log 2>&1 & child=$!
+  PATH=/missing TMPDIR=/tmp /tmp/paraco-offline-launcher --data-dir /tmp/paraco-clean-data --log-dir /tmp/paraco-clean-logs "${args[@]}" --port 18781 >/tmp/paraco-clean.log 2>&1 & child=$!
   ready=0
   for ((attempt=0; attempt<200; attempt++)); do
     if grep -q 'listening on http://' /tmp/paraco-clean.log && { exec 3<>/dev/tcp/127.0.0.1/18781; } 2>/dev/null; then ready=1; break; fi

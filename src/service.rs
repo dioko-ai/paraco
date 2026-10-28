@@ -56,26 +56,37 @@ fn xml(value: &Path) -> Result<String, String> {
         .replace('\'', "&apos;"))
 }
 
-pub fn render_systemd(entry: &Path, config: &Path, state: &Path) -> Result<String, String> {
+pub fn render_systemd(
+    entry: &Path,
+    config: &Path,
+    state: &Path,
+    log_dir: &Path,
+) -> Result<String, String> {
     let entry = systemd_quote(entry)?;
     let config = systemd_quote(config)?;
-    let logs = systemd_quote(&state.join("logs"))?;
+    let logs = systemd_quote(log_dir)?;
     // WorkingDirectory takes a path, not an ExecStart-style argument list.
     // Quotes would become literal path characters and make it non-absolute.
+    let data = systemd_quote(state)?;
     let state = systemd_path(state)?;
     Ok(format!(
-        "{MARKER}[Unit]\nDescription=Paraco local host\n\n[Service]\nType=simple\nExecStart={entry} serve --config {config} --log-dir {logs}\nWorkingDirectory={state}\nRestart=on-failure\nRestartSec=2\nTimeoutStopSec=10\n\n[Install]\nWantedBy=default.target\n"
+        "{MARKER}[Unit]\nDescription=Paraco local host\n\n[Service]\nType=simple\nExecStart={entry} serve --config {config} --log-dir {logs} --data-dir {data}\nWorkingDirectory={state}\nRestart=on-failure\nRestartSec=2\nTimeoutStopSec=10\n\n[Install]\nWantedBy=default.target\n"
     ))
 }
 
-pub fn render_launch_agent(entry: &Path, config: &Path, state: &Path) -> Result<String, String> {
+pub fn render_launch_agent(
+    entry: &Path,
+    config: &Path,
+    state: &Path,
+    log_dir: &Path,
+) -> Result<String, String> {
     let entry = xml(entry)?;
     let config = xml(config)?;
-    let logs = xml(&state.join("logs"))?;
+    let logs = xml(log_dir)?;
     let temporary = xml(&std::env::temp_dir())?;
     let state = xml(state)?;
     Ok(format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n{LAUNCH_MARKER}\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict>\n<key>Label</key><string>dev.paraco.host</string>\n<key>ProgramArguments</key><array><string>{entry}</string><string>serve</string><string>--config</string><string>{config}</string><string>--log-dir</string><string>{logs}</string></array>\n<key>EnvironmentVariables</key><dict><key>TMPDIR</key><string>{temporary}</string></dict>\n<key>WorkingDirectory</key><string>{state}</string>\n<key>RunAtLoad</key><true/>\n<key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>\n<key>ThrottleInterval</key><integer>2</integer>\n<key>ProcessType</key><string>Background</string>\n<key>ExitTimeOut</key><integer>10</integer>\n</dict></plist>\n"
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n{LAUNCH_MARKER}\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict>\n<key>Label</key><string>dev.paraco.host</string>\n<key>ProgramArguments</key><array><string>{entry}</string><string>serve</string><string>--config</string><string>{config}</string><string>--log-dir</string><string>{logs}</string><string>--data-dir</string><string>{state}</string></array>\n<key>EnvironmentVariables</key><dict><key>TMPDIR</key><string>{temporary}</string></dict>\n<key>WorkingDirectory</key><string>{state}</string>\n<key>RunAtLoad</key><true/>\n<key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>\n<key>ThrottleInterval</key><integer>2</integer>\n<key>ProcessType</key><string>Background</string>\n<key>ExitTimeOut</key><integer>10</integer>\n</dict></plist>\n"
     ))
 }
 
@@ -145,6 +156,7 @@ pub struct Paths {
     pub entry: PathBuf,
     pub config: PathBuf,
     pub state: PathBuf,
+    pub logs: PathBuf,
     pub definition: PathBuf,
 }
 
@@ -155,7 +167,12 @@ pub fn service_entry(home: &Path) -> Result<PathBuf, String> {
 
 /// Derive stable service paths from the owning user's home. No PATH or current
 /// working directory is consulted by generated definitions.
-pub fn paths(platform: Platform, config: &Path) -> Result<Paths, String> {
+pub fn paths(
+    platform: Platform,
+    config: &Path,
+    data: &crate::data::Directory,
+    logs: &Path,
+) -> Result<Paths, String> {
     absolute(config, "config path")?;
     let home = std::env::var_os("HOME").ok_or("HOME is required for user-service setup")?;
     let home = PathBuf::from(home);
@@ -163,7 +180,8 @@ pub fn paths(platform: Platform, config: &Path) -> Result<Paths, String> {
     Ok(Paths {
         entry: service_entry(&home)?,
         config: config.to_path_buf(),
-        state: home.join(".paraco/state"),
+        state: data.root.clone(),
+        logs: logs.to_path_buf(),
         definition: definition_path(platform, &home)?,
     })
 }
@@ -200,8 +218,10 @@ fn install_entry(entry: &Path) -> Result<(), String> {
 
 pub fn render(platform: Platform, paths: &Paths) -> Result<String, String> {
     match platform {
-        Platform::Linux => render_systemd(&paths.entry, &paths.config, &paths.state),
-        Platform::Macos => render_launch_agent(&paths.entry, &paths.config, &paths.state),
+        Platform::Linux => render_systemd(&paths.entry, &paths.config, &paths.state, &paths.logs),
+        Platform::Macos => {
+            render_launch_agent(&paths.entry, &paths.config, &paths.state, &paths.logs)
+        }
     }
 }
 
@@ -330,13 +350,27 @@ fn setup(
 
 /// Explicit setup/removal/status operations. They never invoke sudo, never delete
 /// state/configuration, and reject a foreign registration before manager calls.
-pub fn operate(platform: Platform, action: &str, config: &Path) -> Result<(), String> {
+pub fn operate(
+    platform: Platform,
+    action: &str,
+    config: &Path,
+    data: &crate::data::Directory,
+    logs: &Path,
+) -> Result<(), String> {
     if (platform == Platform::Linux && !cfg!(target_os = "linux"))
         || (platform == Platform::Macos && !cfg!(target_os = "macos"))
     {
         return Err("service operations require the matching native operating system".into());
     }
-    let paths = paths(platform, config)?;
+    let mut paths = paths(platform, config, data, logs)?;
+    if action == "setup" {
+        let chosen = data.hosted(config, Some(logs))?;
+        paths.state = chosen
+            .parent()
+            .and_then(Path::parent)
+            .ok_or("invalid service data path")?
+            .to_path_buf();
+    }
     match action {
         "setup" => setup(&paths, platform, || {
             manager(platform, action, &paths.definition)
@@ -373,6 +407,7 @@ mod tests {
             entry: root.path().join("paraco"),
             config: root.path().join("config"),
             state: root.path().join("state"),
+            logs: root.path().join("logs"),
             definition: root.path().join("service"),
         };
         std::os::unix::fs::symlink("/old/paraco", &paths.entry).unwrap();
@@ -396,22 +431,37 @@ mod tests {
             Path::new("/opt/paraco/bin/paraco"),
             Path::new("/tmp/a b/config.json"),
             Path::new("/tmp/state dir"),
+            Path::new("/tmp/log dir"),
         )
         .unwrap();
         assert!(s.contains(
             "ExecStart=\"/opt/paraco/bin/paraco\" serve --config \"/tmp/a b/config.json\""
         ));
+        assert!(s.contains("--log-dir \"/tmp/log dir\" --data-dir \"/tmp/state dir\""));
         assert!(s.contains("TimeoutStopSec=10"));
         assert!(s.contains("\nWorkingDirectory=/tmp/state dir\n"));
     }
     #[test]
     fn escapes_plist_and_rejects_relative_paths() {
         assert!(
-            render_launch_agent(Path::new("/a&b"), Path::new("/c<d"), Path::new("/state"))
-                .unwrap()
-                .contains("/a&amp;b")
+            render_launch_agent(
+                Path::new("/a&b"),
+                Path::new("/c<d"),
+                Path::new("/state"),
+                Path::new("/log&dir")
+            )
+            .unwrap()
+            .contains("/a&amp;b")
         );
-        assert!(render_systemd(Path::new("paraco"), Path::new("/c"), Path::new("/s")).is_err());
+        assert!(
+            render_systemd(
+                Path::new("paraco"),
+                Path::new("/c"),
+                Path::new("/s"),
+                Path::new("/logs")
+            )
+            .is_err()
+        );
     }
     #[test]
     fn stable_entry_is_absolute_and_independent_of_release() {
@@ -422,9 +472,13 @@ mod tests {
     }
     #[test]
     fn launch_agent_has_xml_declaration_before_ownership_marker_and_bounded_shutdown() {
-        let definition =
-            render_launch_agent(Path::new("/bin/paraco"), Path::new("/c"), Path::new("/s"))
-                .unwrap();
+        let definition = render_launch_agent(
+            Path::new("/bin/paraco"),
+            Path::new("/c"),
+            Path::new("/s"),
+            Path::new("/logs"),
+        )
+        .unwrap();
         assert!(definition.starts_with("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"));
         assert!(definition.contains(&format!("\n{LAUNCH_MARKER}\n")));
         assert!(definition.contains("<key>ExitTimeOut</key><integer>10</integer>"));
@@ -440,7 +494,13 @@ mod tests {
         fs::remove_file(&p).unwrap();
         write_owned(
             &p,
-            &render_systemd(Path::new("/bin/paraco"), Path::new("/c"), Path::new("/s")).unwrap(),
+            &render_systemd(
+                Path::new("/bin/paraco"),
+                Path::new("/c"),
+                Path::new("/s"),
+                Path::new("/logs"),
+            )
+            .unwrap(),
         )
         .unwrap();
         remove_owned(&p).unwrap();

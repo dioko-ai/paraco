@@ -9,7 +9,7 @@ function browser({ hash = '#secret', status = 200, error = null, stored = null, 
   const requests = [], timers = [], history = [], storage = new Map(stored ? [['paraco-token', stored]] : []);
   let document;
   class Element {
-    constructor(tag) { this.tag = tag; this.children = []; this.attributes = {}; this.listeners = {}; }
+    constructor(tag) { this.tag = tag; this.children = []; this.attributes = {}; this.listeners = {}; this.dataset = {}; }
     append(...nodes) { this.children.push(...nodes); }
     replaceChildren(...nodes) { this.children = nodes; }
     setAttribute(name, value) { this.attributes[name] = value; }
@@ -19,7 +19,7 @@ function browser({ hash = '#secret', status = 200, error = null, stored = null, 
     focus() { document.activeElement = this; }
   }
   const nodes = { '#summary': new Element('p'), '#message': new Element('p'), '#apps': new Element('ul') };
-  for (const id of ['logs', 'log-title', 'log-output', 'log-launch', 'log-refresh', 'catalog-refresh', 'plugin-message', 'plugins']) { nodes['#' + id] = new Element('div'); nodes['#' + id].value = ''; }
+  for (const id of ['logs', 'log-title', 'log-output', 'log-status', 'log-launch', 'log-refresh', 'catalog-refresh', 'plugin-message', 'plugins']) { nodes['#' + id] = new Element('div'); nodes['#' + id].value = ''; }
   document = { querySelector: id => nodes[id], createElement: tag => new Element(tag), activeElement: null };
   const context = vm.createContext({
     document, location: { hash }, history: { replaceState: (...args) => history.push(args) },
@@ -96,7 +96,8 @@ test('logs render hostile content as text, filter launches, refresh and show emp
   assert.match(b.nodes['#log-output'].textContent, /No retained logs/);
   vm.runInContext('request = async () => { throw Error("offline"); }', b.context);
   await b.nodes['#log-refresh'].listeners.click();
-  assert.match(b.nodes['#log-output'].textContent, /Unable to load logs: offline/);
+  assert.match(b.nodes['#log-status'].textContent, /Unable to load logs: offline/);
+  assert.match(b.nodes['#log-output'].textContent, /No retained logs/);
 });
 
 test('catalog displays capabilities and installs the selected exact version', async () => {
@@ -146,7 +147,7 @@ test('lifecycle controls match running, stopped, failed, and transitional states
   for (const [state, labels] of Object.entries({
     running: ['Stop', 'Restart', 'View logs'],
     stopped: ['Start', 'View logs'],
-    failed: ['Start', 'View logs'],
+    failed: ['Start', 'Stop', 'View logs'],
     starting: ['Cancel start', 'View logs'],
     backoff: ['Cancel retry', 'View logs'],
     stopping: ['View logs'],
@@ -157,4 +158,146 @@ test('lifecycle controls match running, stopped, failed, and transitional states
   vm.runInContext('render({apps: [{name: "sample", state: "starting"}]}); update = async command => { globalThis.cancelCommand = command; }', b.context);
   await b.nodes['#apps'].querySelectorAll('button')[0].listeners.click();
   assert.deepEqual(JSON.parse(JSON.stringify(b.context.cancelCommand)), {action: 'stop', app: 'sample'});
+});
+
+
+test('polling preserves unchanged rows and open link focus', async () => {
+  const b = browser();
+  await flush();
+  const row = b.nodes['#apps'].children[0];
+  const link = b.nodes['#apps'].querySelectorAll('a')[0];
+  link.focus();
+  await vm.runInContext('update()', b.context);
+  assert.equal(b.nodes['#apps'].children[0], row);
+  assert.equal(b.document.activeElement, link);
+});
+
+test('catalog explains unsupported plugins and marks installed plugins', async () => {
+  const b = browser();
+  await flush();
+  vm.runInContext(`request = async () => ({apps: [
+    {name: "a", title: "A", version: "1", description: "", capabilities: ["ai"], installable: false, install_reason: "Configure AI on the host"},
+    {name: "b", title: "B", version: "1", description: "", capabilities: [], installable: true, installed: true}
+  ]})`, b.context);
+  await b.nodes['#catalog-refresh'].listeners.click();
+  const buttons = b.nodes['#plugins'].querySelectorAll('button');
+  assert.equal(buttons[0].disabled, true);
+  assert.match(buttons[0].title, /Configure AI/);
+  assert.equal(buttons[1].textContent, 'Installed');
+  assert.equal(buttons[1].disabled, true);
+});
+
+test('failed downloaded plugin can be stopped before uninstall', async () => {
+  const b = browser();
+  await flush();
+  vm.runInContext('render({apps: [{name: "sample", desired: "running", state: "failed", uninstallable: true}]}); update = async command => { globalThis.command = command; }', b.context);
+  const buttons = b.nodes['#apps'].querySelectorAll('button');
+  assert.equal(buttons.at(-1).disabled, true);
+  await buttons.find(button => button.textContent === 'Stop').listeners.click();
+  assert.deepEqual(JSON.parse(JSON.stringify(b.context.command)), {action: 'stop', app: 'sample'});
+});
+
+test('dashboard interactions survive polling and failed mutations in Chromium', {skip: !process.env.RUN_DASHBOARD_BROWSER}, async () => {
+  const { chromium } = require('@playwright/test');
+  const html = fs.readFileSync(new URL('../runtime/dashboard.html', `file://${__filename}`), 'utf8').replace('<script src="/dashboard.js" defer></script>', '');
+  const browser = await chromium.launch({headless: true});
+  try {
+    const page = await browser.newPage();
+    await page.setContent(html);
+    await page.evaluate(() => {
+      window.fixture = {
+        apps: [{name:'hello', state:'running', desired:'running', url:'http://hello.localhost/', uninstallable:true}, {name:'other', state:'stopped', desired:'stopped'}],
+        plugins: [{name:'ai', title:'AI', version:'1', description:'', capabilities:['ai'], installable:false, install_reason:'Configure AI on the host'}, {name:'hello', title:'Hello', version:'1', description:'', capabilities:[], installed:true}, {name:'new', title:'New', version:'1', description:'', capabilities:[], installable:true}],
+        mutation: null, reads: 0, logMessage:'initial log', failReads:false, failLogs:false,
+      };
+      window.fetch = async (path, options) => {
+        if (options.method === 'POST') {
+          await new Promise((resolve, reject) => { window.fixture.mutation = {resolve, reject}; });
+          return {ok:true, json:async()=>({})};
+        }
+        if (path === '/api/plugins') return {ok:true, json:async()=>({apps:window.fixture.plugins})};
+        if (path.startsWith('/api/logs') && window.fixture.failLogs) throw Error('logs offline');
+        if (path.startsWith('/api/logs')) return {ok:true, json:async()=>({records:[{timestamp_unix_ms:0, run_id:'x', stream:'stdout', event:'output', message:window.fixture.logMessage}]})};
+        window.fixture.reads++;
+        if (window.fixture.failReads) throw Error('status offline');
+        return {ok:true, json:async()=>({apps:structuredClone(window.fixture.apps)})};
+      };
+    });
+    await page.addScriptTag({content: source});
+    const link = page.getByRole('link', {name:'open hello'});
+    await link.waitFor();
+    await link.focus();
+    await page.waitForFunction(() => window.fixture.reads >= 2, null, {timeout:5000});
+    assert.equal(await link.evaluate(node => document.activeElement === node), true);
+    await page.evaluate(() => { window.fixture.apps[1].state = 'failed'; });
+    await page.waitForFunction(() => document.querySelector('[aria-label="stop other"]'), null, {timeout:5000});
+    assert.equal(await link.evaluate(node => document.activeElement === node), true);
+    await page.getByRole('button', {name:'stop other'}).focus();
+    await page.evaluate(() => { window.fixture.apps[1].state = 'stopped'; });
+    await page.waitForFunction(() => document.activeElement?.getAttribute('aria-label') === 'logs other', null, {timeout:5000});
+    await page.getByRole('button', {name:'Browse plugins'}).click();
+    assert.equal(await page.getByRole('button', {name:'install ai 1'}).isDisabled(), true);
+    assert.match(await page.locator('#plugins').innerText(), /Configure AI on the host/);
+    assert.equal(await page.getByRole('button', {name:'install hello 1'}).innerText(), 'Installed');
+    const stop = page.getByRole('button', {name:'stop hello'});
+    await stop.click();
+    assert.equal(await stop.isDisabled(), true);
+    assert.equal(await page.getByRole('button', {name:'start other'}).isDisabled(), false);
+    await page.evaluate(() => { window.fixture.failReads = true; });
+    await page.evaluate(() => window.fixture.mutation.reject(new Error('Timed out')));
+    await page.getByText('status offline').waitFor();
+    await page.waitForFunction(() => !document.querySelector('[aria-label="stop hello"]').disabled);
+    await page.evaluate(() => { window.fixture.failReads = false; });
+    await stop.click();
+    await page.evaluate(() => window.fixture.mutation.resolve());
+    await page.getByText('stop requested for hello', {exact:false}).waitFor();
+    const install = page.getByRole('button', {name:'install new 1'});
+    await install.click();
+    assert.equal(await install.isDisabled(), true);
+    await page.evaluate(() => window.fixture.mutation.reject(new Error('Download timed out')));
+    await page.getByText('Download timed out').waitFor();
+    assert.equal(await install.isDisabled(), false);
+    await install.click();
+    await page.evaluate(() => { window.fixture.plugins[2].installed = true; window.fixture.mutation.resolve(); });
+    await page.getByText('new installed.', {exact:true}).waitFor();
+    assert.equal(await page.getByRole('button', {name:'install new 1'}).innerText(), 'Installed');
+    await page.getByRole('button', {name:'logs hello'}).click();
+    assert.equal(await page.locator('#log-launch').evaluate(node => document.activeElement === node), true);
+    await page.getByText(/initial log/).waitFor();
+    await page.evaluate(() => {
+      const output = document.querySelector('#log-output');
+      const range = document.createRange(); range.selectNodeContents(output);
+      const selection = window.getSelection(); selection.removeAllRanges(); selection.addRange(range);
+      window.fixture.logMessage = 'updated log';
+    });
+    await page.evaluate(() => { window.fixture.failLogs = true; });
+    await page.getByRole('button', {name:'Refresh logs'}).click();
+    await page.getByText('Unable to load logs: logs offline').waitFor();
+    assert.match(await page.locator('#log-output').innerText(), /initial log/);
+    assert.match(await page.evaluate(() => window.getSelection().toString()), /initial log/);
+    await page.evaluate(() => { window.fixture.failLogs = false; });
+    await page.getByRole('button', {name:'Refresh logs'}).click();
+    assert.match(await page.locator('#log-output').innerText(), /initial log/);
+    await page.evaluate(() => window.getSelection().removeAllRanges());
+    await page.getByRole('button', {name:'Refresh logs'}).click();
+    await page.getByText(/updated log/).waitFor();
+  } finally { await browser.close(); }
+});
+
+
+test('mutation controls recover even when the status refresh fails', async () => {
+  const b = browser();
+  await flush();
+  vm.runInContext('request = async (command) => { if (command) throw Error("mutation failed"); throw Error("status failed"); }', b.context);
+  await b.nodes['#apps'].querySelectorAll('button')[0].listeners.click();
+  assert.equal(b.nodes['#apps'].querySelectorAll('button')[0].disabled, false);
+  assert.match(b.nodes['#message'].textContent, /status failed/);
+});
+
+test('focus falls back to logs when an action disappears', async () => {
+  const b = browser();
+  await flush();
+  b.nodes['#apps'].querySelectorAll('button')[0].focus();
+  vm.runInContext('render({apps: [{name:"hello", desired:"stopped", state:"stopped"}]})', b.context);
+  assert.equal(b.document.activeElement.getAttribute('aria-label'), 'logs hello');
 });

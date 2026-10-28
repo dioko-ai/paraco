@@ -58,7 +58,9 @@ Already have a Paraco app? Run it with `paraco run /path/to/app`.
 
 ## Your data
 
-Paraco stores its local state and logs under `~/.paraco` by default. App
+Paraco stores its local data under `~/.paraco` by default. Set `--data-dir` or
+`PARACO_DATA_DIR` to choose another location; `--log-dir` and `PARACO_LOG_DIR`
+control logs independently. App
 permissions and AI access are explicit. Removing the program through the
 installer preserves your app data and configuration.
 
@@ -90,10 +92,12 @@ Open `http://localhost:3000/` or use `paraco open`. Select **Browse plugins**
 to view the bundled catalog, versions, and requested capabilities. **Download and
 install** verifies the catalog SHA-256 and manifest before starting the plugin.
 Downloads persist in the server's private state directory and load on restart.
-AI providers and task scheduling still require host configuration; downloading
-a plugin does not enable those services. To remove a downloaded plugin, stop it,
+Plugins requiring AI or tasks cannot be installed from the dashboard yet. Use
+`paraco marketplace install NAME --output DIRECTORY` and add the app to a
+configured host with the required grants and AI settings. To remove a downloaded plugin, stop it,
 wait for **stopped**, then select **Uninstall**. Its downloaded source is removed;
-stored application data is retained. Apps supplied by the server configuration
+stored application data is retained and reattached when the same catalog plugin
+is reinstalled. Apps supplied by the server configuration
 remain managed through that configuration.
 
 ### Local URLs without a port
