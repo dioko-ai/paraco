@@ -43,18 +43,19 @@ stop it. Starting automatically at login is a separate, optional setup step.
 
 ## Add an app
 
-Browse the approved app catalog and install Hello World:
+With `paraco cron` running, open its dashboard (`paraco open`), choose **Browse
+plugins**, then **Download and install** beside Hello World. Wait for **running**
+and select **Open app**. The host registers the app, manages its lifecycle, and
+loads it again on restart. No second process or port is needed. Downloads require
+a network connection.
 
-```sh
-paraco marketplace list
-paraco marketplace install hello-world --output ./hello-world
-paraco run ./hello-world
-```
+For local source apps, see [Hosting multiple apps](docs/local-hosting.md).
 
-Open the local address printed in your terminal. Installing an app requires a
-network connection; apps that use online services also need connectivity.
+### Standalone development
 
-Already have a Paraco app? Run it with `paraco run /path/to/app`.
+`paraco run /path/to/app --port 3001` launches an independent development process
+outside dashboard management. Use a free port (the host normally owns 3000), and
+stop that process separately. For ordinary catalog use, install from the dashboard.
 
 ## Your data
 
@@ -63,6 +64,22 @@ Paraco stores its local data under `~/.paraco` by default. Set `--data-dir` or
 control logs independently. App
 permissions and AI access are explicit. Removing the program through the
 installer preserves your app data and configuration.
+
+### Move or recover a host configuration
+
+Stop the host, then run `paraco host-state --config /old/path/server.json`.
+Copy the printed `"host_id"` field into the top level of that configuration before
+moving or renaming it. Keep the same `--data-dir`, and update relative app and AI
+paths to point to their original absolute locations. Start the moved configuration
+with `paraco serve --config /new/path/server.json`. Installed plugins and data
+continue using the original store. Do not run two hosts with the same identity.
+
+Already moved the file? `paraco host-state` lists existing stores and identities
+without modifying them. Select the original store, back it up with
+`paraco backup --state STORE --output backup.sqlite3`, and add its identity as
+`host_id` to the moved configuration. If you use a login service, update its
+registration to the new configuration path. Older nested stores are listed too;
+use their parent namespace's parent as `--data-dir` when explicitly selecting them.
 
 ## Learn more
 
@@ -92,9 +109,10 @@ Open `http://localhost:3000/` or use `paraco open`. Select **Browse plugins**
 to view the bundled catalog, versions, and requested capabilities. **Download and
 install** verifies the catalog SHA-256 and manifest before starting the plugin.
 Downloads persist in the server's private state directory and load on restart.
-Plugins requiring AI or tasks cannot be installed from the dashboard yet. Use
-`paraco marketplace install NAME --output DIRECTORY` and add the app to a
-configured host with the required grants and AI settings. To remove a downloaded plugin, stop it,
+Configure AI providers and per-app overrides under **AI for your apps**.
+Plugins requiring AI or tasks offer **Set up and install**: choose an existing
+host AI configuration (optional), enter explicit task network hosts, and review
+the capability approval before installation. Grants persist across host restarts. To remove a downloaded plugin, stop it,
 wait for **stopped**, then select **Uninstall**. Its downloaded source is removed;
 stored application data is retained and reattached when the same catalog plugin
 is reinstalled. Apps supplied by the server configuration

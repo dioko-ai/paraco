@@ -1,8 +1,8 @@
 //! Private, one-request-per-connection framed JSON transport for host-selected AI backends.
 use crate::manifest::App;
 use paraco::ai::{
-    AppPolicy, Config, Error as AiError, FakeProxy, OpenAiProxy, Request, Response, Route,
-    Selection,
+    AppPolicy, Config, Error as AiError, FakeProxy, OpenAiProxy, ProviderKind, Request, Response,
+    Route, Selection,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -34,6 +34,8 @@ struct HostConfig {
     credential_files: BTreeMap<String, std::path::PathBuf>,
     #[serde(default)]
     provider_endpoints: BTreeMap<String, String>,
+    #[serde(default)]
+    provider_kinds: BTreeMap<String, ProviderKind>,
     routes: Vec<Route>,
     apps: BTreeMap<String, Grants>,
     default: Option<Selection>,
@@ -58,7 +60,34 @@ struct Envelope {
     request: Request,
 }
 
+struct SettingsProvider {
+    root: std::path::PathBuf,
+    app_root: std::path::PathBuf,
+    cached: Mutex<Option<(Vec<u8>, Arc<OpenAiProxy>)>>,
+}
+impl SettingsProvider {
+    fn proxy(&self, caller: &str) -> Result<Arc<OpenAiProxy>, AiError> {
+        let settings =
+            paraco::ai_settings::read(&self.root).map_err(|_| AiError::InvalidConfiguration)?;
+        let profile = settings.selected(caller).ok_or(AiError::NoDefault)?;
+        let key = serde_json::to_vec(profile).map_err(|_| AiError::InvalidConfiguration)?;
+        let mut cached = self.cached.lock().map_err(|_| AiError::Busy)?;
+        if let Some((existing, proxy)) = &*cached
+            && existing == &key
+        {
+            return Ok(proxy.clone());
+        }
+        let config = profile
+            .config(caller, &self.app_root)
+            .map_err(|_| AiError::InvalidConfiguration)?;
+        let proxy = Arc::new(OpenAiProxy::new(config)?);
+        *cached = Some((key, proxy.clone()));
+        Ok(proxy)
+    }
+}
+
 enum Provider {
+    Settings(SettingsProvider),
     Fake(Box<FakeProxy>),
     OpenAi(Box<OpenAiProxy>),
 }
@@ -71,6 +100,10 @@ impl Provider {
         stop: &AtomicBool,
     ) -> Result<Response, AiError> {
         match self {
+            Self::Settings(settings) => {
+                let proxy = settings.proxy(caller)?;
+                provider_runtime()?.block_on(cancel_on_stop(stop, proxy.complete(caller, request)))
+            }
             Self::Fake(proxy) => proxy.complete(caller, request),
             Self::OpenAi(proxy) => {
                 provider_runtime()?.block_on(cancel_on_stop(stop, proxy.complete(caller, request)))
@@ -89,6 +122,12 @@ impl Provider {
         F: FnMut(&str) -> Result<(), AiError>,
     {
         match self {
+            Self::Settings(settings) => {
+                let proxy = settings.proxy(caller)?;
+                provider_runtime()?
+                    .block_on(cancel_on_stop(stop, proxy.stream(caller, request, sink)))
+                    .map(|_| ())
+            }
             Self::Fake(proxy) => {
                 let response = proxy.complete(caller, request)?;
                 let mut sink = sink;
@@ -167,7 +206,22 @@ impl Capability {
             }
             None => (HostConfig::default(), "no-configuration".into()),
         };
+        let settings_root = config_path
+            .is_none()
+            .then(paraco::ai_settings::root)
+            .flatten();
+        let service_key = if let Some(root) = settings_root {
+            format!(
+                "settings:{}:{}:{}",
+                root.display(),
+                deployment_id,
+                app.root.display()
+            )
+        } else {
+            service_key
+        };
         let mut config = Config {
+            provider_kinds: host.provider_kinds.clone(),
             credentials: host.credentials.clone(),
             credential_files: host.credential_files.clone(),
             provider_endpoints: host.provider_endpoints.clone(),
@@ -206,7 +260,25 @@ impl Capability {
             // redirect a provider read into an application directory.
             *path = canonical;
         }
-        let timeout = config.limits.timeout;
+        for kind in config.provider_kinds.values_mut() {
+            if let ProviderKind::CodexSdk { node, module }
+            | ProviderKind::ClaudeSdk { node, module } = kind
+            {
+                for path in [node, module] {
+                    paraco::ai_sdk::validate_path(path)?;
+                    let canonical = path.canonicalize().map_err(|_| "Cannot read SDK file")?;
+                    if canonical.starts_with(&app.root) {
+                        return Err("SDK files must be outside the application directory".into());
+                    }
+                    *path = canonical;
+                }
+            }
+        }
+        let timeout = if settings_root.is_some() {
+            Duration::from_secs(120)
+        } else {
+            config.limits.timeout
+        };
         let services = PROVIDER_SERVICES.get_or_init(|| Mutex::new(BTreeMap::new()));
         let mut services = services
             .lock()
@@ -218,7 +290,20 @@ impl Capability {
         let proxy = match services.get(&service_key).and_then(Weak::upgrade) {
             Some(proxy) => proxy,
             None => {
-                let proxy = Arc::new(if config.provider_endpoints.is_empty() {
+                let proxy = Arc::new(if let Some(root) = settings_root {
+                    if root
+                        .canonicalize()
+                        .unwrap_or_else(|_| root.to_path_buf())
+                        .starts_with(&app.root)
+                    {
+                        return Err("AI settings must be outside the application directory".into());
+                    }
+                    Provider::Settings(SettingsProvider {
+                        root: root.to_path_buf(),
+                        app_root: app.root.clone(),
+                        cached: Mutex::new(None),
+                    })
+                } else if config.provider_endpoints.is_empty() && config.provider_kinds.is_empty() {
                     Provider::Fake(Box::new(FakeProxy::new(config).map_err(|e| e.to_string())?))
                 } else {
                     Provider::OpenAi(Box::new(
@@ -841,6 +926,12 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn trusted_tls_provider_fixture_exercises_reqwest_completion_and_streaming() {
+        tls_provider_fixture(false);
+        tls_provider_fixture(true);
+    }
+
+    #[cfg(unix)]
+    fn tls_provider_fixture(anthropic: bool) {
         use std::process::{Command, Stdio};
 
         struct ChildGuard(std::process::Child);
@@ -952,7 +1043,12 @@ for _ in range(2):
  while b'\r\n\r\n' not in raw: raw+=x.recv(4096)
  head,body=raw.split(b'\r\n\r\n',1); n=int([z for z in head.split(b'\r\n') if z.lower().startswith(b'content-length:')][0].split(b':',1)[1])
  while len(body)<n: body+=x.recv(4096)
- if json.loads(body).get('stream'):
+ if b'x-api-key: fixture-secret' in head.lower():
+  assert b'anthropic-version: 2023-06-01' in head.lower()
+  assert b'authorization:' not in head.lower()
+  assert json.loads(body)['max_tokens'] == 4096
+  out=json.dumps({'content':[{'type':'text','text':'fix'},{'type':'text','text':'ture'}]}).encode(); x.sendall(b'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: '+str(len(out)).encode()+b'\r\n\r\n'+out)
+ elif json.loads(body).get('stream'):
   out=b'data: {\"choices\":[{\"delta\":{\"content\":\"fixture\"}}]}\n\ndata: [DONE]\n\n'; x.sendall(b'HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: '+str(len(out)).encode()+b'\r\n\r\n'+out)
  else:
   out=b'{\"choices\":[{\"message\":{\"content\":\"fixture\"}}]}'; x.sendall(b'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: '+str(len(out)).encode()+b'\r\n\r\n'+out)
@@ -987,6 +1083,12 @@ for _ in range(2):
         std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o600)).unwrap();
         let config = host_root.path().join("ai.json");
         std::fs::write(&config, format!(r#"{{"credentials":{{"fixture":"fixture"}},"credential_files":{{"fixture":"{}"}},"provider_endpoints":{{"fixture":"https://127.0.0.1:{port}/v1/chat/completions"}},"provider_test_root":"{}","routes":[{{"selection":{{"provider":"fixture","model":"test"}},"credential":"fixture"}}],"apps":{{"deployment-tls":{{"credential_grants":["fixture"]}}}},"default":{{"provider":"fixture","model":"test"}}}}"#, secret.display(), root_certificate.display())).unwrap();
+        if anthropic {
+            let mut value: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&config).unwrap()).unwrap();
+            value["provider_kinds"] = serde_json::json!({"fixture":{"kind":"anthropic"}});
+            std::fs::write(&config, serde_json::to_vec(&value).unwrap()).unwrap();
+        }
         let app = App {
             name: "fixture".into(),
             root: app_root.path().canonicalize().unwrap(),

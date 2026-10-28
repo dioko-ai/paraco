@@ -36,6 +36,9 @@ invalid manifests, and duplicate names fail before launching any app. An empty
 `apps` list serves an empty dashboard. Changes take effect after restarting the
 server; hot reload and persistent registration are not implemented.
 
+Without `aiConfig`, apps requesting AI use the device-wide settings and installation
+overrides configured through **Configure AI** on the dashboard. See [AI providers](ai-routing.md).
+
 `aiConfig` is optional and has the same semantics as `run --ai-config`. It must
 be outside that app's directory and is only valid for an app requesting `ai`.
 A configuration or startup error specific to that capability marks the app
@@ -66,7 +69,8 @@ The legacy shared `/apps/<name>/...` URLs are migration redirects only: GET and
 HEAD receive a 308 to the app's canonical origin, while other methods receive
 405. The shared gateway never proxies app-controlled content. Unknown routes
 return 404; starting, stopping, stopped, or failed apps return 503. Proxy
-connection failures return 502, and an upstream timeout before headers returns 504.
+connection failures return 502, and an upstream timeout before headers returns 504. AI-enabled apps allow up to 130 seconds
+for SDK completions; other apps retain the 30-second timeout.
 
 ## Hosted-workload limits
 
@@ -103,7 +107,9 @@ states, plus stopping and stopped states after lifecycle commands. Running apps
 have an Open app link. Failed apps show a supervisor error;
 other apps continue serving. Status refreshes every two seconds without caching.
 The same page provides app controls, logs, and plugin downloads and uninstall.
-Plugins requiring AI or tasks cannot be installed from the dashboard; use
+Plugins requiring AI or tasks offer **Set up and install** to review optional host AI
+configuration, explicit task network grants, and capability approval. These settings
+persist across restarts. For manual installation, use
 `paraco marketplace install NAME --output DIRECTORY` and add the app to a
 configured host with the required grants. The data directory is independent of
 logs; use `--data-dir` or `PARACO_DATA_DIR` to select it.
@@ -206,3 +212,17 @@ to an unrelated IPv6 service while Paraco listens only on IPv4.
 Run `cargo run -- logs hello --tail 100` to inspect retained app output and
 lifecycle events (`~/.paraco/logs/current.jsonl` by default). These are not HTTP
 access logs: a request that reaches another service cannot appear here.
+
+### Configuration relocation and app failures
+
+Use `paraco host-state --config server.json` before relocating the configuration.
+Preserve the printed `host_id` field in the configuration, keep the data directory,
+and resolve relative paths to the same app sources. `paraco host-state` discovers
+existing stores after an accidental move. See the README recovery procedure.
+
+Malformed app manifests and app-specific configuration errors appear as failed
+entries with source paths and repair instructions. The dashboard and healthy apps
+remain available. Fix the source/configuration and restart the host to reload them.
+
+Task-authoring apps have **Stop editor** controls. Their schedules are independent
+of the editor process: archive jobs to pause future admissions, or stop the host.

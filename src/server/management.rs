@@ -95,6 +95,13 @@ async fn handle(state: &Management, request: Request) -> Response {
     if request.method() == Method::GET || request.method() == Method::HEAD {
         match path {
             "/" => return Html(include_str!("../../runtime/dashboard.html")).into_response(),
+            "/ai-settings.js" => {
+                return (
+                    [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+                    include_str!("../../runtime/ai-settings.js"),
+                )
+                    .into_response();
+            }
             "/dashboard.js" => {
                 return (
                     [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
@@ -105,12 +112,15 @@ async fn handle(state: &Management, request: Request) -> Response {
             _ => {}
         }
     }
-    if path == "/" || path == "/dashboard.js" {
+    if path == "/" || path == "/dashboard.js" || path == "/ai-settings.js" {
         return (
             StatusCode::METHOD_NOT_ALLOWED,
             [(header::ALLOW, "GET, HEAD")],
         )
             .into_response();
+    }
+    if path == "/api/ai" {
+        return ai_settings(state, request).await;
     }
     if path != "/api/apps" && path != "/api/logs" && path != "/api/plugins" {
         return StatusCode::NOT_FOUND.into_response();
@@ -229,6 +239,14 @@ async fn handle(state: &Management, request: Request) -> Response {
                 .map(|app| {
                     let mut value = serde_json::to_value(&app).unwrap();
                     if let Some(record) = roots.get(&app.name) {
+                        value["scheduling_independent"] = serde_json::Value::Bool(
+                            state
+                                .durable
+                                .lock()
+                                .unwrap()
+                                .task_grants
+                                .contains_key(&record.deployment_id),
+                        );
                         value["uninstallable"] = serde_json::Value::Bool(
                             record.source.parent() == Some(state.plugins.as_path()),
                         );
@@ -256,12 +274,34 @@ struct PluginCommand {
     action: String,
     name: String,
     version: Option<String>,
+    #[serde(default)]
+    setup: PluginSettings,
+}
+
+#[derive(Clone, Default, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct PluginSettings {
+    #[serde(default)]
+    pub approved: bool,
+    pub ai_config: Option<PathBuf>,
+    #[serde(default)]
+    pub task_authoring: bool,
+    #[serde(default)]
+    pub task_network: Vec<String>,
+}
+
+pub(super) fn plugin_settings(path: &Path) -> Result<PluginSettings, String> {
+    match std::fs::read(path.join(".paraco-host-settings.json")) {
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| e.to_string()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(PluginSettings::default()),
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 fn install_reason(entry: &serde_json::Value) -> &'static str {
     let caps = entry["capabilities"].as_array();
     if caps.is_some_and(|caps| caps.iter().any(|cap| cap == "ai" || cap == "tasks")) {
-        "This plugin requires AI or tasks configuration. Install it with `paraco marketplace install`, then add it to a configured host and grant the required capabilities."
+        "This plugin requires capability approval. Choose Set up and install to review AI settings and task network grants for this configured host."
     } else {
         ""
     }
@@ -281,6 +321,7 @@ async fn plugins(state: &Management, request: Request) -> Response {
                         entry["installed"] = installed.into();
                         entry["installable"] = reason.is_empty().into();
                         entry["install_reason"] = reason.into();
+                        entry["setup_available"] = (!reason.is_empty()).into();
                     }
                 }
                 (
@@ -335,12 +376,15 @@ async fn plugin_change(state: &Management, command: PluginCommand) -> Result<(),
     paraco::slug::validate(&command.name).map_err(|e| e.to_string())?;
     let path = state.plugins.join(&command.name);
     match command.action.as_str() {
-        "install" => {
+        "install" | "setup" => {
             {
                 let apps = state.apps.read().unwrap();
                 if apps.contains_key(&command.name) || apps.len() >= 50 {
                     return Err("Already installed or 50 app limit reached".into());
                 }
+            }
+            if std::fs::symlink_metadata(&path).is_ok() {
+                return Err("installation destination already exists".into());
             }
             let version = command.version.ok_or("Select a catalog version")?;
             let catalog = crate::marketplace::dashboard_catalog()?;
@@ -353,26 +397,97 @@ async fn plugin_change(state: &Management, command: PluginCommand) -> Result<(),
                 })
                 .ok_or("app/version is not approved in this catalog")?;
             let reason = install_reason(entry);
-            if !reason.is_empty() {
+            if !reason.is_empty() && (command.action != "setup" || !command.setup.approved) {
                 return Err(reason.into());
             }
-            crate::marketplace::dashboard_install(&command.name, &version, &path).await?;
-            let app = manifest::load(&path).map_err(|e| e.to_string())?;
-            state.store.outside(&app.root)?;
-            let deployment = {
+            let setup = command.setup;
+            if (setup.task_authoring || setup.ai_config.is_some() || !setup.task_network.is_empty())
+                && !setup.approved
+            {
+                return Err("Review and approve capabilities before installation".into());
+            }
+            if !setup.task_authoring && !setup.task_network.is_empty() {
+                return Err("Network grants require task authoring approval".into());
+            }
+            if let Some(path) = &setup.ai_config
+                && (!path.is_absolute() || !path.is_file())
+            {
+                return Err("Choose an existing absolute host AI configuration path".into());
+            }
+            if setup.task_network.len() > 32
+                || setup.task_network.iter().any(|host| {
+                    host.is_empty() || host.contains(['/', '*', ',', ' ']) || host.starts_with('-')
+                })
+            {
+                return Err("Use explicit network hosts, without wildcards or URLs".into());
+            }
+            let staging = tempfile::Builder::new()
+                .prefix(".plugin-prepare-")
+                .tempdir_in(&state.plugins)
+                .map_err(|e| e.to_string())?;
+            let staged = staging.path().join("source");
+            crate::marketplace::dashboard_install(&command.name, &version, &staged).await?;
+            // Roll back every fallible preparation step, including lease acquisition.
+            let prepared = (|| {
+                let mut app = manifest::load(&staged).map_err(|e| e.to_string())?;
+                if app.requests_tasks && !setup.task_authoring {
+                    return Err("Approve task authoring to install this app".into());
+                }
+                std::fs::write(
+                    staged.join(".paraco-host-settings.json"),
+                    serde_json::to_vec(&setup).map_err(|e| e.to_string())?,
+                )
+                .map_err(|e| e.to_string())?;
+                app.entrypoint = path.join(
+                    app.entrypoint
+                        .strip_prefix(&app.root)
+                        .map_err(|e| e.to_string())?,
+                );
+                app.root = path.clone();
+                state.store.outside(&app.root)?;
                 let mut durable = state.durable.lock().unwrap();
+                let lease = Arc::new(durable.guardian_lease()?);
+                if setup.task_authoring && durable.tasks.is_none() {
+                    let tasks = crate::tasks::Tasks::open(
+                        state.plugins.parent().unwrap(),
+                        crate::runtime::command_for_host()?,
+                    )?;
+                    tasks.set_lease(durable.guardian_lease()?);
+                    durable.tasks = Some(tasks);
+                }
                 let deployment = durable.install_plugin(&app.root, &command.name)?;
                 if let Err(error) = durable.check_capabilities(&deployment.id, &app, false) {
-                    durable.retire_plugin(&app.root, &command.name)?;
-                    let _ = std::fs::remove_dir_all(&path);
+                    durable
+                        .retire_plugin(&app.root, &command.name)
+                        .map_err(|rollback| {
+                            format!("{error}; deployment rollback failed: {rollback}")
+                        })?;
                     return Err(error);
                 }
-                deployment
-            };
-            let lease = Arc::new(state.durable.lock().unwrap().guardian_lease()?);
+                if let Err(error) = crate::marketplace::publish_new(&staged, &path) {
+                    durable
+                        .retire_plugin(&path, &command.name)
+                        .map_err(|rollback| {
+                            format!("{error}; deployment rollback failed: {rollback}")
+                        })?;
+                    return Err(error);
+                }
+                if setup.task_authoring {
+                    let tasks = durable.tasks.as_ref().unwrap();
+                    tasks.set_grant(deployment.id.clone(), setup.task_network.clone());
+                    tasks.start();
+                    durable
+                        .task_grants
+                        .insert(deployment.id.clone(), setup.task_network.clone());
+                }
+                Ok((app, deployment, lease))
+            })();
+            let (app, deployment, lease) = prepared?;
             state.apps.write().unwrap().insert(
                 command.name,
                 AppRecord {
+                    requests_ai: app.requests_ai,
+                    explicit_ai: false,
                     deployment_id: deployment.id,
                     source: app.root.clone(),
                     root: app.root.clone(),
@@ -386,10 +501,10 @@ async fn plugin_change(state: &Management, command: PluginCommand) -> Result<(),
             let prepared = PreparedApp {
                 dashboard_plugin: true,
                 app,
-                task_authoring: false,
-                task_network: vec![],
+                task_authoring: setup.task_authoring,
+                task_network: setup.task_network,
                 restart: RestartPolicy::default(),
-                ai_config: None,
+                ai_config: setup.ai_config,
             };
             let worker_state = state.clone();
             state.workers.lock().unwrap().push(thread::spawn(move || {
@@ -454,7 +569,14 @@ async fn plugin_change(state: &Management, command: PluginCommand) -> Result<(),
                     return Err(error);
                 }
             }
+            let deployment = app.deployment_id.clone();
             apps.remove(&command.name);
+            let mut durable = state.durable.lock().unwrap();
+            if let Some(tasks) = &durable.tasks {
+                tasks.revoke_grant(&deployment);
+            }
+            durable.task_grants.remove(&deployment);
+            drop(durable);
             if let Err(error) = staging.close() {
                 eprintln!("uninstalled plugin source cleanup failed: {error}");
             }
@@ -464,10 +586,103 @@ async fn plugin_change(state: &Management, command: PluginCommand) -> Result<(),
     Ok(())
 }
 
+async fn ai_settings(state: &Management, request: Request) -> Response {
+    let Some(root) = paraco::ai_settings::root() else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    if request.method() == Method::POST {
+        if request
+            .headers()
+            .get(header::ORIGIN)
+            .and_then(|v| v.to_str().ok())
+            != Some(&state.origin)
+        {
+            return StatusCode::FORBIDDEN.into_response();
+        }
+        if request
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            != Some("application/json")
+        {
+            return StatusCode::UNSUPPORTED_MEDIA_TYPE.into_response();
+        }
+        let body = match tokio::time::timeout(
+            Duration::from_secs(2),
+            to_bytes(request.into_body(), 16384),
+        )
+        .await
+        {
+            Ok(Ok(body)) => body,
+            _ => return StatusCode::BAD_REQUEST.into_response(),
+        };
+        let update: paraco::ai_settings::Update = match serde_json::from_slice(&body) {
+            Ok(value) => value,
+            Err(_) => return (StatusCode::BAD_REQUEST, "Invalid AI settings").into_response(),
+        };
+        let deployment = if let Some(name) = &update.app {
+            let apps = state.apps.read().unwrap();
+            let Some(app) = apps.get(name) else {
+                return StatusCode::NOT_FOUND.into_response();
+            };
+            if !app.requests_ai {
+                return (StatusCode::BAD_REQUEST, "This app does not request AI").into_response();
+            }
+            if app.explicit_ai {
+                return (StatusCode::CONFLICT, "This app uses an explicit AI configuration file; remove aiConfig to use dashboard settings").into_response();
+            }
+            Some(app.deployment_id.clone())
+        } else {
+            None
+        };
+        if let Err(error) = paraco::ai_settings::update(root, deployment.as_deref(), update) {
+            return (StatusCode::BAD_REQUEST, error).into_response();
+        }
+    } else if request.method() != Method::GET {
+        return StatusCode::METHOD_NOT_ALLOWED.into_response();
+    }
+    match paraco::ai_settings::read(root) {
+        Ok(settings) => {
+            let apps: Vec<_> = state.apps.read().unwrap().iter().map(|(name, app)| {
+                serde_json::json!({"name": name, "requests_ai":app.requests_ai, "explicit_ai":app.explicit_ai,
+                    "override":settings.apps.get(&app.deployment_id)})
+            }).collect();
+            // No credential values are ever returned. Paths are host dashboard metadata only.
+            (
+                [(header::CONTENT_TYPE, "application/json")],
+                serde_json::json!({"default":settings.default,"apps":apps}).to_string(),
+            )
+                .into_response()
+        }
+        Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error).into_response(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
+    fn guided_settings_survive_restart_and_missing_settings_grant_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!plugin_settings(dir.path()).unwrap().approved);
+        let setup = PluginSettings {
+            approved: true,
+            ai_config: None,
+            task_authoring: true,
+            task_network: vec!["example.com:443".into()],
+        };
+        std::fs::write(
+            dir.path().join(".paraco-host-settings.json"),
+            serde_json::to_vec(&setup).unwrap(),
+        )
+        .unwrap();
+        let loaded = plugin_settings(dir.path()).unwrap();
+        assert!(loaded.approved && loaded.task_authoring);
+        assert_eq!(loaded.task_network, ["example.com:443"]);
+        std::fs::write(dir.path().join(".paraco-host-settings.json"), "broken").unwrap();
+        assert!(plugin_settings(dir.path()).is_err());
+    }
     #[tokio::test]
     async fn catalog_is_available_without_token_and_mutations_require_origin() {
         let dir = tempfile::tempdir().unwrap();
@@ -511,6 +726,7 @@ mod tests {
             .unwrap();
         assert_eq!(task_app["installed"], false);
         assert_eq!(task_app["installable"], false);
+        assert_eq!(task_app["setup_available"], true);
         assert!(
             task_app["install_reason"]
                 .as_str()
@@ -523,6 +739,7 @@ mod tests {
                 action: "install".into(),
                 name: "cron-time-machine".into(),
                 version: Some("0.1.0".into()),
+                setup: PluginSettings::default(),
             },
         )
         .await
@@ -545,6 +762,7 @@ mod tests {
                 action: "install".into(),
                 name: "../escape".into(),
                 version: Some("0.1.0".into()),
+                setup: PluginSettings::default(),
             },
         )
         .await;
@@ -556,6 +774,8 @@ mod tests {
         state.apps.write().unwrap().insert(
             "sample".into(),
             AppRecord {
+                requests_ai: false,
+                explicit_ai: false,
                 deployment_id: deployment.id,
                 source: path.clone(),
                 root: path.clone(),
@@ -570,6 +790,7 @@ mod tests {
             action: "uninstall".into(),
             name: "sample".into(),
             version: None,
+            setup: PluginSettings::default(),
         };
         assert!(plugin_change(&state, uninstall()).await.is_err());
         assert!(path.exists());

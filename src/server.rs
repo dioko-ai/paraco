@@ -24,7 +24,9 @@ use tokio::sync::Semaphore;
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Config {
-    apps: Vec<AppConfig>,
+    apps: Vec<serde_json::Value>,
+    #[serde(default, rename = "host_id")]
+    _host_id: Option<String>,
     #[serde(default = "default_max_apps")]
     max_apps: usize,
 }
@@ -104,6 +106,8 @@ enum DesiredState {
 }
 
 struct AppRecord {
+    requests_ai: bool,
+    explicit_ai: bool,
     deployment_id: String,
     source: PathBuf,
     root: PathBuf,
@@ -143,7 +147,9 @@ impl Drop for Supervisors {
     }
 }
 
-fn load(path: &Path) -> Result<Vec<PreparedApp>, String> {
+type FailedApp = (PathBuf, String);
+
+fn load(path: &Path) -> Result<(Vec<PreparedApp>, Vec<FailedApp>), String> {
     let path = path
         .canonicalize()
         .map_err(|e| format!("cannot read server configuration: {e}"))?;
@@ -156,22 +162,38 @@ fn load(path: &Path) -> Result<Vec<PreparedApp>, String> {
     }
     let root = path.parent().unwrap();
     let mut names = BTreeSet::new();
-    config
-        .apps
-        .into_iter()
-        .map(|entry| {
-            let app = manifest::load(&root.join(entry.path)).map_err(|e| e.to_string())?;
-            if !names.insert(app.name.clone()) {
+    let mut apps = Vec::new();
+    let mut failures = Vec::new();
+    for (index, entry) in config.apps.into_iter().enumerate() {
+        let source = entry
+            .get("path")
+            .and_then(|path| path.as_str())
+            .map(|path| root.join(path))
+            .unwrap_or_else(|| root.join(format!("invalid-config-entry-{}", index + 1)));
+        let entry: AppConfig = match serde_json::from_value(entry) {
+            Ok(entry) => entry,
+            Err(error) => {
+                failures.push((source, format!("invalid app configuration: {error}")));
+                continue;
+            }
+        };
+        let source = root.join(&entry.path);
+        let result = (|| {
+            let app = manifest::load(&source).map_err(|e| e.to_string())?;
+            if names.contains(&app.name) {
                 return Err(format!("duplicate application name `{}`", app.name));
             }
-            if entry.restart.max_retries > 100 || entry.restart.backoff_ms == 0
+            if entry.restart.max_retries > 100
+                || entry.restart.backoff_ms == 0
                 || entry.restart.max_backoff_ms < entry.restart.backoff_ms
-                || entry.restart.max_backoff_ms > 300_000 {
+                || entry.restart.max_backoff_ms > 300_000
+            {
                 return Err("restart policy requires maxRetries <= 100 and 1 <= backoffMs <= maxBackoffMs <= 300000".into());
             }
             if !entry.task_authoring && !entry.task_network.is_empty() {
                 return Err("taskNetwork requires taskAuthoring".into());
             }
+            names.insert(app.name.clone());
             Ok(PreparedApp {
                 dashboard_plugin: false,
                 task_authoring: entry.task_authoring,
@@ -180,8 +202,13 @@ fn load(path: &Path) -> Result<Vec<PreparedApp>, String> {
                 app,
                 ai_config: entry.ai_config.map(|p| root.join(p)),
             })
-        })
-        .collect()
+        })();
+        match result {
+            Ok(app) => apps.push(app),
+            Err(error) => failures.push((source, error)),
+        }
+    }
+    Ok((apps, failures))
 }
 
 pub fn serve(
@@ -193,7 +220,7 @@ pub fn serve(
     if port == 0 {
         return Err("port must be from 1 through 65535".into());
     }
-    let mut apps = load(config)?;
+    let (mut apps, mut failures) = load(config)?;
     let state_root = data.hosted(config, Some(log_dir))?;
     let durable = open_state(&state_root)?;
     let plugins = state_root.join("plugins");
@@ -201,33 +228,68 @@ pub fn serve(
     for entry in std::fs::read_dir(&plugins).map_err(|e| e.to_string())? {
         let path = entry.map_err(|e| e.to_string())?.path();
         if path.join("paraco-install.json").is_file() {
-            let app = manifest::load(&path).map_err(|e| e.to_string())?;
+            let app = match manifest::load(&path) {
+                Ok(app) => app,
+                Err(error) => {
+                    failures.push((path, error.to_string()));
+                    continue;
+                }
+            };
             if apps.iter().any(|existing| existing.app.name == app.name) || apps.len() >= 50 {
-                return Err(
+                failures.push((
+                    path,
                     "downloaded plugin conflicts with configured apps or exceeds 50 apps".into(),
-                );
+                ));
+                continue;
             }
+            let setup = match management::plugin_settings(&path) {
+                Ok(setup) => setup,
+                Err(error) => {
+                    failures.push((path, error));
+                    continue;
+                }
+            };
             apps.push(PreparedApp {
                 dashboard_plugin: true,
                 app,
-                task_authoring: false,
-                task_network: vec![],
+                task_authoring: setup.approved && setup.task_authoring,
+                task_network: if setup.approved {
+                    setup.task_network
+                } else {
+                    vec![]
+                },
                 restart: RestartPolicy::default(),
-                ai_config: None,
+                ai_config: if setup.approved {
+                    setup.ai_config
+                } else {
+                    None
+                },
             });
         }
     }
     let store = logs::Store::open(log_dir)?;
-    for prepared in &apps {
-        store.outside(&prepared.app.root)?;
-    }
+    apps.retain(|prepared| match store.outside(&prepared.app.root) {
+        Ok(()) => true,
+        Err(error) => {
+            failures.push((prepared.app.root.clone(), error));
+            false
+        }
+    });
     runner::announce(true, format!("paraco: logs at {}", store.path().display()));
     let stop = runner::install_interrupt_handler()?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .map_err(|e| e.to_string())?;
-    let result = runtime.block_on(host(apps, port, stop, store, durable, &state_root));
+    let result = runtime.block_on(host(
+        apps,
+        failures,
+        port,
+        stop,
+        store,
+        durable,
+        &state_root,
+    ));
     // spawn_blocking work is intentionally bounded but may be waiting on a
     // filesystem. Never let it turn process shutdown into an unbounded wait.
     runtime.shutdown_timeout(Duration::from_secs(2));
@@ -252,6 +314,7 @@ fn open_state(root: &Path) -> Result<state::Store, String> {
 
 async fn host(
     apps: Vec<PreparedApp>,
+    failures: Vec<FailedApp>,
     port: u16,
     stop: Arc<AtomicBool>,
     store: logs::Store,
@@ -268,10 +331,14 @@ async fn host(
         .await
         .map_err(|e| format!("cannot bind IPv6 loopback gateway [::1]:{port}: {e}; choose another --port (both loopback addresses must be available)"))?;
     let durable = Arc::new(Mutex::new(durable));
-    durable
-        .lock()
-        .unwrap()
-        .reconcile(apps.iter().map(|prepared| prepared.app.root.clone()))?;
+    durable.lock().unwrap().reconcile(
+        apps.iter().map(|prepared| prepared.app.root.clone()).chain(
+            failures
+                .iter()
+                .filter(|(path, _)| path.exists())
+                .map(|(path, _)| path.clone()),
+        ),
+    )?;
     let tasks = if apps.iter().any(|app| app.task_authoring) {
         let tasks = crate::tasks::Tasks::open(state_root, crate::runtime::command_for_host()?)?;
         tasks.set_lease(durable.lock().unwrap().guardian_lease()?);
@@ -303,6 +370,8 @@ async fn host(
         initial.insert(
             prepared.app.name.clone(),
             AppRecord {
+                requests_ai: prepared.app.requests_ai,
+                explicit_ai: prepared.ai_config.is_some(),
                 deployment_id: deployment.id,
                 source: prepared.app.root.clone(),
                 root: prepared.app.root.clone(),
@@ -312,6 +381,30 @@ async fn host(
                     DesiredState::Stopped
                 },
                 state: AppState::Starting,
+                generation: 0,
+                cancel: Arc::new(AtomicBool::new(false)),
+                admission: Arc::new(Semaphore::new(8)),
+            },
+        );
+    }
+    for (index, (source, error)) in failures.into_iter().enumerate() {
+        let mut name = format!("failed-app-{}", index + 1);
+        while initial.contains_key(&name) {
+            name.push_str("-error");
+        }
+        initial.insert(
+            name,
+            AppRecord {
+                requests_ai: false,
+                explicit_ai: false,
+                deployment_id: String::new(),
+                root: source.clone(),
+                source: source.clone(),
+                desired: DesiredState::Stopped,
+                state: AppState::Failed(format!(
+                    "{}: {error}. Repair this app or its configuration and restart the host.",
+                    source.display()
+                )),
                 generation: 0,
                 cancel: Arc::new(AtomicBool::new(false)),
                 admission: Arc::new(Semaphore::new(8)),
@@ -420,7 +513,8 @@ async fn host(
     serving_v6.abort();
     // Cancel validation and task work before dropping app capability workers,
     // so an in-flight publication cannot hold shutdown until its deadline.
-    if let Some(tasks) = &tasks {
+    let shutdown_tasks = durable.lock().unwrap().tasks.clone();
+    if let Some(tasks) = shutdown_tasks {
         tasks.shutdown();
     }
     // Dropping the owners reaps every child, including apps still starting.
@@ -467,7 +561,11 @@ async fn dispatch(State(gateway): State<Gateway>, request: Request) -> Response 
         let suffix = path.trim_start_matches('/').to_owned();
         return proxy_app(&gateway, request, &name, &suffix).await;
     }
-    if path == "/" || path == "/dashboard.js" || path.starts_with("/api/") {
+    if path == "/"
+        || path == "/dashboard.js"
+        || path == "/ai-settings.js"
+        || path.starts_with("/api/")
+    {
         return management::dispatch(gateway.dashboard.clone(), request).await;
     }
     let Some(tail) = path.strip_prefix("/apps/") else {
@@ -520,8 +618,8 @@ async fn proxy_app(gateway: &Gateway, request: Request, name: &str, suffix: &str
         .read()
         .unwrap()
         .get(name)
-        .map(|app| (app.state.clone(), app.admission.clone()));
-    let Some((state, app_admission)) = state else {
+        .map(|app| (app.state.clone(), app.admission.clone(), app.requests_ai));
+    let Some((state, app_admission, requests_ai)) = state else {
         return StatusCode::NOT_FOUND.into_response();
     };
     let (port, token) = match state {
@@ -608,6 +706,7 @@ async fn proxy_app(gateway: &Gateway, request: Request, name: &str, suffix: &str
     let upstream = match gateway
         .client
         .request(parts.method, target)
+        .timeout(Duration::from_secs(if requests_ai { 130 } else { 30 }))
         .headers(parts.headers)
         .body(body)
         .send()
@@ -956,6 +1055,8 @@ mod origin_tests {
         apps.write().unwrap().insert(
             "sample".into(),
             AppRecord {
+                requests_ai: false,
+                explicit_ai: false,
                 deployment_id: "restored-id".into(),
                 source: PathBuf::new(),
                 root: PathBuf::new(),
@@ -1011,6 +1112,14 @@ fn manage(
         let app = records
             .get_mut(name)
             .ok_or_else(|| format!("unknown application `{name}`"))?;
+        if app.deployment_id.is_empty()
+            && !matches!(
+                command.action,
+                control::Action::Status | control::Action::Open
+            )
+        {
+            return Err("Repair this app or its configuration and restart the host; see the failed entry for details.".into());
+        }
         let desired = match command.action {
             control::Action::Status | control::Action::Open => None,
             control::Action::Start
@@ -1073,4 +1182,36 @@ fn manage(
             }
         })
         .collect())
+}
+
+#[cfg(test)]
+mod audit_tests {
+    use super::*;
+    #[test]
+    fn malformed_app_does_not_hide_healthy_apps() {
+        let temp = tempfile::tempdir().unwrap();
+        let healthy = temp.path().join("healthy");
+        let broken = temp.path().join("broken");
+        std::fs::create_dir(&healthy).unwrap();
+        std::fs::create_dir(&broken).unwrap();
+        std::fs::write(
+            healthy.join("paraco.json"),
+            r#"{"schemaVersion":1,"name":"healthy","entrypoint":"main.js","capabilities":[]}"#,
+        )
+        .unwrap();
+        std::fs::write(healthy.join("main.js"), "export default {};").unwrap();
+        std::fs::write(broken.join("paraco.json"), "{invalid").unwrap();
+        let config = temp.path().join("server.json");
+        std::fs::write(
+            &config,
+            r#"{"apps":[{"path":"healthy"},{"path":"broken"}]}"#,
+        )
+        .unwrap();
+        let (apps, failures) = load(&config).unwrap();
+        assert_eq!(apps.len(), 1);
+        assert_eq!(apps[0].app.name, "healthy");
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].0, broken);
+        assert!(failures[0].1.contains("invalid manifest"));
+    }
 }

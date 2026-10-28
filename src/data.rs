@@ -36,7 +36,7 @@ impl Directory {
     }
 
     pub fn hosted(&self, config: &Path, log_dir: Option<&Path>) -> Result<PathBuf, String> {
-        let key = source_key(config)?;
+        let key = host_key(config)?;
         let normal = self.root.join("state").join(&key);
         // Older user services nested state below ~/.paraco/state. Keep their
         // source locations intact: moving downloaded plugins would change identity.
@@ -104,6 +104,71 @@ fn absolute(path: &Path) -> Result<PathBuf, String> {
             .join(path))
     }
 }
+pub fn host_key(config: &Path) -> Result<String, String> {
+    let value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(config).map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
+    match value.get("host_id") {
+        None => source_key(config),
+        Some(value) => {
+            let id = value
+                .as_str()
+                .ok_or("host_id must be a 64-character lowercase hexadecimal identity")?;
+            if id.len() != 64
+                || !id
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            {
+                return Err("host_id must be a 64-character lowercase hexadecimal identity".into());
+            }
+            Ok(id.into())
+        }
+    }
+}
+
+impl Directory {
+    pub fn discover(&self, config: Option<&Path>) -> Result<(), String> {
+        if let Some(config) = config {
+            println!(
+                "State: {}\nTo relocate this configuration, preserve this top-level field:\n  \"host_id\": \"{}\"\nKeep the same --data-dir and resolve relative app/AI paths before moving it. Stop the host first.",
+                self.hosted(config, None)?.display(),
+                host_key(config)?
+            );
+        } else {
+            for namespace in [self.root.join("state"), self.root.join("state/state")] {
+                if !namespace.exists() {
+                    continue;
+                }
+                for entry in std::fs::read_dir(namespace).map_err(|e| e.to_string())? {
+                    let path = entry.map_err(|e| e.to_string())?.path();
+                    if has_state(&path) {
+                        println!(
+                            "{} — host_id: {}",
+                            path.display(),
+                            path.file_name().unwrap().to_string_lossy()
+                        );
+                        if let Ok(db) = rusqlite::Connection::open_with_flags(
+                            path.join("state.sqlite3"),
+                            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+                        ) && let Ok(mut query) =
+                            db.prepare("SELECT source FROM deployments ORDER BY source")
+                            && let Ok(rows) = query.query_map([], |row| row.get::<_, String>(0))
+                        {
+                            for source in rows.flatten() {
+                                println!("  App source: {source}");
+                            }
+                        }
+                    }
+                }
+            }
+            println!(
+                "Use the original store's host_id in the relocated configuration; keep the same data directory. Back up the store before recovery. No data was changed."
+            );
+        }
+        Ok(())
+    }
+}
+
 fn source_key(source: &Path) -> Result<String, String> {
     let source = source
         .canonicalize()
@@ -126,6 +191,24 @@ fn recovery(namespace: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn explicit_identity_preserves_store_when_configuration_moves() {
+        let temp = tempfile::tempdir().unwrap();
+        let old = temp.path().join("old.json");
+        let moved = temp.path().join("moved.json");
+        std::fs::write(&old, "{}").unwrap();
+        let data = Directory {
+            root: temp.path().join("data"),
+            explicit: true,
+        };
+        let original = data.hosted(&old, None).unwrap();
+        let id = host_key(&old).unwrap();
+        std::fs::write(&old, serde_json::json!({"host_id":id}).to_string()).unwrap();
+        std::fs::rename(&old, &moved).unwrap();
+        assert_eq!(original, data.hosted(&moved, None).unwrap());
+        std::fs::write(&moved, r#"{"host_id":"../escape"}"#).unwrap();
+        assert!(data.hosted(&moved, None).is_err());
+    }
     #[test]
     fn log_destinations_do_not_change_state_or_service_identity() {
         let temp = tempfile::tempdir().unwrap();

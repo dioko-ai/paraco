@@ -301,3 +301,38 @@ test('focus falls back to logs when an action disappears', async () => {
   vm.runInContext('render({apps: [{name:"hello", desired:"stopped", state:"stopped"}]})', b.context);
   assert.equal(b.document.activeElement.getAttribute('aria-label'), 'logs hello');
 });
+
+test('reconnection clears offline messages and lifecycle completion clears waiting', async () => {
+  const b = browser(); await flush();
+  vm.runInContext('request = async () => { throw Error("status offline"); }; update()', b.context);
+  await flush();
+  assert.match(b.nodes['#message'].textContent, /offline/);
+  vm.runInContext('request = async () => ({apps:[{name:"hello",state:"running",desired:"running"}]}); update()', b.context);
+  await flush();
+  assert.equal(b.nodes['#message'].textContent, '');
+  vm.runInContext('update({app:"hello",action:"start"})', b.context);
+  await flush();
+  assert.match(b.nodes['#message'].textContent, /completed/);
+  assert.doesNotMatch(b.nodes['#message'].textContent, /Waiting/);
+});
+
+test('task app controls explain independent scheduling', async () => {
+  const b = browser(); await flush();
+  vm.runInContext('render({apps:[{name:"cron",state:"running",desired:"running",scheduling_independent:true}]})', b.context);
+  assert.ok(b.nodes['#apps'].querySelectorAll('button').some(node => node.textContent === 'Stop editor'));
+  assert.ok(b.nodes['#apps'].querySelectorAll('p').some(node => /Scheduling continues/.test(node.textContent)));
+});
+
+test('guided setup requires approval and submits only the reviewed grants', async () => {
+  const b = browser(); await flush();
+  vm.runInContext(`request = async () => ({apps:[{name:'tasks',title:'Tasks',version:'1',description:'',capabilities:['tasks'],installable:false,setup_available:true}]}); prompt = () => 'example.com:443'; confirm = () => false; changePlugin = async command => {globalThis.setupCommand = command;}`, b.context);
+  await b.nodes['#catalog-refresh'].listeners.click();
+  const install = b.nodes['#plugins'].querySelectorAll('button')[0];
+  assert.equal(install.disabled, false);
+  assert.equal(install.textContent, 'Set up and install');
+  await install.listeners.click();
+  assert.equal(b.context.setupCommand, undefined);
+  vm.runInContext('confirm = () => true', b.context);
+  await install.listeners.click();
+  assert.deepEqual(JSON.parse(JSON.stringify(b.context.setupCommand)), {action:'setup',name:'tasks',version:'1',setup:{approved:true,task_authoring:true,task_network:['example.com:443']}});
+});

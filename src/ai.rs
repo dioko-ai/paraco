@@ -126,6 +126,7 @@ pub struct AppPolicy {
 /// paths to separately stored secret files may be configured here.
 #[derive(Clone, Default)]
 pub struct Config {
+    pub provider_kinds: BTreeMap<String, ProviderKind>,
     /// Credential identity -> owning provider.
     pub credentials: BTreeMap<String, String>,
     /// Credential identity -> host-owned file containing its bearer secret.
@@ -138,6 +139,23 @@ pub struct Config {
     pub default: Option<Selection>,
     pub provider_default_models: BTreeMap<String, String>,
     pub limits: Limits,
+}
+
+/// Host-selected transport; applications cannot choose executables or SDK modules.
+#[derive(Clone, Default, Deserialize, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ProviderKind {
+    #[default]
+    Openai,
+    Anthropic,
+    CodexSdk {
+        node: std::path::PathBuf,
+        module: std::path::PathBuf,
+    },
+    ClaudeSdk {
+        node: std::path::PathBuf,
+        module: std::path::PathBuf,
+    },
 }
 
 /// Resource limits are host policy, never supplied by an application request.
@@ -427,6 +445,33 @@ impl OpenAiProxy {
                         })
                 })
                 .ok_or(Error::NoRoute)?;
+        let kind = self
+            .config
+            .provider_kinds
+            .get(&route.selection.provider)
+            .cloned()
+            .unwrap_or_default();
+        if matches!(
+            kind,
+            ProviderKind::CodexSdk { .. } | ProviderKind::ClaudeSdk { .. }
+        ) {
+            let _queue = QueueSlot::acquire(&self.queued, self.config.limits.queued_requests)?;
+            let _host = acquire(host_provider_semaphore(), deadline).await?;
+            let _global = acquire(self.global.clone(), deadline).await?;
+            let _deployment = acquire(self.deployment_semaphore(deployment)?, deadline).await?;
+            let text = crate::ai_sdk::complete(
+                &kind,
+                &route.selection.model,
+                &request.prompt,
+                self.config.limits.response_bytes,
+                remaining(deadline)?,
+            )
+            .await?;
+            return Ok(Response {
+                selection: selected.selection,
+                text,
+            });
+        }
         let endpoint = self
             .config
             .provider_endpoints
@@ -455,7 +500,7 @@ impl OpenAiProxy {
         let per_deployment = acquire(deployment_semaphore, deadline).await?;
         let text = self
             .request(
-                endpoint,
+                (&kind, endpoint),
                 &route.selection.model,
                 &request.prompt,
                 &secret,
@@ -483,6 +528,14 @@ impl OpenAiProxy {
     {
         let deadline = std::time::Instant::now() + self.config.limits.timeout;
         let selected = self.policy.complete(deployment, request)?;
+        if !matches!(
+            self.config.provider_kinds.get(&selected.selection.provider),
+            None | Some(ProviderKind::Openai)
+        ) {
+            let response = self.complete(deployment, request).await?;
+            sink(&response.text)?;
+            return Ok(response.selection);
+        }
         let route =
             self.config
                 .routes
@@ -538,9 +591,23 @@ impl OpenAiProxy {
         Ok(selected.selection)
     }
 
+    fn deployment_semaphore(&self, deployment: &str) -> Result<Arc<Semaphore>, Error> {
+        Ok(self
+            .deployments
+            .lock()
+            .map_err(|_| Error::Busy)?
+            .entry(deployment.to_owned())
+            .or_insert_with(|| {
+                Arc::new(Semaphore::new(
+                    self.config.limits.per_deployment_concurrency,
+                ))
+            })
+            .clone())
+    }
+
     async fn request(
         &self,
-        endpoint: &str,
+        transport: (&ProviderKind, &str),
         model: &str,
         prompt: &str,
         secret: &str,
@@ -551,17 +618,18 @@ impl OpenAiProxy {
         ),
         deadline: std::time::Instant,
     ) -> Result<String, Error> {
+        let (kind, endpoint) = transport;
         let body = tokio::time::timeout(remaining(deadline)?, async {
-            let response = self
-                .client
-                .post(endpoint)
-                .bearer_auth(secret)
-                .json(&serde_json::json!({
-                    "model": model,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "stream": false
-                }))
-                .send()
+            let payload = serde_json::json!({"model": model, "messages": [{"role":"user","content":prompt}], "stream":false});
+            let mut builder = self.client.post(endpoint);
+            let mut payload = payload;
+            if matches!(kind, ProviderKind::Anthropic) {
+                payload["max_tokens"] = 4096.into();
+                builder = builder.header("x-api-key", secret).header("anthropic-version", "2023-06-01");
+            } else {
+                builder = builder.bearer_auth(secret);
+            }
+            let response = builder.json(&payload).send()
                 .await
                 .map_err(|_| Error::ProviderFailed)?;
             if !response.status().is_success() {
@@ -579,10 +647,22 @@ impl OpenAiProxy {
             Ok::<_, Error>(body)
         })
         .await
-        .map_err(|_| Error::ProviderFailed)?
-        .map_err(|_| Error::ProviderFailed)?;
+        .map_err(|_| Error::ProviderFailed)??;
         let body: serde_json::Value =
             serde_json::from_slice(&body).map_err(|_| Error::ProviderFailed)?;
+        if matches!(kind, ProviderKind::Anthropic) {
+            let blocks = body["content"].as_array().ok_or(Error::ProviderFailed)?;
+            let text: String = blocks
+                .iter()
+                .filter(|b| b["type"] == "text")
+                .filter_map(|b| b["text"].as_str())
+                .collect();
+            return if text.is_empty() {
+                Err(Error::ProviderFailed)
+            } else {
+                Ok(text)
+            };
+        }
         body.pointer("/choices/0/message/content")
             .and_then(serde_json::Value::as_str)
             .map(ToOwned::to_owned)

@@ -4,6 +4,8 @@ const message = document.querySelector("#message");
 const list = document.querySelector("#apps");
 let reading = false;
 const pending = new Set();
+const awaiting = new Map();
+let connectionError = false;
 let lastApps = "";
 let inventory = null;
 let readVersion = 0;
@@ -60,6 +62,7 @@ function render({ apps }) {
       link.rel = "noopener noreferrer";
       detail.append(link);
     }
+    if (app.scheduling_independent) detail.append(element("p", "Scheduling continues when the editor is stopped. Archive jobs in the app to pause future runs, or stop the host to stop all scheduling."));
     const controls = element("div", "", "controls");
     const actions = {
       running: [["stop", "Stop"], ["restart", "Restart"]],
@@ -70,10 +73,11 @@ function render({ apps }) {
       stopping: [],
     };
     for (const [action, label] of actions[app.state] || []) {
-      const button = element("button", label);
+      const visibleLabel = app.scheduling_independent ? `${label} editor` : label;
+      const button = element("button", visibleLabel);
       button.type = "button";
       button.disabled = pending.has(app.name);
-      button.setAttribute("aria-label", `${label.toLowerCase()} ${app.name}`);
+      button.setAttribute("aria-label", `${visibleLabel.toLowerCase()} ${app.name}`);
       button.addEventListener("click", () => update({ action, app: app.name }));
       controls.append(button);
     }
@@ -110,6 +114,8 @@ async function update(command) {
   if (command) {
     if (pending.has(command.app)) return;
     pending.add(command.app);
+    awaiting.delete(command.app);
+    connectionError = false;
     ++readVersion;
     list.querySelectorAll("button").forEach(button => {
       if (button.getAttribute("aria-label")?.endsWith(` ${command.app}`) && !button.getAttribute("aria-label").startsWith("logs ")) button.disabled = true;
@@ -117,6 +123,7 @@ async function update(command) {
     message.textContent = `Requesting ${command.action} for ${command.app}…`;
     try {
       await request(command);
+      awaiting.set(command.app, command.action);
       message.textContent = `${command.action} requested for ${command.app}. Waiting for status.`;
     } catch (error) { message.textContent = error.message; }
     finally { pending.delete(command.app); rowCache.delete(command.app); lastApps = ""; if (inventory) render(inventory); }
@@ -124,8 +131,21 @@ async function update(command) {
   clearTimeout(timer);
   reading = true;
   const version = ++readVersion;
-  try { const data = await request(); if (version === readVersion) render(data); }
-  catch (error) { message.textContent = error.message; }
+  try {
+    const data = await request();
+    if (version === readVersion) {
+      if (connectionError) { message.textContent = ''; connectionError = false; }
+      for (const [name, action] of awaiting) {
+        const app = data.apps.find(app => app.name === name);
+        if (!app || app.state === 'failed' || app.state === (action === 'stop' ? 'stopped' : 'running')) {
+          awaiting.delete(name);
+          message.textContent = !app ? `${name} is no longer installed.` : app.state === 'failed' ? `${name} failed: ${app.error || 'See logs.'}` : `${name}: ${action} completed.`;
+        }
+      }
+      render(data);
+    }
+  }
+  catch (error) { if (version === readVersion) { connectionError = true; message.textContent = `Connection unavailable: ${error.message}`; } }
   finally {
     reading = false;
     timer = setTimeout(() => update(), 2000);
@@ -196,14 +216,30 @@ async function browsePlugins() {
       const install = element("button", "Download and install");
       install.type = "button";
       install.setAttribute("aria-label", `install ${plugin.name} ${plugin.version}`);
-      install.disabled = plugin.installed || plugin.installable === false;
+      install.disabled = plugin.installed || (plugin.installable === false && !plugin.setup_available);
+      if (plugin.setup_available && !plugin.installed) install.textContent = "Set up and install";
       if (plugin.installed) install.textContent = "Installed";
       if (plugin.installable === false) {
         const reason = plugin.install_reason || "This plugin requires host configuration.";
         info.append(element("p", reason));
         install.title = reason;
       }
-      install.addEventListener("click", () => changePlugin({ action: "install", name: plugin.name, version: plugin.version }));
+      install.addEventListener("click", () => {
+        if (!plugin.setup_available) return changePlugin({ action: "install", name: plugin.name, version: plugin.version });
+        const setup = {approved: true, task_authoring: plugin.capabilities.includes('tasks'), task_network: []};
+        if (plugin.capabilities.includes('ai')) {
+          const path = prompt('AI setup: enter the absolute path to your host AI routing configuration. Leave blank for local operation without a provider. Credentials stay in the host configuration.');
+          if (path === null) return;
+          if (path.trim()) setup.ai_config = path.trim();
+        }
+        if (setup.task_authoring) {
+          const hosts = prompt('Task setup: enter allowed network hosts, separated by commas (for example api.example.com:443). Leave blank to deny task network access.');
+          if (hosts === null) return;
+          setup.task_network = hosts.split(',').map(host => host.trim()).filter(Boolean);
+        }
+        if (!confirm(`Install ${plugin.name} ${plugin.version}? Approve capabilities: ${plugin.capabilities.join(', ')}. Task network: ${setup.task_network.join(', ') || 'none'}. AI configuration: ${setup.ai_config || 'no provider configured'}. Published jobs may run while the editor is stopped.`)) return;
+        return changePlugin({action: 'setup', name: plugin.name, version: plugin.version, setup});
+      });
       row.append(info, install);
       return row;
     }));
@@ -220,14 +256,14 @@ async function changePlugin(command) {
     });
   }
   pluginList.querySelectorAll("button").forEach(button => button.disabled = true);
-  pluginMessage.textContent = command.action === "install" ? `Downloading and verifying ${command.name}…` : `Uninstalling ${command.name}…`;
+  pluginMessage.textContent = command.action !== "uninstall" ? `Downloading and verifying ${command.name}…` : `Uninstalling ${command.name}…`;
   try {
     await request(command, "/api/plugins");
-    pluginMessage.textContent = `${command.name} ${command.action === "install" ? "installed" : "uninstalled. Stored app data retained"}.`;
+    pluginMessage.textContent = `${command.name} ${command.action !== "uninstall" ? "installed" : "uninstalled. Stored app data retained"}.`;
     await update();
     pluginBusy = false;
     await browsePlugins();
-    pluginMessage.textContent = `${command.name} ${command.action === "install" ? "installed" : "uninstalled. Stored app data retained"}.`;
+    pluginMessage.textContent = `${command.name} ${command.action !== "uninstall" ? "installed" : "uninstalled. Stored app data retained"}.`;
   } catch (error) {
     pluginBusy = false;
     const reason = error.message;

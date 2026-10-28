@@ -18,7 +18,7 @@ url = "2"
 getrandom = "0.4"
 futures-util = "0.3"
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
-tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "macros", "process", "io-util"] }
 reqwest = { version = "0.12", default-features = false, features = ["stream", "json", "rustls-tls"] }
 rusqlite = { version = "0.32.1", features = ["bundled"] }
 chrono = { version = "0.4", features = ["serde"] }

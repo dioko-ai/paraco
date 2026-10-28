@@ -38,6 +38,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Discover host stores or print the identity to preserve when relocating configuration.
+    HostState {
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
     /// Validate a package's declared capabilities for an execution target without deploying it.
     Check {
         app: PathBuf,
@@ -242,7 +247,11 @@ fn service_log_dir(path: Option<&std::path::Path>) -> Result<PathBuf, String> {
 }
 
 fn execute(cli: Cli) -> Result<(), String> {
+    paraco::ai_settings::initialize(&data::Directory::resolve(cli.data_dir.as_deref())?.root);
     match cli.command {
+        Command::HostState { config } => {
+            data::Directory::resolve(cli.data_dir.as_deref())?.discover(config.as_deref())
+        }
         Command::Check { app, target } => {
             let app = manifest::load(&app).map_err(|e| e.to_string())?;
             app.validate_target(&target).map_err(|e| e.to_string())?;

@@ -609,7 +609,7 @@ fn ai_request_without_host_configuration_does_not_grant_access() {
     app.ready();
     let response = app.request("/");
     assert!(response.starts_with("HTTP/1.1 403"));
-    assert!(response.contains("no configured AI route"));
+    assert!(response.contains("no permitted application or runtime AI default"));
     app.interrupt();
     assert!(app.wait().success());
 }

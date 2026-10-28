@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <script src="/dashboard.js" defer></script>
+<script src="/ai-settings.js" defer></script>
 <title>Paraco — Local apps</title>
 <style>
 :root{color-scheme:light;font-family:system-ui,-apple-system,sans-serif;color:#193329;background:#f5f7f2}*{box-sizing:border-box}body{margin:0}main{max-width:960px;margin:auto;padding:56px 24px}header{display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #d7dfd4;padding-bottom:24px}.brand{font-size:24px;font-weight:750;letter-spacing:-1px}.local{font-size:13px;border:1px solid #c9d6c8;border-radius:30px;padding:8px 12px}.intro{margin:48px 0 30px}h1{font-size:38px;letter-spacing:-1.5px;margin:0 0 10px}.intro p,footer{color:#59695b}ul{list-style:none;padding:0;margin:0;display:grid;gap:12px}.app{display:grid;grid-template-columns:1fr auto;gap:18px;background:white;border:1px solid #dae2d7;border-radius:12px;padding:24px}h2{font-size:18px;margin:0 0 6px}.path{font-family:monospace;color:#677968;margin:0;font-size:13px}.status{font-size:12px;align-self:start;border-radius:20px;padding:5px 10px;text-transform:capitalize}.running{color:#215b36;background:#e3f3e6}.starting{color:#725918;background:#faf0cf}.failed{color:#a13030;background:#fbe7e4}.detail{grid-column:1/-1;font-size:14px;overflow-wrap:anywhere}a{color:#286444;text-underline-offset:4px}a:hover{color:#123a21}a:focus-visible{outline:2px solid #286444;outline-offset:5px}footer{font-size:12px;margin-top:28px;line-height:1.8}.empty{padding:28px;border:1px dashed #bdcbb8;border-radius:12px}@media(max-width:480px){main{padding:28px 18px}h1{font-size:32px}.intro{margin-top:32px}.app{padding:18px}.local{font-size:11px}}
@@ -15,9 +16,29 @@
 <section class="intro"><h1>Your local apps</h1><p id="summary">Connecting…</p><p id="message" role="status" aria-live="polite"></p></section>
 <ul id="apps" aria-label="Applications"></ul>
 <section aria-label="Plugin catalog"><h2>Download plugins</h2>
-<p>Install a verified version from the bundled catalog. Requested capabilities are shown before download. Plugins needing task scheduling or AI providers cannot be installed here until host configuration is available. Installed plugins appear in Your local apps above; use Open app when running.</p>
+<p>Install a verified version from the bundled catalog. Requested capabilities are shown before download. Plugins needing task scheduling require host configuration. Configure AI access below for plugins that request it. Installed plugins appear in Your local apps above; use Open app when running.</p>
 <button id="catalog-refresh" type="button">Browse plugins</button>
 <p id="plugin-message" role="status" aria-live="polite"></p><ul id="plugins" aria-label="Available plugins"></ul></section>
+<section id="ai-settings" aria-label="AI settings" style="margin-top:40px">
+<h2>AI for your apps</h2>
+<p>Choose a device-wide default for apps that request AI, or override it for an installed app. API keys stay on this device and are sent only to the selected provider. Changes apply to new requests.</p>
+<button id="ai-refresh" type="button">Configure AI</button>
+<form id="ai-form" hidden>
+<p><label>Apply to <select id="ai-scope"><option value="">All apps (global default)</option></select></label></p>
+<p><label>Access <select id="ai-mode"><option value="disabled">Disabled</option><option value="inherit">Use global default</option><option value="custom">Choose provider</option></select></label></p>
+<fieldset id="ai-profile"><legend>Provider settings</legend>
+<p><label>Provider <select id="ai-provider"><option value="openai">OpenAI / Codex</option><option value="anthropic">Claude</option><option value="xai">Grok (xAI)</option><option value="custom">Other OpenAI-compatible API</option></select></label></p>
+<p><label>Connection <select id="ai-transport"><option value="api">API key</option><option value="sdk">Coding SDK (local sign-in)</option></select></label></p>
+<p><label>Model <input id="ai-model" maxlength="200" placeholder="Model ID from your provider"></label></p>
+<div id="ai-api-fields"><p><label>API key <input id="ai-key" type="password" autocomplete="new-password" maxlength="4096" placeholder="Leave blank to keep the saved key"></label></p>
+<p><label>Custom HTTPS completion endpoint (optional) <input id="ai-endpoint" type="url" placeholder="Use provider default"></label></p></div>
+<div id="ai-sdk-fields" hidden><p>Install the official SDK on this host and sign in through its coding client first. Your provider controls subscription eligibility, billing and limits. These calls return text; app prompts cannot request shell or file-editing tools.</p>
+<p><label>Node.js executable <input id="ai-node" placeholder="/usr/bin/node"></label></p>
+<p><label>Installed SDK JavaScript entry file <input id="ai-module" placeholder="Absolute path to the SDK entry module"></label></p></div>
+</fieldset>
+<p><button type="submit">Save AI settings</button></p>
+</form><p id="ai-status" role="status" aria-live="polite"></p>
+</section>
 <section id="logs" hidden aria-label="Application logs"><h2 id="log-title"></h2>
 <label>Launch ID (blank for all retained launches) <input id="log-launch" maxlength="32"></label>
 <button id="log-refresh" type="button">Refresh logs</button>
