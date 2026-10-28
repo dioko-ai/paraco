@@ -245,6 +245,24 @@ impl App {
             thread::sleep(Duration::from_millis(25));
         }
     }
+    fn supervised_child_pid(&self) -> i32 {
+        let guardian = self.pid();
+        let output = Command::new("ps")
+            .args(["-eo", "pid=,ppid="])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .find_map(|line| {
+                let mut fields = line.split_whitespace();
+                let pid: i32 = fields.next()?.parse().ok()?;
+                let parent: i32 = fields.next()?.parse().ok()?;
+                (parent == guardian).then_some(pid)
+            })
+            .expect("ready guardian should own its supervised child")
+    }
 }
 
 impl Drop for App {
@@ -485,7 +503,9 @@ fn unexpected_exit_is_reported_and_reaped() {
 fn stubborn_app_is_forced_to_exit_after_grace_period() {
     let mut app = App::run(HEALTHY);
     app.ready();
-    let pid = app.runtime_pid();
+    // Stop the child whose exit the guardian awaits: bubblewrap on Linux,
+    // or workerd itself in explicit trusted development mode.
+    let pid = app.supervised_child_pid();
     assert_eq!(unsafe { libc::kill(pid, libc::SIGSTOP) }, 0);
     let start = Instant::now();
     app.interrupt();
