@@ -300,3 +300,13 @@ fn installs_approved_system_capability_without_weakening_capability_checks() {
     );
     assert!(!output.exists());
 }
+
+#[test]
+fn abandoned_lock_does_not_block_installation() {
+    let bytes = valid_package("hello-world", "0.1.0", &[]);
+    let (directory, approved, output) = install_fixture(&bytes, "hello-world", "0.1.0", &[]);
+    fs::write(directory.path().join(".paraco-install.lock"), "").unwrap();
+    install(&approved, &bytes, &output).unwrap();
+    assert!(install(&approved, &bytes, &output).is_err());
+    assert_eq!(fs::read(output.join("main.ts")).unwrap(), b"export {};");
+}

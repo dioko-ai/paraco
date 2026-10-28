@@ -308,9 +308,9 @@ impl Store {
     /// Restore an explicitly retired dashboard catalog installation at the same source.
     pub fn install_plugin(&mut self, source: &Path, name: &str) -> Result<Deployment, String> {
         use rusqlite::OptionalExtension;
-        let source = canonical_source(source)?;
-        if self.disk.deployments.contains_key(&source) {
-            return self.install(Path::new(&source));
+        let source = plugin_source(source)?;
+        if let Some(deployment) = self.disk.deployments.get(&source) {
+            return Ok(deployment.clone());
         }
         let id: Option<String> = self
             .db
@@ -346,7 +346,7 @@ impl Store {
 
     /// Retire a stopped catalog plugin while retaining its data identity.
     pub fn retire_plugin(&mut self, source: &Path, name: &str) -> Result<(), String> {
-        let source = canonical_source(source)?;
+        let source = plugin_source(source)?;
         let deployment = self
             .disk
             .deployments
@@ -424,6 +424,20 @@ impl Store {
     }
 }
 
+// A plugin is prepared before its source directory is atomically published.
+fn plugin_source(source: &Path) -> Result<String, String> {
+    let parent = source
+        .parent()
+        .ok_or("missing plugin parent")?
+        .canonicalize()
+        .map_err(|e| e.to_string())?;
+    parent
+        .join(source.file_name().ok_or("missing plugin name")?)
+        .into_os_string()
+        .into_string()
+        .map_err(|_| "plugin path is not UTF-8".into())
+}
+
 fn canonical_source(source: &Path) -> Result<String, String> {
     source
         .canonicalize()
@@ -448,6 +462,24 @@ fn fresh_id() -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unpublished_plugin_can_retry_and_retire() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("state")).unwrap();
+        let source = dir.path().join("not-published");
+        let first = store.install_plugin(&source, "plugin").unwrap();
+        assert!(!source.exists());
+        assert_eq!(
+            store.install_plugin(&source, "plugin").unwrap().id,
+            first.id
+        );
+        store.retire_plugin(&source, "plugin").unwrap();
+        assert_eq!(
+            store.install_plugin(&source, "plugin").unwrap().id,
+            first.id
+        );
+    }
 
     #[test]
     fn catalog_retirement_restores_identity_and_data_after_reopen() {

@@ -234,7 +234,7 @@ fn valid_path(path: &str) -> bool {
         })
 }
 // Atomically refuse an existing destination, including one created during staging.
-fn publish_new(source: &Path, destination: &Path) -> Result<(), String> {
+pub(crate) fn publish_new(source: &Path, destination: &Path) -> Result<(), String> {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
         use std::os::unix::ffi::OsStrExt;
@@ -320,21 +320,7 @@ fn install(entry: &Entry, bytes: &[u8], output: &Path) -> Result<(), String> {
         .file_name()
         .ok_or("output must name a new directory")?;
     let output = parent.join(name);
-    // Serialize installers in a destination parent; don't leave a stale lock on failure.
-    let lock_path = parent.join(".paraco-install.lock");
-    let lock = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&lock_path)
-        .map_err(|e| format!("cannot acquire install lock (another install or stale lock): {e}"))?;
-    struct Lock(PathBuf, fs::File);
-    impl Drop for Lock {
-        fn drop(&mut self) {
-            let _ = self.1.sync_all();
-            let _ = fs::remove_file(&self.0);
-        }
-    }
-    let _lock = Lock(lock_path, lock);
+    // Atomic no-replace publication below arbitrates competing installers.
     if fs::symlink_metadata(&output).is_ok() {
         return Err("installation destination already exists; choose a new directory".into());
     }
