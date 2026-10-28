@@ -200,6 +200,51 @@ impl App {
             .next()
             .expect("host log should record the supervised guardian pid") as i32
     }
+    fn runtime_pid(&self) -> i32 {
+        let guardian = self.pid();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let output = Command::new("ps")
+                .args(["-eo", "pid=,ppid=,comm="])
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            let rows = String::from_utf8(output.stdout).unwrap();
+            let processes: Vec<(i32, i32, &str)> = rows
+                .lines()
+                .filter_map(|line| {
+                    let mut fields = line.split_whitespace();
+                    Some((
+                        fields.next()?.parse().ok()?,
+                        fields.next()?.parse().ok()?,
+                        fields.next()?,
+                    ))
+                })
+                .collect();
+            let mut descendants = vec![guardian];
+            for _ in 0..8 {
+                let children: Vec<_> = processes
+                    .iter()
+                    .filter(|(_, parent, _)| descendants.contains(parent))
+                    .collect();
+                if let Some((pid, _, _)) = children
+                    .iter()
+                    .find(|(_, _, command)| command.contains("workerd") || *command == "runtime")
+                {
+                    return *pid;
+                }
+                if children.is_empty() {
+                    break;
+                }
+                descendants.extend(children.iter().map(|(pid, _, _)| *pid));
+            }
+            assert!(
+                Instant::now() < deadline,
+                "no workerd descendant for guardian {guardian}"
+            );
+            thread::sleep(Duration::from_millis(25));
+        }
+    }
 }
 
 impl Drop for App {
@@ -429,7 +474,7 @@ fn request_errors_do_not_break_subsequent_requests() {
 fn unexpected_exit_is_reported_and_reaped() {
     let mut app = App::run(HEALTHY);
     app.ready();
-    let pid = app.pid();
+    let pid = app.runtime_pid();
     assert_eq!(unsafe { libc::kill(pid, libc::SIGKILL) }, 0);
     assert!(!app.wait().success());
     assert!(app.logs().contains("application exited unexpectedly"));
@@ -440,7 +485,7 @@ fn unexpected_exit_is_reported_and_reaped() {
 fn stubborn_app_is_forced_to_exit_after_grace_period() {
     let mut app = App::run(HEALTHY);
     app.ready();
-    let pid = app.pid();
+    let pid = app.runtime_pid();
     assert_eq!(unsafe { libc::kill(pid, libc::SIGSTOP) }, 0);
     let start = Instant::now();
     app.interrupt();
