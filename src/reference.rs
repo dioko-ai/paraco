@@ -159,16 +159,19 @@ fn prepare(
         .unwrap_or(Path::new("."));
     fs::create_dir_all(parent).map_err(error)?;
     let root = parent.canonicalize().map_err(error)?.join("cron");
-    let created = match create_directory(&root) {
-        Ok(()) => true,
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => false,
-        Err(e) => return Err(error(e)),
-    };
-    private_directory(&root)?;
-    // Existing directories require our exclusively created marker. Never adopt
-    // an arbitrary empty directory or an app copied there by a user.
-    if created {
-        let mut marker = exclusive_file(&root.join(MARKER))?;
+    // Publish the ownership marker and lock together, never an incomplete root.
+    if !root.exists() {
+        let staging = tempfile::Builder::new()
+            .prefix(".cron-init-")
+            .tempdir_in(root.parent().unwrap())
+            .map_err(error)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(staging.path(), fs::Permissions::from_mode(0o700))
+                .map_err(error)?;
+        }
+        let mut marker = exclusive_file(&staging.path().join(MARKER))?;
         marker
             .write_all(
                 &serde_json::to_vec(&Ownership {
@@ -179,10 +182,19 @@ fn prepare(
             )
             .map_err(error)?;
         marker.sync_all().map_err(error)?;
+        exclusive_file(&staging.path().join(LOCK))?
+            .sync_all()
+            .map_err(error)?;
+        if let Err(error) = crate::marketplace::publish_new(staging.path(), &root)
+            && !root.exists()
+        {
+            return Err(error);
+        }
     }
+    private_directory(&root)?;
     regular_file(&root.join(MARKER))
         .map_err(|_| "refusing Cron root without a valid ownership marker".to_string())?;
-    let lock = lock_root(&root.join(LOCK), created)?;
+    let lock = lock_root(&root.join(LOCK), false)?;
     if fs::metadata(root.join(MARKER)).map_err(error)?.len() > 16384 {
         return Err("invalid Cron ownership marker".into());
     }
@@ -206,6 +218,13 @@ fn prepare(
         app["aiConfig"] = serde_json::to_value(path).map_err(error)?;
     }
     let config = serde_json::to_string_pretty(&serde_json::json!({"apps":[app]})).map_err(error)?;
+    if let Ok(previous) = fs::read_to_string(root.join("server.json"))
+        && previous != config
+    {
+        eprintln!(
+            "paraco: Cron configuration changed. Current task network grants: {network:?}. Jobs requiring removed grants are blocked; restore --allow-task-network HOST to resume them. AI configuration follows the current --ai-config option."
+        );
+    }
     let mut desired: Vec<(&str, &[u8])> = ASSETS
         .iter()
         .map(|(path, text)| (*path, text.as_bytes()))
@@ -299,6 +318,17 @@ mod tests {
         let value: serde_json::Value = serde_json::from_slice(&fs::read(&config).unwrap()).unwrap();
         assert!(value["apps"][0].get("aiConfig").is_none());
     }
+    #[test]
+    fn abandoned_initialization_does_not_claim_final_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let abandoned = temp.path().join(".cron-init-interrupted");
+        create_directory(&abandoned).unwrap();
+        fs::write(abandoned.join(MARKER), b"{").unwrap();
+        let generated = prepare(&temp.path().join("cron"), None, vec![]).unwrap();
+        assert!(generated.config.is_file());
+        assert_eq!(fs::read(abandoned.join(MARKER)).unwrap(), b"{");
+    }
+
     #[test]
     fn refuses_foreign_roots_and_modified_generated_files() {
         let temp = tempfile::tempdir().unwrap();

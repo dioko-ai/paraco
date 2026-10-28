@@ -13,7 +13,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-const MAX_REQUEST: usize = 96 * 1024;
+const MAX_REQUEST: usize = crate::tasks::MAX_REQUEST_BYTES;
 const MAX_RESPONSE: usize = 4 * 1024 * 1024;
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]

@@ -18,6 +18,8 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+// Allow worst-case JSON escaping of 256 KiB source plus request metadata.
+pub(crate) const MAX_REQUEST_BYTES: usize = 6 * 256 * 1024 + 64 * 1024;
 const MAX_LOG: usize = 65536;
 const MAX_RUNS: i64 = 100;
 const MAX_CONCURRENCY: usize = 4;
@@ -136,6 +138,9 @@ impl Tasks {
     pub fn set_grant(&self, deployment: String, network: Vec<String>) {
         self.grants.lock().unwrap().insert(deployment, network);
     }
+    pub fn revoke_grant(&self, deployment: &str) {
+        self.grants.lock().unwrap().remove(deployment);
+    }
     fn allowed(&self, deployment: &str, network: &[String]) -> Result<(), String> {
         let grants = self.grants.lock().unwrap();
         let permitted = grants
@@ -195,7 +200,7 @@ impl Tasks {
         match action {
             "draft"=>{let draft:Draft=serde_json::from_value(body).map_err(err)?;self.draft(deployment,draft)},
             "publish"=>self.publish(deployment,&body),
-            "list"=>self.rows("SELECT json_object('id',id,'name',name,'current_revision',current,'archived',json(CASE archived WHEN 1 THEN 'true' ELSE 'false' END),'next_at',next_at,'once_claimed',once_claimed) FROM task_jobs WHERE deployment=?1 ORDER BY name",deployment,None),
+            "list"=>self.list_jobs(deployment),
             "revisions"=>{let job=string(&body,"job_id")?;self.owned(deployment,job)?;let offset=body.get("offset").and_then(Value::as_u64).unwrap_or(0).min(2000);self.rows(&format!("SELECT json_object('id',id,'job_id',job,'body',json(body),'digest',digest,'created',created,'published',published) FROM task_revisions WHERE deployment=?1 AND job=?2 ORDER BY created DESC,rowid DESC LIMIT 10 OFFSET {offset}"),deployment,Some(job))},
             "history"=>{let job=body.get("job_id").and_then(Value::as_str);if let Some(job)=job{self.owned(deployment,job)?;}let offset=body.get("offset").and_then(Value::as_u64).unwrap_or(0).min(1000000);self.rows(&format!("SELECT json_object('id',id,'job_id',job,'revision_id',revision,'occurrence',occurrence,'status',status,'started',started,'ended',ended,'logs',substr(logs,1,1024),'logs_preview',1,'truncated',truncated,'diagnostic',diagnostic) FROM task_runs WHERE deployment=?1 AND (?2 IS NULL OR job=?2) ORDER BY started DESC,rowid DESC LIMIT 500 OFFSET {offset}"),deployment,job)},
             "revision"=>{let revision=string(&body,"revision_id")?;let db=self.db.lock().unwrap();let result:String=db.query_row("SELECT json_object('id',id,'job_id',job,'body',json(body),'digest',digest,'created',created,'published',published) FROM task_revisions WHERE id=?1 AND deployment=?2",params![revision,deployment],|r|r.get(0)).map_err(err)?;serde_json::from_str(&result).map_err(err)},
@@ -207,9 +212,22 @@ impl Tasks {
             "run"=>{let job=string(&body,"job_id")?;self.owned(deployment,job)?;let run=self.admit(job,&format!("manual:{}",id("o")?),now(),true)?;self.dispatch_pending()?;Ok(json!({"run_id":run}))},
             "cancel"=>{let run=string(&body,"run_id")?;let db=self.db.lock().unwrap();let owner:Option<String>=db.query_row("SELECT deployment FROM task_runs WHERE id=?1",[run],|r|r.get(0)).optional().map_err(err)?;if owner.as_deref()!=Some(deployment){return Err("unknown run".into())}db.execute("UPDATE task_runs SET status='cancelled',ended=?2 WHERE id=?1 AND status='pending'",params![run,now()]).map_err(err)?;drop(db);if let Some(r)=self.running.lock().unwrap().get(run){r.cancel.store(true,Ordering::Relaxed);}Ok(json!({"ok":true}))},
             "preview"=>{let schedule:Schedule=serde_json::from_value(body.get("schedule").cloned().ok_or("schedule required")?).map_err(err)?;let mut at=body.get("after").and_then(Value::as_i64).unwrap_or_else(now);let mut dates=vec![];for _ in 0..5{if let Some(next)=next(&schedule,at)?{dates.push(next);at=next;}else{break}}Ok(json!({"times":dates}))},
-            "status"=>{let db=self.db.lock().unwrap();let last:Option<i64>=db.query_row("SELECT last_tick FROM task_clock WHERE id=1",[],|r|r.get(0)).map_err(err)?;Ok(json!({"last_tick":last,"global_concurrency":MAX_CONCURRENCY,"default_timeout_ms":default_timeout(),"max_timeout_ms":3600000,"max_log_bytes":MAX_LOG,"runs_retained_per_job":1000,"log_runs_retained_per_job":MAX_RUNS,"machine_off":"Jobs cannot execute while the machine or runtime is off. Missed recurring runs are skipped."}))},
+            "status"=>{let db=self.db.lock().unwrap();let last:Option<i64>=db.query_row("SELECT last_tick FROM task_clock WHERE id=1",[],|r|r.get(0)).map_err(err)?;Ok(json!({"last_tick":last,"network_grants":self.grants.lock().unwrap().get(deployment).cloned().unwrap_or_default(),"global_concurrency":MAX_CONCURRENCY,"default_timeout_ms":default_timeout(),"max_timeout_ms":3600000,"max_log_bytes":MAX_LOG,"runs_retained_per_job":1000,"log_runs_retained_per_job":MAX_RUNS,"machine_off":"Jobs cannot execute while the machine or runtime is off. Missed recurring runs are skipped."}))},
             _=>Err("unknown task action".into())
         }
+    }
+    fn list_jobs(&self, deployment: &str) -> Result<Value, String> {
+        let mut jobs = self.rows("SELECT json_object('id',j.id,'name',j.name,'current_revision',j.current,'archived',json(CASE j.archived WHEN 1 THEN 'true' ELSE 'false' END),'next_at',j.next_at,'once_claimed',j.once_claimed,'published_schedule',json_extract(r.body,'$.schedule'),'network',json_extract(r.body,'$.network'),'unpublished_changes',EXISTS(SELECT 1 FROM task_revisions d WHERE d.job=j.id AND d.published=0 AND d.rowid>COALESCE(r.rowid,0)),'last_result',(SELECT status FROM task_runs WHERE job=j.id ORDER BY started DESC,rowid DESC LIMIT 1)) FROM task_jobs j LEFT JOIN task_revisions r ON r.id=j.current WHERE j.deployment=?1 ORDER BY j.name", deployment, None)?;
+        for job in jobs.as_array_mut().unwrap() {
+            let network: Vec<String> =
+                serde_json::from_value(job["network"].clone()).unwrap_or_default();
+            job["blocked"] = if job["current_revision"].is_string() && job["archived"] != true {
+                self.allowed(deployment, &network).err().map(|reason| json!(format!("Blocked: permission missing ({reason}). Restart Cron with --allow-task-network for each required host, or restore taskAuthoring/taskNetwork in the host configuration. Required hosts: {}", network.join(", ")))).unwrap_or(Value::Null)
+            } else {
+                Value::Null
+            };
+        }
+        Ok(jobs)
     }
     fn rows(&self, sql: &str, deployment: &str, job: Option<&str>) -> Result<Value, String> {
         let db = self.db.lock().unwrap();
@@ -1493,6 +1511,30 @@ mod tests {
         )
         .unwrap();
         (job, revision)
+    }
+    #[test]
+    fn published_summary_reports_blocked_network_and_recovers_without_losing_due() {
+        let (_dir, tasks) = fixture();
+        let (job, revision) = installed(&tasks, Schedule::Once { at: 100 }, 100);
+        tasks.db.lock().unwrap().execute("UPDATE task_revisions SET body=json_set(body,'$.network',json('[\"example.com:443\"]')) WHERE id=?1", [&revision]).unwrap();
+        tasks.evaluate(200).unwrap();
+        let jobs = tasks.command("owner", "list", json!({})).unwrap();
+        assert!(
+            jobs[0]["blocked"]
+                .as_str()
+                .unwrap()
+                .contains("--allow-task-network")
+        );
+        assert_eq!(jobs[0]["published_schedule"]["kind"], "once");
+        assert_eq!(jobs[0]["next_at"], 100);
+        assert!(jobs[0]["last_result"].is_null());
+        tasks.set_grant("owner".into(), vec!["example.com:443".into()]);
+        tasks.evaluate(201).unwrap();
+        let jobs = tasks.command("owner", "list", json!({})).unwrap();
+        assert!(jobs[0]["blocked"].is_null());
+        assert!(jobs[0]["next_at"].is_null());
+        assert_eq!(jobs[0]["last_result"], "pending");
+        assert_eq!(jobs[0]["id"], job);
     }
     #[test]
     fn draft_pruning_preserves_latest_draft_for_each_job() {

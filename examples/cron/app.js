@@ -4,7 +4,7 @@ const state = {jobs: [], selected: null, revisions: [], runs: [], epoch: 0, revi
 const initialSource = $('source').value;
 const localTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
 $('timezone').value = localTimezone;
-function setSelecting(value) { state.selecting = value; $('save').disabled = value || state.saving; $('generate').disabled = value || !!state.ai; }
+function setSelecting(value) { state.selecting = value; for (const id of ['name','source','kind','at','expression','frequency','time','weekday','timezone','timeout','network','success','failure','preview','applyAi','prevRevisions','moreRevisions','prevHistory','moreHistory']) $(id).disabled = value; $('save').disabled = value || state.saving; $('generate').disabled = value || !!state.ai; }
 function message(text) { $('message').textContent = text; }
 async function api(action, body = {}, signal) {
   const response = await fetch(`/api/${action}`, {method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body), signal});
@@ -19,7 +19,7 @@ async function safe(action) { try { await action(); } catch (error) { if (error.
 function invalidate(dirty = true) {
   if (dirty) state.dirty = true;
   state.epoch++; state.reviewed = null; $('review').hidden = true; $('approved').checked = false; $('publish').disabled = true;
-  $('state').textContent = 'Draft edits'; $('occurrences').textContent = 'Preview the schedule after editing.'; updateContext();
+  $('state').textContent = 'Draft edits'; $('occurrences').textContent = 'Preview the schedule after editing.'; updateContext(); renderPublished();
 }
 function schedule() {
   if ($('kind').value === 'once') {
@@ -67,26 +67,39 @@ function setDraft(draft) {
   $('timeout').value = draft.timeout_ms / 1000; $('network').value = draft.network.join(', ');
   $('success').checked = draft.notify_success; $('failure').checked = draft.notify_failure; fields(); invalidate(false); state.dirty = false;
 }
+function scheduleLabel(value) {
+  if (!value) return 'Not published';
+  return value.kind === 'cron' ? `${value.expression} (${value.timezone})` : value.kind === 'once' ? `Once: ${date(value.at)}` : 'Manual';
+}
+function publishedSummary(job) {
+  return `Published schedule: ${scheduleLabel(job.published_schedule)} · Next run: ${job.archived ? 'Archived' : date(job.next_at)} · Last result: ${job.last_result || 'No runs yet'} · Unpublished changes: ${job.unpublished_changes || (state.selected === job.id && state.dirty) ? 'Yes' : 'No'}${job.blocked ? ' · '+job.blocked : ''}`;
+}
+function renderPublished() {
+  const job = state.jobs.find(j => j.id === state.selected);
+  $('publishedSummary').textContent = job ? publishedSummary(job) : 'No published job selected.';
+}
 function renderJobs() {
   const signature = JSON.stringify([state.jobs, state.selected, $('showArchived').checked]);
   if (state.jobsRender !== signature) {
   state.jobsRender = signature; $('jobs').replaceChildren();
   for (const job of state.jobs.filter(j => $('showArchived').checked || !j.archived)) {
     const b = button(`${job.name}${job.archived ? ' · Archived' : ''}`, () => selectJob(job.id));
+    b.append(document.createElement('br')); paragraph(publishedSummary(job), b);
     b.className = 'job'; b.setAttribute('aria-current', String(job.id === state.selected)); $('jobs').append(b);
   }
   if (!$('jobs').childElementCount) paragraph('No jobs here yet.', $('jobs'));
   }
   const job = state.jobs.find(j => j.id === state.selected);
+  renderPublished();
   $('archive').disabled = !job; $('archive').textContent = job?.archived ? 'Unarchive' : 'Archive';
-  $('run').disabled = !job?.current_revision || job.archived; $('delete').disabled = !job?.archived;
+  $('run').disabled = !job?.current_revision || job.archived || !!job.blocked; $('delete').disabled = !job?.archived;
 }
 async function refresh() {
   const generation = ++state.refreshGeneration;
   const [jobs, status, notifications] = await Promise.all([api('list'), api('status'), api('notifications')]);
   if (generation !== state.refreshGeneration) return;
   state.jobs = jobs; renderJobs();
-  $('runtime').textContent = `${status.machine_off} Last scheduler check: ${date(status.last_tick)}. Up to ${status.global_concurrency} jobs at once.`;
+  $('runtime').textContent = `${status.machine_off} Last scheduler check: ${date(status.last_tick)}. Up to ${status.global_concurrency} jobs at once. Current network grants: ${(status.network_grants || []).join(', ') || 'none'}.`;
   const notificationSignature = JSON.stringify(notifications);
   if (state.notificationsRender !== notificationSignature && !$('notifications').contains(document.activeElement)) {
   state.notificationsRender = notificationSignature; $('notifications').replaceChildren();
@@ -117,7 +130,7 @@ async function loadDetails(jobId, preserve = false) {
     const row = document.createElement('details'); const summary = document.createElement('summary'); row.dataset.id=r.id; row.open=openRevisions.has(r.id);
     summary.textContent = `${date(r.created)} · ${r.published ? 'Published' : 'Draft'} · ${r.id}`; row.append(summary);
     const source = document.createElement('pre'); source.textContent = JSON.stringify(r.body,null,2); row.append(source);
-    row.append(button('Restore as editable draft', ()=> { setDraft(r.body); invalidate(); message('Restored to the editor. Save and review to create a new revision.'); })); $('revisions').append(row);
+    row.append(button('Restore as editable draft', ()=> { if (state.selecting || !canLeave()) return; setDraft(r.body); invalidate(); message('Restored to the editor. Save and review to create a new revision.'); })); $('revisions').append(row);
   }
   for (const run of runs) {
     const row = document.createElement('details'); const summary = document.createElement('summary'); row.dataset.id=run.id; row.open=openRuns.has(run.id); summary.textContent = `${date(run.started)} · ${run.status} · ${run.id}`; row.append(summary);
@@ -126,34 +139,35 @@ async function loadDetails(jobId, preserve = false) {
     if (run.logs_preview) row.append(button('Load full logs', async()=> { const full=await api('logs',{run_id:run.id}); run.logs=full.logs; run.truncated=full.truncated; run.diagnostic=full.diagnostic; run.logs_preview=0; logs.textContent=`${full.logs || '(No logs)'}${full.truncated?'\n[Logs truncated]':''}${full.diagnostic?'\n'+full.diagnostic:''}`; updateContext(); }));
     if (['pending','running'].includes(run.status)) row.append(button('Cancel run',async()=> { await api('cancel',{run_id:run.id}); await loadDetails(jobId); })); $('history').append(row);
   }
-  if (!runs.length) paragraph('No runs yet.', $('history')); updateContext();
+  if (!runs.length) paragraph('No runs yet.', $('history')); updateContext(); return revisions;
 }
 function canLeave() {
   if (state.saving) { message('Wait for the draft save to finish.'); return false; }
   return !state.dirty || confirm('Discard unsaved changes?');
 }
 async function selectJob(id) {
-  if (id === state.selected || !canLeave()) return;
+  if ((id === state.selected && !state.selecting) || !canLeave()) return;
   const job = state.jobs.find(j => j.id === id); if (!job) return;
   state.selected = id; state.revisionOffset = 0; state.historyOffset = 0; state.revisions = []; state.runs = [];
   $('revisions').replaceChildren(); $('history').replaceChildren();
   setDraft({name:job.name,source:initialSource,schedule:{kind:'manual'},timeout_ms:60000,network:[],notify_success:false,notify_failure:true});
   $('editorTitle').textContent = job.name; $('state').textContent = 'Loading job…'; renderJobs();
-  const epoch = state.epoch, selection = ++state.selectionGeneration; setSelecting(true);
+  const selection = ++state.selectionGeneration; setSelecting(true);
   try {
-    await loadDetails(id);
-    if (state.selected !== id || state.epoch !== epoch) return;
+    if (!await loadDetails(id)) return;
+    if (state.selected !== id || selection !== state.selectionGeneration) return;
     let revision = state.revisions[0];
     if (!revision || (revision.published && revision.id !== job.current_revision)) {
       revision = state.revisions.find(r => r.id === job.current_revision);
       if (job.current_revision && !revision) revision = await api('revision',{revision_id:job.current_revision});
     }
-    if (state.selected !== id || state.epoch !== epoch) return;
+    if (state.selected !== id || selection !== state.selectionGeneration) return;
     if (revision) setDraft(revision.body);
     $('state').textContent = job.archived ? 'Archived' : revision && !revision.published ? 'Saved draft loaded' : job.current_revision ? 'Published revision loaded' : 'Unpublished';
-  } finally { if (selection === state.selectionGeneration) setSelecting(false); }
+    if (selection === state.selectionGeneration) setSelecting(false);
+  } catch (error) { if (selection === state.selectionGeneration) throw new Error('Could not load job. Select it again to retry.'); throw error; }
 }
-$('editor').addEventListener('input', invalidate);
+$('editor').addEventListener('input', () => { if (!state.selecting) invalidate(); });
 $('kind').addEventListener('change', fields); $('frequency').addEventListener('change', fields);
 window.addEventListener('beforeunload', event => { if (state.dirty || state.saving) { event.preventDefault(); event.returnValue = ''; } });
 $('editor').addEventListener('submit', event => { event.preventDefault(); safe(async()=> {
@@ -213,9 +227,14 @@ $('new').addEventListener('click',()=> {
 $('delete').addEventListener('click',()=>safe(async()=> {
   const job=state.jobs.find(j=>j.id===state.selected); if (!job?.archived || !canLeave()) return;
   if (!confirm(`Permanently delete ${job.name}, its runs, revisions, notifications, and compiled artifacts?`)) return;
-  const result=await api('delete',{job_id:job.id}); state.dirty=false; state.selected=null; state.revisions=[]; state.runs=[]; state.load++;
+  const epoch=state.epoch, selection=state.selectionGeneration;
+  const result=await api('delete',{job_id:job.id});
+  if (state.selected === job.id && state.epoch === epoch && state.selectionGeneration === selection) {
+  state.selectionGeneration++; setSelecting(false); state.dirty=false; state.selected=null; state.revisions=[]; state.runs=[]; state.load++;
   setDraft({name:'My job',source:initialSource,schedule:{kind:'manual'},timeout_ms:60000,network:[],notify_success:false,notify_failure:true});
-  $('editorTitle').textContent='New draft'; $('revisions').replaceChildren(); $('history').replaceChildren(); await refresh(); message(result.artifacts_cleaned === false ? 'Job deleted, but some compiled artifacts could not be removed. Check task storage permissions and restart the runtime to retry cleanup.' : 'Archived job deleted.');
+  $('editorTitle').textContent='New draft'; $('revisions').replaceChildren(); $('history').replaceChildren();
+  }
+  await refresh(); message(result.artifacts_cleaned === false ? 'Job deleted, but some compiled artifacts could not be removed. Check task storage permissions and restart the runtime to retry cleanup.' : 'Archived job deleted.');
 }));
 $('prevRevisions').addEventListener('click',()=>safe(async()=> { state.revisionOffset=Math.max(0,state.revisionOffset-10); await loadDetails(state.selected); }));
 $('prevHistory').addEventListener('click',()=>safe(async()=> { state.historyOffset=Math.max(0,state.historyOffset-500); await loadDetails(state.selected); }));

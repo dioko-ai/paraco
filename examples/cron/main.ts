@@ -22,7 +22,7 @@ async function jsonBody(request: Request): Promise<Record<string, unknown>> {
     for (;;) {
       const {done, value} = await Promise.race([reader.read(), expired]); if (done) break;
       size += value.byteLength;
-      if (size > 48_000) { void reader.cancel().catch(() => {}); throw new Error("request too large"); }
+      if (size > 6 * 256 * 1024 + 64 * 1024) { void reader.cancel().catch(() => {}); throw new Error("request too large"); }
       chunks.push(value);
     }
   } finally { clearTimeout(timer); reader.releaseLock(); }

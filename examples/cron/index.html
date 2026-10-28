@@ -5,7 +5,7 @@
 </style><script src="/app.js" defer></script></head>
 <body><header><div><h1>Cron</h1><span class="muted">Local jobs. Deliberate publishing.</span></div><button id="refresh">Refresh</button></header>
 <main><p id="message" role="status" aria-live="polite"></p><div class="grid"><aside><div class="card"><div class="row"><h2>Jobs</h2><button id="new">New</button></div><label><input id="showArchived" type="checkbox"> Show archived</label><div id="jobs"></div></div><div class="card"><h2>Runtime</h2><p id="runtime" class="muted"></p></div></aside>
-<section><div class="card"><div class="row"><h2 id="editorTitle">New draft</h2><span id="state" class="pill">Unpublished</span></div>
+<section><div class="card"><h2>Published job</h2><p id="publishedSummary" aria-live="polite">No published job selected.</p><p class="muted">The editor below may show a draft. Only the published revision runs.</p></div><div class="card"><div class="row"><h2 id="editorTitle">New draft</h2><span id="state" class="pill">Unpublished</span></div>
 <form id="editor"><label for="name">Name</label><input id="name" required maxlength="160" value="My job"><details open><summary>Advanced: TypeScript source</summary><label for="source">TypeScript module</label><textarea id="source" class="code" spellcheck="false">export default async function(ctx: { log: (...values: unknown[]) => void; notify: (message: string) => void }) {
   ctx.log("Hello from Cron");
 }

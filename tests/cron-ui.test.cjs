@@ -65,14 +65,16 @@ test('save keeps new job identity when edits arrive and blocks double submit',as
   assert.equal(vm.runInContext('state.selected',b.context),'j1');
   assert.equal(b.get('source').value,'newer');assert.equal(b.get('review').hidden,true);
 });
-test('selection clears AI history and cannot replace edits made while loading',async()=>{
+test('selection locks placeholder fields until the actual revision loads',async()=>{
   const pending=deferred();const b=browser(action=>action==='revisions'?pending.promise:action==='history'?response([{id:'old'}]):undefined);await tick();
   vm.runInContext("state.jobs=[{id:'j1',name:'Job',current_revision:null}];state.runs=[{id:'other-job'}]",b.context);
   vm.runInContext("selectJob('j1')",b.context);await tick();
   assert.equal(vm.runInContext('state.runs.length',b.context),0);
-  b.get('source').value='my edit';b.fire('editor','input');
+  assert.equal(b.get('source').disabled,true);
+  assert.equal(b.get('kind').disabled,true);
   pending.resolve(response([{id:'r',body:{name:'Old',source:'old',schedule:{kind:'manual'},timeout_ms:60000,network:[]}}]));await tick();await tick();
-  assert.equal(b.get('source').value,'my edit');
+  assert.equal(b.get('source').value,'old');
+  assert.equal(b.get('source').disabled,false);
 });
 test('paging sends offsets and periodic refresh preserves open rows',async()=>{
   const revisions=Array.from({length:10},(_,i)=>({id:'r'+i,created:0,body:{}}));
@@ -135,9 +137,11 @@ test('HTTP adapter rejects foreign origins and oversized inputs without invoking
     const ctx={tasks:{command:async()=>{calls++;return [];}},ai:{complete:async()=>{calls++;return {text:'draft'};}}};
     const req=(path,body,origin='http://cron.localhost')=>new Request('http://cron.localhost/api/'+path,{method:'POST',headers:{origin,'content-type':'application/json'},body:JSON.stringify(body)});
     if((await app.fetch(req('list',{},'https://evil.example'),ctx)).status!==403)throw Error('foreign origin');
-    if((await app.fetch(req('draft',{source:'x'.repeat(49000)}),ctx)).status!==400)throw Error('body bound');
+    if((await app.fetch(req('draft',{source:'x'.repeat(6 * 256 * 1024 + 64 * 1024)}),ctx)).status!==400)throw Error('body bound');
     if((await app.fetch(req('ai',{prompt:'x'.repeat(16001)}),ctx)).status!==400)throw Error('prompt bound');
     if(calls!==0)throw Error('capability invoked on rejected input');
+    assert.equal((await app.fetch(req('draft',{source:'\u0001'.repeat(256 * 1024)}),ctx)).status,200);
+    calls=0;
     if((await app.fetch(req('list',{}),ctx)).status!==200||calls!==1)throw Error('authorized action');
     if((await app.fetch(req('unknown',{}),ctx)).status!==404||calls!==1)throw Error('action whitelist');
     if((await app.fetch(new Request('http://cron.localhost/../../secrets'),ctx)).status!==404)throw Error('asset whitelist');
@@ -259,7 +263,7 @@ test('Chromium exercises guided schedules, races, paging and refresh', {skip: !p
     await page.locator('#save').click();await page.locator('#review').waitFor();assert.equal(requests.filter(r=>r.action==='draft').at(-1).input.job_id,'new-job');
     await page.locator('#approved').check();await page.locator('#publish').click();await page.getByRole('status').filter({hasText:'Reviewed revision published'}).waitFor();
     await page.locator('#source').fill('dirty edit');await page.getByRole('button',{name:'Existing'}).click();assert.equal(await page.locator('#source').inputValue(),'dirty edit');
-    page.removeAllListeners('dialog');page.on('dialog',dialog=>dialog.accept());revisionGate=deferred();await page.getByRole('button',{name:'Existing'}).click();await page.locator('#source').fill('edited while loading');revisionGate.resolve();revisionGate=null;await page.waitForTimeout(100);assert.equal(await page.locator('#source').inputValue(),'edited while loading');
+    page.removeAllListeners('dialog');page.on('dialog',dialog=>dialog.accept());revisionGate=deferred();await page.getByRole('button',{name:'Existing'}).click();assert.equal(await page.locator('#source').isDisabled(),true);assert.equal(await page.locator('#kind').isDisabled(),true);revisionGate.resolve();revisionGate=null;await page.waitForFunction(()=>!document.querySelector('#source').disabled);assert.equal(await page.locator('#source').inputValue(),body.source);
     await page.locator('#moreRevisions').click();await page.waitForTimeout(100);assert.equal(requests.filter(r=>r.action==='revisions').at(-1).input.offset,10);
     await page.locator('#moreHistory').click();await page.waitForTimeout(100);assert.equal(requests.filter(r=>r.action==='history').at(-1).input.offset,500);
     await page.locator('#prevHistory').click();await page.waitForTimeout(100);
@@ -270,4 +274,33 @@ test('Chromium exercises guided schedules, races, paging and refresh', {skip: !p
     assert.equal(await page.evaluate(()=>document.activeElement.textContent),'Mark read');
     await page.locator('#name').focus();await page.evaluate(()=>window.cronPoll());await page.getByText('New notice').waitFor();
   } finally {if(browser)await browser.close();await new Promise(r=>server.close(r));}
+});
+
+test('delayed delete preserves a newer draft', async()=>{
+  const pending=deferred(); const b=browser(action=>action==='delete'?pending.promise:undefined); await tick();
+  vm.runInContext("state.jobs=[{id:'old',name:'Old',archived:true}];state.selected='old'",b.context);
+  b.fire('delete'); b.fire('new'); b.get('source').value='new edits'; b.fire('editor','input');
+  pending.resolve(response({})); await tick(); await tick();
+  assert.equal(b.get('source').value,'new edits');
+  assert.equal(vm.runInContext('state.dirty',b.context),true);
+});
+test('restore respects unsaved-edit confirmation',async()=>{
+  const b=browser(action=>action==='revisions'?response([{id:'r',body:{source:'old'}}]):undefined); await tick();
+  vm.runInContext("state.selected='j';state.dirty=true;confirm=()=>false",b.context);
+  await vm.runInContext("loadDetails('j')",b.context);
+  b.get('source').value='unsaved';
+  b.get('revisions').children[0].children.at(-1).listeners.click(); await tick();
+  assert.equal(b.get('source').value,'unsaved');
+});
+
+test('published summary remains separate from unsaved editor changes', async () => {
+  const b = browser(); await tick();
+  vm.runInContext(`state.jobs=[{id:'job', name:'Published', current_revision:'r1', published_schedule:{kind:'cron',expression:'0 9 * * *',timezone:'UTC'}, next_at:1000, last_result:'succeeded', unpublished_changes:1, blocked:'Blocked: permission missing'}]; state.selected='job'; renderJobs();`, b.context);
+  assert.match(b.get('publishedSummary').textContent, /0 9 \* \* \* \(UTC\)/);
+  assert.match(b.get('publishedSummary').textContent, /Last result: succeeded/);
+  assert.match(b.get('publishedSummary').textContent, /Unpublished changes: Yes/);
+  assert.match(b.get('publishedSummary').textContent, /Blocked: permission missing/);
+  b.get('kind').value='manual'; b.fire('editor','input');
+  assert.match(b.get('publishedSummary').textContent, /0 9 \* \* \*/);
+  assert.equal(b.get('run').disabled, true);
 });

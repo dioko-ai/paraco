@@ -107,7 +107,13 @@ fn handle(
         .trim()
         .parse::<usize>()
         .map_err(|_| "invalid length")?;
-    if length > 96 * 1024 {
+    if length
+        > if cap == "tasks" {
+            crate::tasks::MAX_REQUEST_BYTES
+        } else {
+            96 * 1024
+        }
+    {
         return Err("request too large".into());
     }
     let mut body = vec![0; length];
