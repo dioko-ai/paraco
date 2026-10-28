@@ -1211,7 +1211,7 @@ mod audit_tests {
         assert_eq!(apps.len(), 1);
         assert_eq!(apps[0].app.name, "healthy");
         assert_eq!(failures.len(), 1);
-        assert_eq!(failures[0].0, broken);
+        assert_eq!(failures[0].0, broken.canonicalize().unwrap());
         assert!(failures[0].1.contains("invalid manifest"));
     }
 }
