@@ -182,6 +182,9 @@ fn outside(path: &Path, app_root: &Path) -> Result<PathBuf, String> {
     let path = path
         .canonicalize()
         .map_err(|_| "Cannot read host AI file")?;
+    let app_root = app_root
+        .canonicalize()
+        .map_err(|_| "Cannot read application directory")?;
     if path.starts_with(app_root) {
         return Err("AI keys and SDK files must be outside the application directory".into());
     }
@@ -460,5 +463,31 @@ mod tests {
                 .config("app-a", dir.path())
                 .is_err()
         );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn rejects_host_files_inside_symlinked_application_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = dir.path().join("app");
+        std::fs::create_dir(&app).unwrap();
+        let key = app.join("key");
+        std::fs::write(&key, "secret").unwrap();
+        let alias = dir.path().join("alias");
+        std::os::unix::fs::symlink(&app, &alias).unwrap();
+        assert!(outside(&key, &alias).is_err());
+        assert!(outside(&alias.join("key"), &app).is_err());
+        let host_key = dir.path().join("host-key");
+        std::fs::write(&host_key, "secret").unwrap();
+        assert_eq!(
+            outside(&host_key, &alias).unwrap(),
+            host_key.canonicalize().unwrap()
+        );
+        let host_alias = dir.path().join("host-alias");
+        std::os::unix::fs::symlink(&host_key, &host_alias).unwrap();
+        assert_eq!(
+            outside(&host_alias, &alias).unwrap(),
+            host_key.canonicalize().unwrap()
+        );
+        assert!(outside(&host_key, &dir.path().join("missing-app")).is_err());
     }
 }
