@@ -195,7 +195,21 @@ test('real Cron browser lifecycle uses explicit review and immutable revision pu
     assert.equal(await page.locator('#review').isHidden(),true);
     await page.getByRole('button',{name:'Save draft & review',exact:true}).click();await page.locator('#review').waitFor({state:'visible'});await page.locator('#approved').check();await page.locator('#publish').click();
     await page.getByRole('status').filter({hasText:'Reviewed revision published.'}).waitFor();
-    await page.locator('#run').click();await wait(async()=>{await page.locator('#refresh').click();const history=await page.locator('#history').textContent();return history.includes('browser-run-ok') && history.includes('success');},'successful job outcome and run log');
+    const [runResponse]=await Promise.all([page.waitForResponse(response=>response.url().endsWith('/api/run')&&response.request().method()==='POST'),page.locator('#run').click()]);
+    assert.equal(runResponse.ok(),true);const jobId=runResponse.request().postDataJSON().job_id;const {run_id:runId}=await runResponse.json();
+    let lastRuns;
+    try {
+      await wait(async()=>{
+        // Serialize refreshes through this job's history response and rendered state.
+        // Clicking repeatedly before fetch completes can supersede every detail load.
+        const [response]=await Promise.all([page.waitForResponse(response=>response.url().endsWith('/api/history')&&response.request().method()==='POST'&&response.request().postDataJSON().job_id===jobId,{timeout:5000}),page.locator('#refresh').click()]);
+        assert.equal(response.ok(),true);lastRuns=await response.json();const run=lastRuns.find(run=>run.id===runId);
+        if(run)await page.waitForFunction(({id,status})=>[...document.querySelectorAll('#history details')].some(row=>row.dataset.id===id&&row.querySelector('summary').textContent.includes(status)),{id:runId,status:run.status},{timeout:5000});
+        const history=await page.locator('#history').textContent();return history.includes('browser-run-ok')&&history.includes('success');
+      },'successful job outcome and run log');
+    } catch(error) {
+      error.message+='\nHistory API: '+JSON.stringify(lastRuns)+'\nRendered history: '+await page.locator('#history').textContent()+'\nStatus: '+await page.getByRole('status').textContent();throw error;
+    }
     assert.match(await page.locator('#history').textContent(),/success/);
     await page.locator('#archive').click();await page.getByRole('status').filter({hasText:'Job archived.'}).waitFor();assert.equal(await page.locator('#run').isDisabled(),true);
     await page.locator('#archive').click();await page.getByRole('status').filter({hasText:'Job unarchived.'}).waitFor();
