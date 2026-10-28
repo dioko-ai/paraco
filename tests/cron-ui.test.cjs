@@ -318,3 +318,19 @@ test('published summary remains separate from unsaved editor changes', async () 
   assert.match(b.get('publishedSummary').textContent, /0 9 \* \* \*/);
   assert.equal(b.get('run').disabled, true);
 });
+
+test('publish waits for the save refresh and preserves the later validation error', async()=>{
+  const pending=deferred();let delay=false;
+  const b=browser(action=>action==='list'&&delay?pending.promise:action==='publish'?{ok:false,status:400,json:async()=>({error:'task validation failed: syntax'})}:undefined);
+  await tick();delay=true;b.fire('editor','submit');await tick();
+  assert.equal(b.get('review').hidden,false);assert.equal(vm.runInContext('state.saving',b.context),true);
+  b.get('approved').checked=true;b.fire('approved','change');
+  assert.equal(b.get('publish').disabled,true);b.fire('publish');await tick();
+  assert.equal(b.requests.some(r=>r.action==='publish'),false);
+  pending.resolve(response([]));await tick();await tick();
+  assert.equal(vm.runInContext('state.saving',b.context),false);assert.equal(b.get('publish').disabled,false);
+  b.fire('publish');await tick();await tick();
+  assert.match(b.get('message').textContent,/validation failed/);
+  assert.equal(b.get('state').textContent,'Saved draft awaiting review');
+  assert.equal(b.get('publish').disabled,false);
+});
