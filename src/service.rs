@@ -312,10 +312,84 @@ fn manager(platform: Platform, action: &str, definition: &Path) -> Result<(), St
     Ok(())
 }
 
+// Snapshot independently of the definition file: disabled and stopped are valid
+// previous states even when an owned registration already exists.
+fn manager_state(platform: Platform) -> Result<(bool, bool), String> {
+    if platform == Platform::Linux {
+        let query = |action: &str| {
+            run_bounded(
+                "systemctl",
+                &[
+                    "--user".into(),
+                    action.into(),
+                    "--quiet".into(),
+                    SYSTEMD_UNIT.into(),
+                ],
+            )
+            .map(|status| status.success())
+        };
+        Ok((query("is-enabled")?, query("is-active")?))
+    } else {
+        let loaded = run_bounded(
+            "launchctl",
+            &[
+                "print".into(),
+                format!("gui/{}/dev.paraco.host", unsafe { libc::geteuid() }),
+            ],
+        )?
+        .success();
+        Ok((loaded, loaded))
+    }
+}
+fn restore_manager_state(
+    platform: Platform,
+    definition: &Path,
+    prior: (bool, bool),
+) -> Result<(), String> {
+    if platform == Platform::Macos {
+        if manager_state(platform)?.0 {
+            manager(platform, "remove", definition)?;
+        }
+        return if prior.0 {
+            manager(platform, "setup", definition)
+        } else {
+            Ok(())
+        };
+    }
+    let mut errors = Vec::new();
+    for args in [
+        vec!["--user", "daemon-reload"],
+        vec![
+            "--user",
+            if prior.0 { "enable" } else { "disable" },
+            SYSTEMD_UNIT,
+        ],
+        vec![
+            "--user",
+            if prior.1 { "restart" } else { "stop" },
+            SYSTEMD_UNIT,
+        ],
+    ] {
+        match run_bounded(
+            "systemctl",
+            &args.iter().map(|s| (*s).into()).collect::<Vec<_>>(),
+        ) {
+            Ok(status) if status.success() => (),
+            result => errors.push(format!("{args:?}: {result:?}")),
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
+}
+
 fn setup(
     paths: &Paths,
     platform: Platform,
     activate: impl FnOnce() -> Result<(), String>,
+    restore_manager: impl FnOnce() -> Result<(), String>,
 ) -> Result<(), String> {
     fs::create_dir_all(&paths.state).map_err(|e| format!("cannot create state directory: {e}"))?;
     if paths.definition.exists() && !is_owned(&paths.definition)? {
@@ -341,7 +415,14 @@ fn setup(
             Ok(())
         })();
         return match restore {
-            Ok(()) => Err(format!("{error}; previous service files restored")),
+            Ok(()) => match restore_manager() {
+                Ok(()) => Err(format!(
+                    "{error}; previous service files restored; manager state restored"
+                )),
+                Err(rollback) => Err(format!(
+                    "{error}; previous service files restored; manager rollback failed: {rollback}"
+                )),
+            },
             Err(rollback) => Err(format!("{error}; service rollback failed: {rollback}")),
         };
     }
@@ -372,9 +453,15 @@ pub fn operate(
             .to_path_buf();
     }
     match action {
-        "setup" => setup(&paths, platform, || {
-            manager(platform, action, &paths.definition)
-        }),
+        "setup" => {
+            let prior = manager_state(platform)?;
+            setup(
+                &paths,
+                platform,
+                || manager(platform, action, &paths.definition),
+                || restore_manager_state(platform, &paths.definition, prior),
+            )
+        }
         "remove" => {
             if paths.definition.exists() && !is_owned(&paths.definition)? {
                 return Err(format!(
@@ -414,15 +501,45 @@ mod tests {
         let previous = render(Platform::Macos, &paths).unwrap();
         fs::write(&paths.definition, &previous).unwrap();
         assert!(
-            setup(&paths, Platform::Macos, || Err("fixture failure".into()))
-                .unwrap_err()
-                .contains("previous service files restored")
+            setup(
+                &paths,
+                Platform::Macos,
+                || Err("fixture failure".into()),
+                || Ok(())
+            )
+            .unwrap_err()
+            .contains("previous service files restored")
         );
         assert_eq!(
             fs::read_link(&paths.entry).unwrap(),
             Path::new("/old/paraco")
         );
         assert_eq!(fs::read_to_string(&paths.definition).unwrap(), previous);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rollback_calls_manager_after_restoring_files_and_reports_failure() {
+        let root = tempdir().unwrap();
+        let paths = Paths {
+            entry: root.path().join("paraco"),
+            config: root.path().join("config"),
+            state: root.path().join("state"),
+            logs: root.path().join("logs"),
+            definition: root.path().join("service"),
+        };
+        let error = setup(
+            &paths,
+            Platform::Linux,
+            || Err("activation failed".into()),
+            || {
+                assert!(!paths.definition.exists());
+                assert!(!paths.entry.exists());
+                Err("manager fixture failed".into())
+            },
+        )
+        .unwrap_err();
+        assert!(error.contains("manager rollback failed: manager fixture failed"));
     }
 
     #[test]
