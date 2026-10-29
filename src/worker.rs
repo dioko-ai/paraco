@@ -34,10 +34,6 @@ pub fn compiler() -> Result<PathBuf, String> {
 }
 
 pub fn compile(entry: &Path, output: &Path, root: &Path) -> Result<(), String> {
-    if !cfg!(target_os = "linux") && std::env::var("PARACO_ALLOW_UNSANDBOXED").as_deref() != Ok("1")
-    {
-        return Err("Application compilation requires a supported containment adapter; trusted development may explicitly set PARACO_ALLOW_UNSANDBOXED=1".into());
-    }
     let snapshot = tempfile::tempdir().map_err(|e| e.to_string())?;
     let root = root.canonicalize().map_err(|e| e.to_string())?;
     let relative = entry
@@ -48,38 +44,12 @@ pub fn compile(entry: &Path, output: &Path, root: &Path) -> Result<(), String> {
     let entry = source.join(relative);
     let meta = output.with_extension("meta.json");
     let compiler = compiler()?.canonicalize().map_err(|e| e.to_string())?;
-    let mut command;
-    if cfg!(target_os = "linux") && std::env::var("PARACO_ALLOW_UNSANDBOXED").as_deref() != Ok("1")
-    {
-        command = Command::new("/usr/bin/bwrap");
-        command
-            .args([
-                "--unshare-all",
-                "--die-with-parent",
-                "--new-session",
-                "--dev",
-                "/dev",
-                "--proc",
-                "/proc",
-                "--tmpfs",
-                "/tmp",
-            ])
-            .arg("--ro-bind")
-            .arg(&compiler)
-            .arg("/compiler")
-            .arg("--ro-bind")
-            .arg(&source)
-            .arg(&source)
-            .arg("--bind")
-            .arg(output.parent().ok_or("output needs parent")?)
-            .arg(output.parent().unwrap())
-            .arg("--chdir")
-            .arg(&source)
-            .arg("/compiler");
-    } else {
-        command = Command::new(&compiler);
-    }
-    let result = command
+    let mut command = compiler_command(
+        &compiler,
+        &source,
+        output.parent().ok_or("output needs parent")?,
+    )?;
+    command
         .arg(&entry)
         .args([
             "--bundle",
@@ -91,14 +61,13 @@ pub fn compile(entry: &Path, output: &Path, root: &Path) -> Result<(), String> {
         .arg(format!("--outfile={}", output.display()))
         .arg(format!("--metafile={}", meta.display()))
         .current_dir(&source)
-        .env_clear()
-        .output()
-        .map_err(|e| format!("cannot compile application: {e}"))?;
-    if !result.status.success() {
-        return Err(format!(
-            "application compilation failed: {}",
-            String::from_utf8_lossy(&result.stderr)
-        ));
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped());
+    let (success, diagnostic) =
+        crate::tasks::bounded_command(command, std::time::Duration::from_secs(30), || false)
+            .map_err(|e| format!("cannot compile application: {e}"))?;
+    if !success {
+        return Err(format!("application compilation failed: {diagnostic}"));
     }
     let graph: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&meta).map_err(|e| e.to_string())?)
@@ -198,81 +167,53 @@ export default {{ async fetch(request, env) {{
 /// Separate OS containment from isolate capability policy. Never silently fall back.
 pub fn launch_command(
     runtime: &Path,
-    _dir: &Path,
+    dir: &Path,
     config: &Path,
     listener: &std::net::TcpListener,
 ) -> Result<Command, String> {
     use std::os::{fd::AsRawFd, unix::process::CommandExt};
-    let unsafe_dev = std::env::var("PARACO_ALLOW_UNSANDBOXED").as_deref() == Ok("1");
-    let mut command;
-    if unsafe_dev {
-        eprintln!(
-            "paraco: explicit unsandboxed development mode; use only trusted application code"
-        );
-        command = Command::new(runtime);
-        command.arg("serve").arg(config);
-    } else {
-        #[cfg(target_os = "linux")]
-        {
-            let sandbox = Path::new("/usr/bin/bwrap");
-            if !sandbox.is_file() {
-                return Err("Linux execution requires bubblewrap; install it or explicitly opt into trusted development with PARACO_ALLOW_UNSANDBOXED=1".into());
-            }
-            command = Command::new(sandbox);
-            command.args([
-                "--unshare-all",
-                "--die-with-parent",
-                "--new-session",
-                "--proc",
-                "/proc",
-                "--dev",
-                "/dev",
-                "--tmpfs",
-                "/tmp",
-            ]);
-            for library in ["/usr", "/lib", "/lib64", "/etc/ssl/certs"] {
-                if Path::new(library).exists() {
-                    command.arg("--ro-bind").arg(library).arg(library);
-                }
-            }
-            command
-                .arg("--ro-bind")
-                .arg(runtime)
-                .arg("/runtime")
-                .arg("--ro-bind")
-                .arg(_dir)
-                .arg(_dir)
-                .args(["--chdir", "/", "/runtime", "serve"])
-                .arg(config);
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            return Err("This platform requires an external VM containment adapter; native untrusted execution is not supported. Trusted development may explicitly set PARACO_ALLOW_UNSANDBOXED=1".into());
-        }
-    }
+    let runtime = runtime.canonicalize().map_err(|e| e.to_string())?;
+    let dir = dir.canonicalize().map_err(|e| e.to_string())?;
+    let socket = dir.join("host.sock");
+    let mut command = crate::containment::command(&crate::containment::ExecutionSpec {
+        executable: &runtime,
+        readable: std::slice::from_ref(&dir),
+        writable: &[],
+        cwd: &dir,
+        kind: crate::containment::WorkloadKind::Runtime,
+        capability_socket: socket.exists().then_some(socket.as_path()),
+    })?;
+    command.arg("serve").arg(config);
     let fd = listener.as_raw_fd();
     command
-        .arg("--socket-fd=http=3")
+        .arg(format!("--socket-fd=http={fd}"))
         .env_clear()
         .env("TZ", "UTC")
         .stdin(std::process::Stdio::null());
     unsafe {
         command.pre_exec(move || {
-            if fd != 3 && libc::dup2(fd, 3) == -1 {
-                return Err(std::io::Error::last_os_error());
-            }
-            if libc::fcntl(3, libc::F_SETFD, 0) == -1 {
-                return Err(std::io::Error::last_os_error());
-            }
-            let limit = libc::rlimit {
-                rlim_cur: 256,
-                rlim_max: 256,
-            };
-            if libc::setrlimit(libc::RLIMIT_NOFILE, &limit) != 0 {
+            // Preserve the existing descriptor number: dup2 onto fd 3 could
+            // overwrite std::process's private spawn-error pipe.
+            if libc::fcntl(fd, libc::F_SETFD, 0) == -1 {
                 return Err(std::io::Error::last_os_error());
             }
             Ok(())
         });
     }
     Ok(command)
+}
+
+/// Both application bundling and task transforms use the same native boundary.
+pub fn compiler_command(compiler: &Path, source: &Path, output: &Path) -> Result<Command, String> {
+    let compiler = compiler.canonicalize().map_err(|e| e.to_string())?;
+    let source = source.canonicalize().map_err(|e| e.to_string())?;
+    let output = output.canonicalize().map_err(|e| e.to_string())?;
+    crate::containment::command(&crate::containment::ExecutionSpec {
+        executable: &compiler,
+        readable: std::slice::from_ref(&source),
+        writable: std::slice::from_ref(&output),
+        cwd: if source.is_dir() { &source } else { &output },
+        kind: crate::containment::WorkloadKind::Compiler,
+        capability_socket: None,
+    })
 }

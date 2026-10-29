@@ -26,6 +26,10 @@ runtime and compiler. npm is not required. Linux app execution requires
 bubblewrap and unprivileged user/network namespaces. macOS secure containment is
 not implemented yet, so normal app execution currently fails closed there.
 
+`paraco sandbox-probe` opens a diagnostic plugin with independent native escape
+checks and green/red/unverified results. See [native containment](docs/native-containment.md)
+for its scope and the opt-in macOS prototype; no VM is required.
+
 ## Get started
 
 Once installed, start the built-in scheduler:

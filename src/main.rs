@@ -4,6 +4,7 @@ use std::path::PathBuf;
 mod artifact;
 mod bridge;
 mod capability;
+mod containment;
 mod control;
 mod data;
 mod guardian;
@@ -14,6 +15,7 @@ mod platform;
 mod reference;
 mod runner;
 mod runtime;
+mod sandbox_probe;
 mod server;
 mod service;
 mod state;
@@ -38,6 +40,13 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Run native containment canaries and print JSON; exit nonzero unless all pass.
+    SandboxCheck,
+    /// Serve the bundled escape-probe plugin with independent native test evidence.
+    SandboxProbe {
+        #[arg(long, default_value_t = 3000)]
+        port: u16,
+    },
     /// Discover host stores or print the identity to preserve when relocating configuration.
     HostState {
         #[arg(long)]
@@ -220,6 +229,17 @@ impl From<ServicePlatform> for service::Platform {
 }
 
 fn main() {
+    if std::env::args_os().nth(1).as_deref()
+        == Some(std::ffi::OsStr::new("__paraco_containment_probe"))
+    {
+        std::process::exit(containment::diagnostics::child());
+    }
+    if std::env::args_os().nth(1).as_deref()
+        == Some(std::ffi::OsStr::new("__paraco_containment_check"))
+    {
+        println!("{}", containment::diagnostics::verify());
+        return;
+    }
     if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("__paraco_task_guardian"))
     {
         std::process::exit(tasks::guardian());
@@ -249,6 +269,19 @@ fn service_log_dir(path: Option<&std::path::Path>) -> Result<PathBuf, String> {
 fn execute(cli: Cli) -> Result<(), String> {
     paraco::ai_settings::initialize(&data::Directory::resolve(cli.data_dir.as_deref())?.root);
     match cli.command {
+        Command::SandboxCheck => {
+            let report = containment::diagnostics::verify_with_canary();
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?
+            );
+            if report["status"] == "PASS" {
+                Ok(())
+            } else {
+                Err("Containment checks did not all pass; see the JSON report".into())
+            }
+        }
+        Command::SandboxProbe { port } => sandbox_probe::run(port),
         Command::HostState { config } => {
             data::Directory::resolve(cli.data_dir.as_deref())?.discover(config.as_deref())
         }

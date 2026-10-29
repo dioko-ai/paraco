@@ -8,6 +8,9 @@ recorded. Runtime implementation details and observed checks are in
 
 - [ ] Implement and verify macOS containment. Native untrusted execution currently
   fails closed; `PARACO_ALLOW_UNSANDBOXED=1` is only for trusted development.
+  An opt-in native Seatbelt prototype and executable escape probes are now
+  available; real macOS validation remains required. See
+  [native containment](docs/native-containment.md).
 - [ ] Enforce and test hard per-app memory/CPU/process limits using delegated
   cgroups on Linux and an equivalent macOS/VM policy. Task wall deadlines,
   concurrency and descriptor limits do not replace memory containment.

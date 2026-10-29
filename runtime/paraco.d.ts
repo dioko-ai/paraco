@@ -27,6 +27,14 @@ export interface ScopedStorage {
   delete(key: string): Promise<unknown>;
 }
 export interface AppContext {
+  /** Startup diagnostic snapshot; supplied only by the host's sandbox-probe command. */
+  containmentEvidence?: Readonly<{
+    schemaVersion: 1;
+    backend: string;
+    status: "PASS" | "FAIL" | "UNVERIFIED";
+    checks: ReadonlyArray<Readonly<{id: string; status: "PASS" | "FAIL" | "UNVERIFIED"; detail: string}>>;
+    limitations: ReadonlyArray<string>;
+  }>;
   /** Read-only local system metrics; requires the system manifest capability. */
   system?: {snapshot(): Promise<SystemSnapshot>};
   identity?: Readonly<{applicationId: string; installationId: string; target: "local" | "cloudflare"}>;

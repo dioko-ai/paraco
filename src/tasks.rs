@@ -524,8 +524,12 @@ impl Tasks {
         let dir = staging.path().canonicalize().map_err(err)?;
         let source = dir.join("task.ts");
         fs::write(&source, &draft.source).map_err(err)?;
+        // Keep the input outside the compiler's writable output grant.
+        let compiled = dir.join("compiled");
+        fs::create_dir(&compiled).map_err(err)?;
         // Transform only: the compiler never resolves or reads task imports.
-        let mut command = Command::new(crate::worker::compiler()?);
+        let mut command =
+            crate::worker::compiler_command(&crate::worker::compiler()?, &source, &compiled)?;
         command
             .arg(&source)
             .args([
@@ -534,8 +538,11 @@ impl Tasks {
                 "--target=es2022",
                 "--log-level=error",
             ])
-            .arg(format!("--outfile={}", dir.join("task.js").display()))
-            .arg(format!("--metafile={}", dir.join("meta.json").display()))
+            .arg(format!("--outfile={}", compiled.join("task.js").display()))
+            .arg(format!(
+                "--metafile={}",
+                compiled.join("meta.json").display()
+            ))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
@@ -546,7 +553,8 @@ impl Tasks {
             return Err(format!("task validation failed: {}", output.1));
         }
         let meta: Value =
-            serde_json::from_slice(&fs::read(dir.join("meta.json")).map_err(err)?).map_err(err)?;
+            serde_json::from_slice(&fs::read(compiled.join("meta.json")).map_err(err)?)
+                .map_err(err)?;
         if meta["outputs"]
             .as_object()
             .ok_or("missing compiler metadata")?
@@ -558,6 +566,8 @@ impl Tasks {
                     .into(),
             );
         }
+        fs::rename(compiled.join("task.js"), dir.join("task.js")).map_err(err)?;
+        fs::remove_dir_all(&compiled).map_err(err)?;
         if target.exists() {
             fs::rename(dir.join("task.js"), target.join("task.js")).map_err(err)?;
             return Ok(());
@@ -925,9 +935,7 @@ impl Tasks {
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
-            if std::env::var("PARACO_ALLOW_UNSANDBOXED").as_deref() == Ok("1") {
-                cmd.env("PARACO_ALLOW_UNSANDBOXED", "1");
-            }
+            crate::containment::guardian_environment(&mut cmd);
             let spawning = self.running.lock().unwrap();
             self.allowed(deployment, &draft.network)?;
             if cancel.load(Ordering::Relaxed) || self.stop.load(Ordering::Relaxed) {
@@ -1202,7 +1210,7 @@ fn stop_guardian(
         child.wait().expect("child reaped")
     })
 }
-fn bounded_command(
+pub(crate) fn bounded_command(
     mut cmd: Command,
     timeout: Duration,
     abort: impl Fn() -> bool,

@@ -303,6 +303,7 @@ impl RunningApp {
         }
         let bootstrap = serde_json::json!({
             "basePath": base_path,
+            "containmentEvidence": crate::sandbox_probe::evidence(),
             "system": app.requests_system,
             "identity": {"applicationId": app.name, "installationId": deployment_id, "target": "local"},
             "tasks": tasks.as_ref().map(|s| serde_json::json!({"address":s.address,"token":s.token})),
@@ -335,9 +336,7 @@ impl RunningApp {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        if std::env::var("PARACO_ALLOW_UNSANDBOXED").as_deref() == Ok("1") {
-            command.env("PARACO_ALLOW_UNSANDBOXED", "1");
-        }
+        crate::containment::guardian_environment(&mut command);
         let child = command.spawn().map_err(|error| {
             if error.kind() == std::io::ErrorKind::NotFound {
                 "workerd was not found on PATH; install workerd and try again".to_string()

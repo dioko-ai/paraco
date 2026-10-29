@@ -70,6 +70,12 @@ must treat those grants as access to the service, not merely internet access.
 
 ## Isolation and limitations
 
+Native policy construction now lives in platform containment adaptors and covers
+task compilation as well as app compilation and runtime execution. The bundled
+`paraco sandbox-probe` app displays independently collected native canary results
+alongside guest checks. See [native containment](native-containment.md) for the
+experimental macOS prototype, exact probe scope and validation instructions.
+
 Cloudflare explicitly states that standalone workerd is not a complete sandbox
 for malicious code. See the [workerd security notice](https://github.com/cloudflare/workerd#security)
 and [configuration schema](https://github.com/cloudflare/workerd/blob/main/src/workerd/server/workerd.capnp).

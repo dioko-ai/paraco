@@ -18,6 +18,7 @@ export default {
       return name === 'ai' ? value.result : value.value;
     };
     const context = {basePath:settings.basePath, identity:Object.freeze(settings.identity)};
+    if (settings.containmentEvidence) context.containmentEvidence = structuredClone(settings.containmentEvidence);
     if (settings.storage) {
       context.datasets = Object.freeze({open: (alias = 'private') => datasetClient(request => call('storage', {operation:'platform', request}), alias)});
       context.artifacts = context.datasets.open().artifacts;

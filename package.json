@@ -15,7 +15,7 @@
     "check:types": "tsc --noEmit --strict --lib es2022,dom runtime/paraco.d.ts runtime/cloudflare.ts runtime/d1-service.ts runtime/artifact-picker.ts runtime/cloudflare-binding.ts",
     "check": "npm run check:core && npm run check:tools && cargo test --tests && npm run test:browser && npm run test:cron-runtime && npm run test:cron-browser && npm run test:security && npm run test:cloudflare-contract && npm run test:artifact-picker && npm run test:platform-runtime && npm run test:system-runtime && npm run test:ai-browser",
     "check:rust": "cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test --lib --bin paraco",
-    "check:core": "npm run check:rust && npm run check:schema && npm run check:types && npm run test:management && npm run test:cron-ui && npm run test:platform && npm run test:ai-sdk",
+    "check:core": "npm run check:rust && npm run check:schema && npm run check:types && npm run test:management && npm run test:cron-ui && npm run test:platform && npm run test:ai-sdk && npm run test:sandbox-probe",
     "test:installer": "bash tests/install-archive.sh",
     "test:cron-ui": "node --test tests/cron-ui.test.cjs",
     "test:cron-runtime": "cargo build --locked && node tests/cron-runtime.cjs",
@@ -29,6 +29,8 @@
     "test:platform-runtime": "cargo build --locked && node tests/platform-runtime.cjs",
     "test:system-runtime": "cargo build --locked && node --test tests/system-runtime.cjs",
     "test:ai-sdk": "node --test tests/ai-sdk.test.cjs",
-    "test:ai-browser": "cargo build --locked && node tests/ai-settings-browser.cjs"
+    "test:ai-browser": "cargo build --locked && node tests/ai-settings-browser.cjs",
+    "test:sandbox-probe": "node --test tests/sandbox-probe.test.cjs",
+    "test:containment": "cargo build --locked && node --test tests/sandbox-probe-runtime.cjs"
   }
 }
