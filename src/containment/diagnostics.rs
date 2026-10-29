@@ -218,13 +218,8 @@ fn run(
     if !status.success() {
         let mut error = String::new();
         let _ = File::open(err_path).and_then(|f| f.take(4096).read_to_string(&mut error));
-        return unavailable(
-            prefix,
-            &format!(
-                "Contained probe exited {status}: {}",
-                redact(error.trim(), root, executable)
-            ),
-        );
+        let diagnostic = startup_failure(process.id(), &status.to_string(), &error);
+        return unavailable(prefix, &redact(&diagnostic, root, executable));
     }
     let mut output = String::new();
     if File::open(out_path)
@@ -276,6 +271,16 @@ fn run(
             )
         })
         .collect()
+}
+
+fn startup_failure(pid: u32, status: &str, stderr: &str) -> String {
+    let stderr = stderr.trim();
+    let detail = if stderr.is_empty() {
+        "No stderr was captured. On macOS, inspect the matching process crash report in ~/Library/Logs/DiagnosticReports and the sandbox denial logs for this PID."
+    } else {
+        stderr
+    };
+    format!("Contained probe PID {pid} exited {status} before completing its checks. {detail}")
 }
 
 pub fn verify() -> Value {
@@ -450,6 +455,18 @@ pub fn verify_with_canary() -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn startup_abort_stays_unverified_and_identifies_the_process() {
+        let detail = startup_failure(1234, "signal: 6 (SIGABRT)", "");
+        assert!(detail.contains("PID 1234"));
+        assert!(detail.contains("No stderr was captured"));
+        assert!(detail.contains("DiagnosticReports"));
+        let checks = unavailable("native", &detail);
+        assert!(checks.iter().all(|check| check["status"] == "UNVERIFIED"));
+        let with_error = startup_failure(1234, "exit status: 1", " loader error\n");
+        assert!(with_error.ends_with("loader error"));
+        assert!(!with_error.contains("No stderr"));
+    }
     #[test]
     fn unavailable_results_do_not_expose_paths() {
         let results = unavailable("native", "Could not start the contained probe.");

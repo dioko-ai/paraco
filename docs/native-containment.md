@@ -85,6 +85,20 @@ separate trusted-development escape hatch remains available and always makes the
 probe report FAIL. Real Mac validation must include workerd JIT, compilation,
 capability sockets, permitted listener traffic, forbidden access and host death.
 
+If every contained check reports SIGABRT, the two native probe processes failed
+before completing their checks; this is not fourteen observed escape attempts.
+The profile explicitly grants executable mapping for the selected binary and
+system loader paths, including macOS Cryptex locations. This corrects an omitted
+loader permission, but does not by itself establish the cause of a particular
+Mac's startup crash or verify the backend.
+
+When stderr is empty, the report includes the failed child's PID. On the Mac,
+record `sw_vers` and `uname -m`, then inspect the matching Paraco/esbuild crash
+report in `~/Library/Logs/DiagnosticReports` and sandbox denial logs. The useful
+fields are the termination reason, exception details and crashed thread backtrace.
+Retain these results before changing permissions further. Do not enable trusted
+development mode to count a failed secure startup as a pass.
+
 Windows remains unsupported. The common execution specification uses paths and
 workload types; platform-specific code is isolated behind its builder. Adding a
 Windows backend will also require replacing existing Unix listener/bridge and
@@ -115,3 +129,8 @@ separately). Formatting, Clippy and public TypeScript declarations passed.
 Chromium displayed a green PASS summary with 15 host checks and no page errors.
 No real macOS execution was available in this session; the prototype is still
 experimental and macOS release validation remains outstanding.
+
+A subsequent external Mac run of `1f54940` reported SIGABRT with empty stderr
+for both native probe processes, leaving all 14 contained checks UNVERIFIED;
+esbuild preparation also failed. The loader-mapping correction and improved
+crash diagnostics require a new Mac run before this failure can be marked fixed.

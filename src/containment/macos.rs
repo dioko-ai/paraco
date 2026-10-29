@@ -12,6 +12,19 @@ use std::process::Command;
 
 use super::ExecutionSpec;
 
+// Executable mapping is a separate Seatbelt operation from file-read*.
+// dyld support on macOS 13+ also includes the system Cryptex locations; see
+// Chromium sandbox/policy/mac/common.sb (dyld-support.sb rules).
+// These are OS runtime locations, never application inputs or writable scratch.
+const LOADER_PATHS: &[&str] = &[
+    "/System/Library",
+    "/usr/lib",
+    "/System/Cryptexes/App",
+    "/System/Cryptexes/OS",
+    "/System/Volumes/Preboot/Cryptexes/App/System",
+    "/System/Volumes/Preboot/Cryptexes/OS",
+];
+
 fn canonical(path: &Path) -> Result<PathBuf, String> {
     let path = path
         .canonicalize()
@@ -68,9 +81,17 @@ fn profile(spec: &ExecutionSpec<'_>) -> Result<String, String> {
         quoted(&executable)?
     ));
     p.push_str(&format!(
-        "(allow file-read* (literal {}))\n",
+        "(allow file-read* file-map-executable (literal {}))\n",
         quoted(&executable)?
     ));
+    for path in LOADER_PATHS {
+        // Do not canonicalize these on the build host: Cryptex locations vary
+        // by macOS version and must not resolve to a broader ancestor grant.
+        p.push_str(&format!(
+            "(allow file-read* file-map-executable (subpath {}))\n",
+            quoted(Path::new(path))?
+        ));
+    }
     for path in spec.readable {
         path_rule(&mut p, "file-read*", path)?;
     }
@@ -119,6 +140,55 @@ mod tests {
     #[test]
     fn refuses_root_grants() {
         assert!(canonical(Path::new("/")).is_err());
+    }
+
+    #[test]
+    fn executable_mapping_is_limited_to_binary_and_system_loader() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().canonicalize().unwrap();
+        let executable = root.join("runtime");
+        std::fs::write(&executable, b"profile fixture").unwrap();
+        let source = root.join("source");
+        let scratch = root.join("scratch");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::create_dir(&scratch).unwrap();
+        let policy = profile(&ExecutionSpec {
+            executable: &executable,
+            readable: std::slice::from_ref(&source),
+            writable: std::slice::from_ref(&scratch),
+            cwd: &scratch,
+            kind: super::super::WorkloadKind::Compiler,
+            capability_socket: None,
+        })
+        .unwrap();
+        let mapping: Vec<_> = policy
+            .lines()
+            .filter(|line| line.contains("file-map-executable"))
+            .collect();
+        assert_eq!(mapping.len(), LOADER_PATHS.len() + 1);
+        assert!(
+            mapping.contains(
+                &format!(
+                    "(allow file-read* file-map-executable (literal {}))",
+                    quoted(&executable).unwrap()
+                )
+                .as_str()
+            )
+        );
+        for path in LOADER_PATHS {
+            assert!(
+                mapping.contains(
+                    &format!(
+                        "(allow file-read* file-map-executable (subpath {}))",
+                        quoted(Path::new(path)).unwrap()
+                    )
+                    .as_str()
+                )
+            );
+        }
+        assert!(policy.contains("(deny default)"));
+        assert!(!policy.contains("(allow network-outbound)"));
+        assert!(!policy.contains("(allow process-fork)"));
     }
 
     #[cfg(unix)]
