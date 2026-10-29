@@ -134,3 +134,26 @@ A subsequent external Mac run of `1f54940` reported SIGABRT with empty stderr
 for both native probe processes, leaving all 14 contained checks UNVERIFIED;
 esbuild preparation also failed. The loader-mapping correction and improved
 crash diagnostics require a new Mac run before this failure can be marked fixed.
+
+Follow-up external logs reported denials for
+`security.mac.lockdown_mode_state`, `kern.bootargs`, and `/` for both probe
+processes (PIDs 13354 and 13359). Inspection of the supplied PID 13359 crash
+report (macOS 27.0.1, build 26A434, ARM64) and esbuild excerpt shows the same
+dyld cache initialization stack: `CacheFinder`, `ignite`, `boot_boot`, then
+`ignition_halt` and `abort_with_reason`. No separate crash report was supplied
+for PID 13354. Both reports give termination namespace `0x23` and code `2`.
+Apple's published [XNU reason definitions](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/sys/reason.h)
+map namespace 35 (`0x23`) to `OS_REASON_LIBIGNITION`; the namespace is distinct
+from `OS_REASON_SANDBOX` and `OS_REASON_CODESIGNING`. The meaning of code `2`
+within LIBIGNITION has not been established here. This supports a loader-startup
+failure, but does not identify which denied operation caused the abort or prove
+a signing failure.
+
+The profile now permits reads of those two exact sysctls and metadata access to
+the literal `/` directory. It does not grant root directory listing or recursive
+root access. The metadata-only allowance is a conservative candidate because
+the supplied summary does not identify the denied file-read operation. If the
+abort persists, collect the exact operation and new crash backtrace before
+expanding permissions. These changes remain unverified on macOS: rerun both
+commands above, compilation, and the native release checks. An aborted probe
+must continue to report UNVERIFIED.

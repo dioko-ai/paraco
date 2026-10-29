@@ -76,6 +76,14 @@ fn profile(spec: &ExecutionSpec<'_>) -> Result<String, String> {
         (allow file-read* (subpath \"/System/Library\") (subpath \"/usr/lib\") (literal \"/dev/null\") (literal \"/dev/urandom\") (literal \"/dev/random\"))\n\
         (allow file-write* (literal \"/dev/null\"))\n",
     );
+    // Reported dyld startup denials. Keep these exceptions exact: root
+    // metadata does not grant directory listing or reads beneath root, and
+    // sysctl access must not expand to an unrestricted sysctl-read grant.
+    // These are candidate startup allowances, pending native Mac validation.
+    p.push_str(
+        "(allow sysctl-read (sysctl-name \"security.mac.lockdown_mode_state\") (sysctl-name \"kern.bootargs\"))\n\
+        (allow file-read-metadata (literal \"/\"))\n",
+    );
     p.push_str(&format!(
         "(allow process-exec (literal {}))\n",
         quoted(&executable)?
@@ -189,6 +197,15 @@ mod tests {
         assert!(policy.contains("(deny default)"));
         assert!(!policy.contains("(allow network-outbound)"));
         assert!(!policy.contains("(allow process-fork)"));
+        assert!(policy.contains(
+            "(allow sysctl-read (sysctl-name \"security.mac.lockdown_mode_state\") (sysctl-name \"kern.bootargs\"))"
+        ));
+        assert!(!policy.contains("(allow sysctl-read)"));
+        let root_rules: Vec<_> = policy
+            .lines()
+            .filter(|line| line.contains("\"/\""))
+            .collect();
+        assert_eq!(root_rules, ["(allow file-read-metadata (literal \"/\"))"]);
     }
 
     #[cfg(unix)]
