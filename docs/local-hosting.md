@@ -31,8 +31,9 @@ Paths are relative to the configuration file, independent of the shell's current
 working directory. Absolute paths also work. The app's manifest `name` labels the
 dashboard and is its canonical URL slug, unique within the server. The host
 allocates the private AI-grant identity from the app directory's canonical source. Replacing a configured path allocates a new identity; removing a
-path retires it, so grants do not transfer when it is added again. Unknown configuration fields,
-invalid manifests, and duplicate names fail before launching any app. An empty
+path retires it, so grants do not transfer when it is added again. Unknown top-level configuration fields
+fail before launching any app. Invalid manifests, app-specific configuration errors, and duplicate
+names appear as failed entries while the dashboard and healthy apps remain available. An empty
 `apps` list serves an empty dashboard. Changes take effect after restarting the
 server; hot reload and persistent registration are not implemented.
 

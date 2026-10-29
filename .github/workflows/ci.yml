@@ -2,8 +2,15 @@ name: CI
 
 on:
   push:
+    branches: [main]
+    tags: ['**']
   pull_request:
   workflow_dispatch:
+
+# Supersede older PR checks; keep default-branch and manual runs independent.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   verify:
@@ -20,6 +27,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.96.1
         with:
           components: rustfmt, clippy
+      - name: Cache Rust dependencies and build output
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/src
+            ~/.cargo/git/db
+            target
+          key: rust-${{ matrix.os }}-${{ runner.arch }}-1.96.1-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml', '.cargo/**', 'rust-toolchain*', '.github/workflows/ci.yml') }}
       - uses: actions/setup-node@v4
         with:
           node-version: 22.14.0
@@ -32,7 +48,10 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y bubblewrap
       - name: Explicit trusted development tests on macOS
         if: runner.os == 'macOS'
-        run: echo 'PARACO_ALLOW_UNSANDBOXED=1' >> "$GITHUB_ENV"
+        run: |
+          echo 'PARACO_ALLOW_UNSANDBOXED=1' >> "$GITHUB_ENV"
+          # Nested socket fixtures must fit macOS's 104-byte Unix socket path limit.
+          echo 'TMPDIR=/tmp' >> "$GITHUB_ENV"
       - if: runner.os == 'Linux'
         run: npx playwright install --with-deps chromium
       - if: runner.os != 'Linux'
@@ -88,5 +107,12 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm audit --audit-level=low
-      - run: cargo install cargo-audit --version 0.22.2 --locked
+      - name: Cache pinned cargo-audit binary
+        id: cargo-audit-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-audit
+          key: cargo-audit-${{ runner.os }}-${{ runner.arch }}-rust-1.96.1-v0.22.2
+      - if: steps.cargo-audit-cache.outputs.cache-hit != 'true'
+        run: cargo install cargo-audit --version 0.22.2 --locked
       - run: cargo audit --deny warnings

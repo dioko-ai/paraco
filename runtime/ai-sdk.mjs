@@ -1,5 +1,6 @@
 // This host-only bridge is never bundled into an application worker.
 import { pathToFileURL } from 'node:url';
+import { realpathSync } from 'node:fs';
 
 export async function complete(provider, sdk, { model, prompt }, cwd = process.cwd()) {
   if (provider === 'codex') {
@@ -32,7 +33,13 @@ export async function complete(provider, sdk, { model, prompt }, cwd = process.c
   throw new Error('Unknown SDK');
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+function isMain() {
+  if (!process.argv[1]) return false;
+  try { return import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href; }
+  catch { return false; }
+}
+
+if (isMain()) {
   try {
     let input = '';
     for await (const chunk of process.stdin) {

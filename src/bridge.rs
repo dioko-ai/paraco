@@ -34,19 +34,7 @@ impl Bridge {
                     thread::sleep(Duration::from_millis(10));
                     continue;
                 };
-                let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
-                let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
-                let result = handle(&mut stream, &settings, &auth);
-                let (status, body) = match result {
-                    Ok(v) => (200, v),
-                    Err(e) => (403, serde_json::json!({"error":e})),
-                };
-                let body = body.to_string();
-                let _ = write!(
-                    stream,
-                    "HTTP/1.1 {status} Result\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
-                );
+                let _ = respond(&mut stream, &settings, &auth);
             }
         });
         Ok(Self {
@@ -65,11 +53,38 @@ impl Drop for Bridge {
         }
     }
 }
+fn respond(
+    stream: &mut std::os::unix::net::UnixStream,
+    settings: &serde_json::Value,
+    auth: &str,
+) -> std::io::Result<()> {
+    let result = handle(stream, settings, auth);
+    let (status, body) = match result {
+        Ok(v) => (200, v),
+        Err(e) => (403, serde_json::json!({"error":e})),
+    };
+    let body = body.to_string();
+    write!(
+        stream,
+        "HTTP/1.1 {status} Result\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )
+}
+
 fn handle(
     stream: &mut std::os::unix::net::UnixStream,
     settings: &serde_json::Value,
     auth: &str,
 ) -> Result<serde_json::Value, String> {
+    // macOS can inherit O_NONBLOCK from the listener. Request parsing and
+    // response writing use blocking I/O with bounded socket deadlines.
+    stream.set_nonblocking(false).map_err(|e| e.to_string())?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .map_err(|e| e.to_string())?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(2)))
+        .map_err(|e| e.to_string())?;
     let mut header = Vec::new();
     while !header.ends_with(b"\r\n\r\n") {
         let mut byte = [0];
@@ -228,4 +243,37 @@ fn outbound(
         }
         Ok(serde_json::json!({"status":status,"headers":headers,"body":base64::engine::general_purpose::STANDARD.encode(bytes)}))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn nonblocking_accepted_socket_waits_for_headers_and_body() {
+        let (mut client, mut server) = std::os::unix::net::UnixStream::pair().unwrap();
+        // Reproduce inherited macOS listener flags on every test platform.
+        server.set_nonblocking(true).unwrap();
+        let worker = thread::spawn(move || {
+            respond(&mut server, &serde_json::json!({"network": []}), "expected")
+        });
+        thread::sleep(Duration::from_millis(50));
+        let body = br#"{"url":"https://denied.example"}"#;
+        write!(client, "POST /network HTTP/1.1\r\nAuthorization: Bearer expected\r\nContent-Length: {}\r\n\r\n", body.len()).unwrap();
+        thread::sleep(Duration::from_millis(50));
+        client.write_all(body).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let mut response = String::new();
+        client.read_to_string(&mut response).unwrap();
+        assert!(
+            response.starts_with("HTTP/1.1 403 Result\r\n"),
+            "{response}"
+        );
+        assert!(
+            response.contains("network destination not granted"),
+            "{response}"
+        );
+        worker.join().unwrap().unwrap();
+    }
 }

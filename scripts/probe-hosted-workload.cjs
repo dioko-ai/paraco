@@ -26,7 +26,7 @@ function treeRss(pid) {
 }
 function noisyRequest(port) {
  return new Promise((resolve,reject)=>{
-  const req=require('node:http').get({hostname:'127.0.0.1',port,path:'/noisy',headers:{Host:`${process.env.PARACO_NOISY_APP}.localhost:${port}`}},res=>{res.resume();res.on('end',()=>resolve({status:res.statusCode}));});
+  const req=require('node:http').get({hostname:'127.0.0.1',port,path:'/noisy',headers:{Host:`${process.env.PARACO_NOISY_APP}.localhost:${port}`}},res=>{let body=Buffer.alloc(0);res.on('data',chunk=>{body=Buffer.concat([body,chunk]).subarray(-2048);});res.on('end',()=>resolve({status:res.statusCode,body:body.toString('utf8')}));});
   req.setTimeout(15000,()=>req.destroy(new Error('noisy request timed out')));req.on('error',reject);
  });
 }
@@ -60,7 +60,7 @@ async function run({ path, json }, index) {
   const started = performance.now();
   const responses = await Promise.all(Array.from({length:64}, (_, i) => fetch(urls[i % urls.length])));
   const noisy = process.env.PARACO_NOISY_APP ? await Promise.all(Array.from({length:8}, () => noisyRequest(port))) : process.env.PARACO_NOISY_URL ? await Promise.all(Array.from({length:8}, () => fetch(process.env.PARACO_NOISY_URL))) : [];
-  if(noisy.some(response=>response.status!==200)) throw new Error('noisy app request failed');
+  if(noisy.some(response=>response.status!==200)) throw new Error(`noisy app request failed: ${JSON.stringify(noisy.filter(response=>response.status!==200).map(response=>({status:response.status,body:response.body})))}\nHost output: ${out.replace(/(management dashboard )\S+/g, '$1[redacted]').slice(-8192)}`);
   const managementStart=performance.now();
   const management=JSON.parse(execFileSync(binary,['status','--port',String(port)],{encoding:'utf8'}));
   const managementLatencyMs=Math.round(performance.now()-managementStart);

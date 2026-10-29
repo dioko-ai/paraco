@@ -116,10 +116,18 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let module = dir.path().join("sdk.mjs");
         std::fs::write(&module, source).unwrap();
-        let kind = ProviderKind::ClaudeSdk {
-            node: "/usr/bin/node".into(),
-            module,
-        };
+        // Use the same Node installation as the test environment, including setup-node.
+        let node = std::process::Command::new("node")
+            .args(["--print", "process.execPath"])
+            .output()
+            .expect("Node must be available on PATH for SDK tests");
+        assert!(node.status.success(), "Node executable lookup failed");
+        let node = std::path::PathBuf::from(String::from_utf8(node.stdout).unwrap().trim());
+        assert!(
+            node.is_absolute(),
+            "Node must report its absolute executable path"
+        );
+        let kind = ProviderKind::ClaudeSdk { node, module };
         (dir, kind)
     }
     #[tokio::test]

@@ -198,7 +198,7 @@ export default {{ async fetch(request, env) {{
 /// Separate OS containment from isolate capability policy. Never silently fall back.
 pub fn launch_command(
     runtime: &Path,
-    dir: &Path,
+    _dir: &Path,
     config: &Path,
     listener: &std::net::TcpListener,
 ) -> Result<Command, String> {
@@ -240,8 +240,8 @@ pub fn launch_command(
                 .arg(runtime)
                 .arg("/runtime")
                 .arg("--ro-bind")
-                .arg(dir)
-                .arg(dir)
+                .arg(_dir)
+                .arg(_dir)
                 .args(["--chdir", "/", "/runtime", "serve"])
                 .arg(config);
         }

@@ -286,18 +286,23 @@ impl Server {
             thread::sleep(Duration::from_millis(25));
         }
     }
-    fn sandbox_pid(&self, name: &str) -> i32 {
+    fn supervised_child_pid(&self, name: &str) -> i32 {
         let guardian = self.guardian_pid(name);
         let output = Command::new("ps")
-            .args(["-o", "pid=", "--ppid", &guardian.to_string()])
+            .args(["-eo", "pid=,ppid="])
             .output()
             .unwrap();
+        assert!(output.status.success());
         String::from_utf8(output.stdout)
             .unwrap()
-            .split_whitespace()
-            .next()
-            .and_then(|pid| pid.parse().ok())
-            .unwrap_or_else(|| panic!("no sandbox child for {name} guardian {guardian}"))
+            .lines()
+            .find_map(|line| {
+                let mut fields = line.split_whitespace();
+                let pid: i32 = fields.next()?.parse().ok()?;
+                let parent: i32 = fields.next()?.parse().ok()?;
+                (parent == guardian).then_some(pid)
+            })
+            .unwrap_or_else(|| panic!("no supervised child for {name} guardian {guardian}"))
     }
     fn command(&self, action: &str, app: Option<&str>) -> std::process::Output {
         let mut command = Command::new(env!("CARGO_BIN_EXE_paraco"));
@@ -555,14 +560,38 @@ fn failures_and_hanging_requests_leave_other_apps_and_dashboard_available() {
 }
 
 #[test]
-fn rejects_duplicate_names_invalid_configuration_and_occupied_gateway() {
-    for config in [
-        r#"{"apps":[{"path":"one"},{"path":"one"}]}"#,
-        r#"{"apps":[],"extra":true}"#,
-    ] {
+fn isolates_duplicate_names_and_rejects_invalid_configuration_and_occupied_gateway() {
+    let dir = Server::fixture(&[("one", APP)]);
+    let path = dir.path().join("server.json");
+    fs::write(&path, r#"{"apps":[{"path":"one"},{"path":"one"}]}"#).unwrap();
+    let mut server = Server::start(dir, &path, free_port());
+    server.ready();
+    server.state("one", "running");
+    let failed = server.state("failed-app-1", "failed");
+    assert!(
+        failed["error"]
+            .as_str()
+            .unwrap()
+            .contains("duplicate application name")
+    );
+    assert_eq!(failed["desired"], "stopped");
+    assert!(
+        server
+            .request("GET", "/apps/failed-app-1/", "")
+            .contains("503")
+    );
+    assert_eq!(server.control("status", None).as_array().unwrap().len(), 2);
+    assert!(
+        server
+            .request("GET", "/apps/one/next", "")
+            .ends_with("arrived")
+    );
+    assert!(server.request("GET", "/", "").contains("Your local apps"));
+    server.stop(libc::SIGINT);
+    {
         let dir = Server::fixture(&[("one", APP)]);
         let path = dir.path().join("server.json");
-        fs::write(&path, config).unwrap();
+        fs::write(&path, r#"{"apps":[],"extra":true}"#).unwrap();
         let mut server = Server::start(dir, &path, free_port());
         assert!(!server.wait_exit().success());
         assert!(!server.logs().contains("dashboard listening"));
@@ -903,7 +932,7 @@ export default { async fetch(_request, context) {
 fn slow_stop_keeps_control_and_other_apps_responsive() {
     let mut server = Server::run(&[("stubborn", APP), ("healthy", APP)]);
     server.ready();
-    let pid = server.sandbox_pid("stubborn");
+    let pid = server.supervised_child_pid("stubborn");
     assert_eq!(unsafe { libc::kill(pid, libc::SIGSTOP) }, 0);
     let start = Instant::now();
     server.control("stop", Some("stubborn"));

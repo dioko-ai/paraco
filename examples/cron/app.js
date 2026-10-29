@@ -6,6 +6,9 @@ const localTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
 $('timezone').value = localTimezone;
 function setSelecting(value) { state.selecting = value; for (const id of ['name','source','kind','at','expression','frequency','time','weekday','timezone','timeout','network','success','failure','preview','applyAi','prevRevisions','moreRevisions','prevHistory','moreHistory']) $(id).disabled = value; $('save').disabled = value || state.saving; $('generate').disabled = value || !!state.ai; }
 function message(text) { $('message').textContent = text; }
+function updatePublish() {
+  $('publish').disabled = state.saving || state.publishing || !state.reviewed || state.reviewed.epoch !== state.epoch || !$('approved').checked;
+}
 async function api(action, body = {}, signal) {
   const response = await fetch(`/api/${action}`, {method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body), signal});
   const result = await response.json();
@@ -172,7 +175,7 @@ $('kind').addEventListener('change', fields); $('frequency').addEventListener('c
 window.addEventListener('beforeunload', event => { if (state.dirty || state.saving) { event.preventDefault(); event.returnValue = ''; } });
 $('editor').addEventListener('submit', event => { event.preventDefault(); safe(async()=> {
   if (state.saving || state.selecting) return;
-  state.saving = true; $('save').disabled = true;
+  state.saving = true; $('save').disabled = true; updatePublish();
   try {
   const body = draftBody(), epoch = state.epoch, selected = state.selected;
   const expected = state.jobs.find(j => j.id === selected)?.current_revision ?? null;
@@ -192,12 +195,12 @@ $('editor').addEventListener('submit', event => { event.preventDefault(); safe(a
   $('diff').textContent = `SOURCE DIFF (− removed, + added)\n${sourceDiff(previous?.source || '',result.body.source)}\n\nPREVIOUS SETTINGS\n${previous ? JSON.stringify({...previous,source:undefined},null,2) : '(none)'}\n\nPROPOSED SETTINGS\n${JSON.stringify({...result.body,source:undefined},null,2)}`;
   $('approved').checked=false; $('publish').disabled=true; $('review').hidden=false; $('state').textContent='Saved draft awaiting review';
   await refresh(); message('Draft saved. Review source and settings before publishing.');
-  } finally { state.saving = false; $('save').disabled = state.selecting; }
+  } finally { state.saving = false; $('save').disabled = state.selecting; updatePublish(); }
 }); });
-$('approved').addEventListener('change',()=> { $('publish').disabled = !$('approved').checked || !state.reviewed; });
+$('approved').addEventListener('change',updatePublish);
 $('publish').addEventListener('click',()=>safe(async()=> {
   const review = state.reviewed;
-  if (state.publishing || !review || review.epoch !== state.epoch || !$('approved').checked) return;
+  if (state.saving || state.publishing || !review || review.epoch !== state.epoch || !$('approved').checked) return;
   state.publishing = true; $('publish').disabled = true;
   try { await api('publish',{revision_id:review.revision,expected_current_revision:review.expected}); }
   catch(error) {

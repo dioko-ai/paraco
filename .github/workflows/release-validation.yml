@@ -37,7 +37,10 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y bubblewrap
       - name: Explicit trusted development tests on macOS
         if: runner.os == 'macOS'
-        run: echo 'PARACO_ALLOW_UNSANDBOXED=1' >> "$GITHUB_ENV"
+        run: |
+          echo 'PARACO_ALLOW_UNSANDBOXED=1' >> "$GITHUB_ENV"
+          # Nested socket fixtures must fit macOS's 104-byte Unix socket path limit.
+          echo 'TMPDIR=/tmp' >> "$GITHUB_ENV"
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
