@@ -23,12 +23,11 @@ own account without `sudo`.
 The planned installation options are a single download-and-run command for macOS
 and Linux, and Homebrew for people who already use it. Each is intended to install the same Paraco bundle, including its private
 runtime and compiler. npm is not required. Linux app execution requires
-bubblewrap and unprivileged user/network namespaces. macOS secure containment is
-not implemented yet, so normal app execution currently fails closed there.
+bubblewrap and unprivileged user/network namespaces. macOS execution uses native Seatbelt containment by default.
 
 `paraco sandbox-probe` opens a diagnostic plugin with independent native escape
 checks and green/red/unverified results. See [native containment](docs/native-containment.md)
-for its scope and the opt-in macOS prototype; no VM is required.
+for its scope and the macOS backend; no VM is required.
 
 ## Get started
 

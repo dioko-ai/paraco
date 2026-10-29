@@ -1,7 +1,6 @@
 name: Native containment validation
 
-# This is intentionally separate from the trusted-development macOS suite.
-# A real Mac result is required before graduating the experimental backend.
+# Exercise native containment on both supported platforms.
 on:
   workflow_dispatch:
 
@@ -15,7 +14,6 @@ jobs:
     timeout-minutes: 20
     env:
       TMPDIR: /tmp
-      PARACO_EXPERIMENTAL_MACOS_SANDBOX: '1'
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.96.1

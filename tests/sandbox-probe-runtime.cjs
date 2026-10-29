@@ -22,6 +22,7 @@ test('trusted containment evidence and unsafe mode reach the probe report', {tim
   const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'paraco-sandbox-probe-test-'));
   const env = {...process.env, TMPDIR: temp, PATH: path.join(root, 'node_modules/.bin') + path.delimiter + (process.env.PATH || '')};
   delete env.PARACO_ALLOW_UNSANDBOXED;
+  delete env.PARACO_EXPERIMENTAL_MACOS_SANDBOX;
   const unsafe = {...env, PARACO_ALLOW_UNSANDBOXED: '1'};
   const children = new Set();
   function diagnostic(environment) {

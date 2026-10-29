@@ -64,8 +64,7 @@ streams. This requires Linux `close_range(CLOSE_RANGE_CLOEXEC)` support (Linux
 Existing namespace and bubblewrap prerequisites still apply. Hard cgroup quotas
 remain a release gate and are not claimed by the green probe result.
 
-macOS has an **experimental Seatbelt prototype**, behind
-`PARACO_EXPERIMENTAL_MACOS_SANDBOX=1`. It uses `/usr/bin/sandbox-exec`, a deny-default
+macOS uses **native Seatbelt containment by default**. It uses `/usr/bin/sandbox-exec`, a deny-default
 per-execution profile, selected read/write paths, the exact executable, and the
 specific capability Unix socket. It does not enable general outbound networking
 or subprocess forking. The runtime accepts requests on the inherited loopback
@@ -73,15 +72,9 @@ listener. It is not a signed App Sandbox/XPC implementation: shared helper ident
 alone does not establish per-plugin isolation. `sandbox-exec`/SBPL are deprecated
 or undocumented interfaces and require validation on each supported macOS release.
 
-```sh
-PARACO_EXPERIMENTAL_MACOS_SANDBOX=1 paraco sandbox-check
-PARACO_EXPERIMENTAL_MACOS_SANDBOX=1 paraco sandbox-probe
-```
-
-No macOS hardware validation is implied by Linux tests or profile-string tests.
-The experimental flag is propagated to app and task guardians. Without it macOS
-still fails closed; profile failures never trigger an unsandboxed retry. The
-separate trusted-development escape hatch remains available and always makes the
+The same commands above run on macOS without an opt-in flag. Profile failures
+never trigger an unsandboxed retry. The separate trusted-development escape
+hatch remains available and always makes the
 probe report FAIL. Real Mac validation must include workerd JIT, compilation,
 capability sockets, permitted listener traffic, forbidden access and host death.
 
@@ -116,10 +109,14 @@ npm run test:security
 The containment integration test requires working native containment, checks a
 fully green served report, verifies missing evidence is amber, and deliberately
 runs the harmless canaries in trusted-development mode to require a red result.
-Run on a real Mac with the experimental flag to validate that backend; do not use
+Run on a real Mac to validate that backend; do not use
 trusted-development CI results as macOS containment evidence.
 
-### Observed in this implementation
+### Historical validation notes
+
+The notes below record earlier validation and startup failures. The maintainer
+subsequently reported working macOS and Linux sandboxes; macOS now runs by default.
+The experimental opt-in flag has been removed.
 
 Linux validation passed: all 15 native checks, the full served probe, the
 unsandboxed negative control and missing-evidence case, and the existing workerd

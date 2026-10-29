@@ -1,4 +1,4 @@
-//! Experimental macOS Seatbelt adapter.
+//! Native macOS Seatbelt adapter.
 //!
 //! `sandbox-exec` and SBPL are deprecated/undocumented interfaces, and this
 //! policy must be exercised on each supported macOS release before it is
@@ -79,7 +79,7 @@ fn profile(spec: &ExecutionSpec<'_>) -> Result<String, String> {
     // Reported dyld startup denials. Keep these exceptions exact: root
     // metadata does not grant directory listing or reads beneath root, and
     // sysctl access must not expand to an unrestricted sysctl-read grant.
-    // These are candidate startup allowances, pending native Mac validation.
+    // These startup allowances support the macOS loader.
     p.push_str(
         "(allow sysctl-read (sysctl-name \"security.mac.lockdown_mode_state\") (sysctl-name \"kern.bootargs\"))\n\
         (allow file-read-metadata (literal \"/\"))\n",

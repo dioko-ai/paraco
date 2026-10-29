@@ -33,13 +33,13 @@ pub fn backend_name() -> &'static str {
     } else if cfg!(target_os = "linux") {
         "linux-bubblewrap"
     } else if cfg!(target_os = "macos") {
-        "macos-seatbelt-experimental"
+        "macos-seatbelt"
     } else {
         "unsupported"
     }
 }
 
-/// No automatic fallback. macOS stays experimental until native release checks pass.
+/// Use native containment with no automatic fallback.
 pub fn command(spec: &ExecutionSpec<'_>) -> Result<Command, String> {
     let mut cmd = if backend_name() == "unsafe-development" {
         eprintln!(
@@ -53,9 +53,6 @@ pub fn command(spec: &ExecutionSpec<'_>) -> Result<Command, String> {
         }
         #[cfg(target_os = "macos")]
         {
-            if std::env::var("PARACO_EXPERIMENTAL_MACOS_SANDBOX").as_deref() != Ok("1") {
-                return Err("Native macOS containment is experimental and has not passed release validation. To test it, explicitly set PARACO_EXPERIMENTAL_MACOS_SANDBOX=1. No VM or unsafe fallback is used.".into());
-            }
             macos::command(spec)?
         }
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -109,12 +106,7 @@ pub fn command(spec: &ExecutionSpec<'_>) -> Result<Command, String> {
 
 /// Preserve explicitly selected host modes across the cleared guardian environment.
 pub fn guardian_environment(cmd: &mut Command) {
-    for key in [
-        "PARACO_ALLOW_UNSANDBOXED",
-        "PARACO_EXPERIMENTAL_MACOS_SANDBOX",
-    ] {
-        if std::env::var(key).as_deref() == Ok("1") {
-            cmd.env(key, "1");
-        }
+    if std::env::var("PARACO_ALLOW_UNSANDBOXED").as_deref() == Ok("1") {
+        cmd.env("PARACO_ALLOW_UNSANDBOXED", "1");
     }
 }
