@@ -148,6 +148,10 @@ pub enum ProviderKind {
     #[default]
     Openai,
     Anthropic,
+    CodexCli {
+        #[serde(default)]
+        executable: std::path::PathBuf,
+    },
     CodexSdk {
         node: std::path::PathBuf,
         module: std::path::PathBuf,
@@ -453,7 +457,9 @@ impl OpenAiProxy {
             .unwrap_or_default();
         if matches!(
             kind,
-            ProviderKind::CodexSdk { .. } | ProviderKind::ClaudeSdk { .. }
+            ProviderKind::CodexCli { .. }
+                | ProviderKind::CodexSdk { .. }
+                | ProviderKind::ClaudeSdk { .. }
         ) {
             let _queue = QueueSlot::acquire(&self.queued, self.config.limits.queued_requests)?;
             let _host = acquire(host_provider_semaphore(), deadline).await?;

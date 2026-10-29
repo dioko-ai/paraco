@@ -239,6 +239,16 @@ test('dashboard interactions survive polling and failed mutations in Chromium', 
     assert.equal(await page.getByRole('button', {name:'install ai 1'}).isDisabled(), true);
     assert.match(await page.locator('#plugins').innerText(), /Configure AI on the host/);
     assert.equal(await page.getByRole('button', {name:'install hello 1'}).innerText(), 'Installed');
+    // Check actual layout: absence of overflow alone missed the unusably narrow cards.
+    await page.setViewportSize({width:390,height:844});
+    const mobileCard = page.locator('#plugins .app').last();
+    const infoBox = await mobileCard.locator('div').first().boundingBox();
+    const installBox = await mobileCard.locator('button').boundingBox();
+    assert.ok(infoBox.width > 280, 'catalog text uses the mobile card width');
+    assert.ok(installBox.y >= infoBox.y + infoBox.height, 'install action sits below its description');
+    assert.ok(installBox.height < 80, 'install action does not stretch to card height');
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+    await page.setViewportSize({width:1280,height:720});
     const stop = page.getByRole('button', {name:'stop hello'});
     await stop.click();
     assert.equal(await stop.isDisabled(), true);

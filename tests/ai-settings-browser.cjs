@@ -22,8 +22,13 @@ const { chromium } = require('@playwright/test');
     const module = path.join(dir, 'fixture.mjs');
     await fs.writeFile(module, `export async function* query({prompt, options}) { yield {type:'result',subtype:'success',result:options.model+':'+prompt}; }`);
     await fs.writeFile(path.join(dir, 'server.json'), JSON.stringify({ apps: [{path: 'app'}] }));
-    child = spawn(path.join(process.cwd(), 'target/debug/paraco'), ['--data-dir', dir, '--log-dir', path.join(dir,'logs'), 'serve', '--config', path.join(dir,'server.json'), '--port', String(port)], {
-      env: { ...process.env, PATH: `${path.join(process.cwd(),'node_modules/.bin')}:${process.env.PATH}`, PARACO_ALLOW_UNSANDBOXED:'1' }, stdio: ['ignore','pipe','pipe'],
+    const cliDir = path.join(dir, 'bin');
+    await fs.mkdir(cliDir);
+    await fs.writeFile(path.join(cliDir, 'codex'), `#!${process.execPath}
+if (process.argv[2] === 'login') process.exit(require('node:fs').existsSync(require('node:path').join(__dirname, 'signed-out')) ? 1 : 0);
+let prompt=''; process.stdin.on('data', chunk=>prompt+=chunk); process.stdin.on('end',()=>{const args=process.argv.slice(2); const i=args.indexOf('--model'); process.stdout.write((i<0?'codex-default':args[i+1])+':'+prompt);});`, {mode:0o700});
+    child = spawn(process.env.PARACO_BIN || path.join(process.cwd(), 'target/debug/paraco'), ['--data-dir', dir, '--log-dir', path.join(dir,'logs'), 'serve', '--config', path.join(dir,'server.json'), '--port', String(port)], {
+      env: { ...process.env, PATH: `${cliDir}:${path.join(process.cwd(),'node_modules/.bin')}:/usr/bin:/bin`, PARACO_ALLOW_UNSANDBOXED:'1' }, stdio: ['ignore','pipe','pipe'],
     });
     child.stdout.on('data', x => output += x); child.stderr.on('data', x => output += x);
     const until = async fn => { for (let i=0; i<200; i++) { try { const value = await fn(); if (value) return value; } catch {} await new Promise(r=>setTimeout(r,100)); } throw Error(output || 'Timed out'); };
@@ -36,6 +41,7 @@ const { chromium } = require('@playwright/test');
     await page.locator('#ai-form').waitFor({state:'visible'});
     await page.locator('#ai-mode').selectOption('custom');
     await page.locator('#ai-provider').selectOption('anthropic');
+    await page.locator('#ai-advanced summary').click();
     await page.locator('#ai-transport').selectOption('sdk');
     await page.locator('#ai-model').fill('global-model');
     await page.locator('#ai-node').fill(process.execPath);
@@ -53,6 +59,7 @@ const { chromium } = require('@playwright/test');
     assert.equal(await page.locator('#ai-mode').inputValue(), 'inherit');
     await page.locator('#ai-mode').selectOption('custom');
     await page.locator('#ai-provider').selectOption('anthropic');
+    await page.locator('#ai-advanced summary').click();
     await page.locator('#ai-transport').selectOption('sdk');
     await page.locator('#ai-model').fill('app-model');
     await page.locator('#ai-node').fill(process.execPath);
@@ -64,6 +71,25 @@ const { chromium } = require('@playwright/test');
     await page.locator('#ai-mode').selectOption('inherit'); await save();
     assert.match(await (await appRequest()).text(), /global-model:hello/);
     await page.locator('#ai-scope').selectOption('');
+    await page.locator('#ai-provider').selectOption('codex');
+    await page.locator('#ai-model').fill('');
+    assert.equal(await page.locator('#ai-api-fields').isVisible(), false);
+    assert.equal(await page.locator('#ai-sdk-fields').isVisible(), false);
+    assert.equal(await page.locator('#ai-advanced').isVisible(), false);
+    await save();
+    assert.equal(await page.locator('#ai-provider').inputValue(), 'codex');
+    assert.equal(await page.locator('#ai-model').inputValue(), '');
+    assert.match(await (await appRequest()).text(), /codex-default:hello/);
+    await page.locator('#ai-model').fill('chosen-model'); await save();
+    assert.match(await (await appRequest()).text(), /chosen-model:hello/);
+    await fs.writeFile(path.join(cliDir, 'signed-out'), '');
+    await page.locator('#ai-form button').click();
+    await page.waitForFunction(()=>document.querySelector('#ai-status').textContent.includes('Codex needs sign-in'));
+    await fs.unlink(path.join(cliDir, 'signed-out'));
+    await fs.unlink(path.join(cliDir, 'codex'));
+    await page.locator('#ai-form button').click();
+    await page.waitForFunction(()=>document.querySelector('#ai-status').textContent.includes('Codex CLI was not found'));
+    assert.match(await (await fetch(`${origin}/api/ai`)).text(), /chosen-model/);
     await page.locator('#ai-provider').selectOption('xai');
     assert.equal(await page.locator('#ai-transport').inputValue(), 'api');
     await page.locator('#ai-model').fill('grok-model');

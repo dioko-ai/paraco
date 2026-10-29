@@ -261,6 +261,16 @@ impl Capability {
             *path = canonical;
         }
         for kind in config.provider_kinds.values_mut() {
+            if let ProviderKind::CodexCli { executable } = kind {
+                paraco::ai_sdk::validate_executable(executable)?;
+                let canonical = executable
+                    .canonicalize()
+                    .map_err(|_| "Cannot read Codex CLI")?;
+                if canonical.starts_with(&app.root) {
+                    return Err("Codex CLI must be outside the application directory".into());
+                }
+                *executable = canonical;
+            }
             if let ProviderKind::CodexSdk { node, module }
             | ProviderKind::ClaudeSdk { node, module } = kind
             {

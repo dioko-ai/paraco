@@ -14,10 +14,17 @@ files use a stable private directory beside the log directory, preserving job
 identity across launches and software updates. Edited or unowned generated files
 are refused rather than overwritten.
 
-Open the Cron link on the local dashboard. Create a job, save it for review,
-inspect the source diff, schedule, timeout and network access, check approval,
-and publish. Saving a draft does not execute it. Manual jobs run only when Run
-now is selected. Recurring and one-off jobs become eligible after publication.
+Open the Cron link on the local dashboard. The starter is a local reminder:
+edit the message in `ctx.notify` and choose when to run it. Messages appear in
+Cron's **Local inbox**, not as desktop alerts. The success/failure switches add
+automatic outcome notifications; script messages appear independently.
+
+Create a job, save it for review, inspect the source diff and the visible
+activation, schedule, timeout and network summary, check approval, and publish.
+The review distinguishes archived jobs, new overdue one-offs, and already-admitted
+one-offs. A change to the job's activation state invalidates an open review.
+Saving a draft does not execute it. Manual jobs run only when
+**Run published revision** is selected. Recurring and one-off jobs become eligible after publication.
 Paraco and the machine must be running for work to execute. The editor offers
 daily, weekday and weekly schedules with a time and timezone; choose custom
 cron for a five-field expression. A one-off uses the browser’s local date and
@@ -142,9 +149,16 @@ must refuse it. Keep a pre-upgrade backup when testing a binary rollback.
 
 ## Optional AI drafting
 
-Use `paraco cron --ai-config /absolute/host/ai.json`, or configure `aiConfig`
-for a hosted reference app, together with an explicit deployment grant using the existing
-[AI routing contract](ai-routing.md). AI receives only the context previewed in
+Use **Configure AI in the dashboard** from the drafting assistant to choose a
+provider and connection. Cron uses those settings immediately when it shares the
+host's data directory; no restart or routing file is required. AI starts disabled
+and is optional.
+
+For advanced file-based setup, use
+`paraco cron --ai-config /absolute/host/ai.json`, or configure `aiConfig` for a
+hosted reference app, together with an explicit deployment grant using the
+[AI routing contract](ai-routing.md). Explicit routing files take precedence over
+dashboard settings. AI receives only the context previewed in
 the browser: the user's request and explicitly selected source/log context.
 Provider secrets remain host-owned. Applying a suggestion changes only the
 editor. It still needs save, review and publish. Late or cancelled responses

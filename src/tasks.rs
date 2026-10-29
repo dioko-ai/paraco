@@ -217,7 +217,7 @@ impl Tasks {
         }
     }
     fn list_jobs(&self, deployment: &str) -> Result<Value, String> {
-        let mut jobs = self.rows("SELECT json_object('id',j.id,'name',j.name,'current_revision',j.current,'archived',json(CASE j.archived WHEN 1 THEN 'true' ELSE 'false' END),'next_at',j.next_at,'once_claimed',j.once_claimed,'published_schedule',json_extract(r.body,'$.schedule'),'network',json_extract(r.body,'$.network'),'unpublished_changes',EXISTS(SELECT 1 FROM task_revisions d WHERE d.job=j.id AND d.published=0 AND d.rowid>COALESCE(r.rowid,0)),'last_result',(SELECT status FROM task_runs WHERE job=j.id ORDER BY started DESC,rowid DESC LIMIT 1)) FROM task_jobs j LEFT JOIN task_revisions r ON r.id=j.current WHERE j.deployment=?1 ORDER BY j.name", deployment, None)?;
+        let mut jobs = self.rows("SELECT json_object('id',j.id,'name',j.name,'current_revision',j.current,'archived',json(CASE j.archived WHEN 1 THEN 'true' ELSE 'false' END),'next_at',j.next_at,'once_claimed',j.once_claimed,'published_schedule',json_extract(r.body,'$.schedule'),'network',json_extract(r.body,'$.network'),'unpublished_changes',EXISTS(SELECT 1 FROM task_revisions d WHERE d.job=j.id AND d.published IS NULL AND d.rowid>COALESCE(r.rowid,0)),'last_result',(SELECT status FROM task_runs WHERE job=j.id ORDER BY started DESC,rowid DESC LIMIT 1)) FROM task_jobs j LEFT JOIN task_revisions r ON r.id=j.current WHERE j.deployment=?1 ORDER BY j.name", deployment, None)?;
         for job in jobs.as_array_mut().unwrap() {
             let network: Vec<String> =
                 serde_json::from_value(job["network"].clone()).unwrap_or_default();
@@ -1511,6 +1511,45 @@ mod tests {
         )
         .unwrap();
         (job, revision)
+    }
+    #[test]
+    fn unpublished_summary_tracks_saved_drafts_before_and_after_publication() {
+        let (_dir, tasks) = fixture();
+        let make = |job_id| Draft {
+            job_id,
+            name: "Draft status".into(),
+            source: "export default async function() {}".into(),
+            schedule: Schedule::Manual,
+            timeout_ms: 1000,
+            network: vec![],
+            notify_success: false,
+            notify_failure: true,
+        };
+        let saved = tasks.draft("owner", make(None)).unwrap();
+        let job = saved["job_id"].as_str().unwrap().to_owned();
+        assert_eq!(
+            tasks.list_jobs("owner").unwrap()[0]["unpublished_changes"],
+            1
+        );
+        {
+            let db = tasks.db.lock().unwrap();
+            db.execute(
+                "UPDATE task_jobs SET current=?2 WHERE id=?1",
+                params![job, saved["revision_id"].as_str().unwrap()],
+            )
+            .unwrap();
+            db.execute("UPDATE task_revisions SET published=1 WHERE job=?1", [&job])
+                .unwrap();
+        }
+        assert_eq!(
+            tasks.list_jobs("owner").unwrap()[0]["unpublished_changes"],
+            0
+        );
+        tasks.draft("owner", make(Some(job))).unwrap();
+        assert_eq!(
+            tasks.list_jobs("owner").unwrap()[0]["unpublished_changes"],
+            1
+        );
     }
     #[test]
     fn published_summary_reports_blocked_network_and_recovers_without_losing_due() {

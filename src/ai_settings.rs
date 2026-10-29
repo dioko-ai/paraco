@@ -93,6 +93,12 @@ impl Profile {
             return Err("Choose a provider and enter a model".into());
         }
         match &self.transport {
+            ProviderKind::CodexCli { executable } => {
+                if self.provider != "openai" {
+                    return Err("Codex CLI requires the OpenAI provider".into());
+                }
+                crate::ai_sdk::validate_executable(executable)?;
+            }
             ProviderKind::CodexSdk { node, module } | ProviderKind::ClaudeSdk { node, module } => {
                 if !matches!(
                     (&self.transport, self.provider.as_str()),
@@ -151,6 +157,15 @@ impl Profile {
             .provider_kinds
             .insert(self.provider.clone(), self.transport.clone());
         match &self.transport {
+            ProviderKind::CodexCli { executable } => {
+                config.provider_kinds.insert(
+                    self.provider.clone(),
+                    ProviderKind::CodexCli {
+                        executable: outside(executable, app_root)?,
+                    },
+                );
+                config.limits.timeout = std::time::Duration::from_secs(120);
+            }
             ProviderKind::CodexSdk { node, module } | ProviderKind::ClaudeSdk { node, module } => {
                 let node = outside(node, app_root)?;
                 let module = outside(module, app_root)?;
@@ -237,6 +252,14 @@ pub fn update(root: &Path, deployment: Option<&str>, mut update: Update) -> Resu
             "disabled" => Some(Override::Disabled),
             "custom" => {
                 let mut profile = update.profile.take().ok_or("Choose an AI provider")?;
+                if let ProviderKind::CodexCli { executable } = &mut profile.transport {
+                    if executable.as_os_str().is_empty() {
+                        *executable = crate::ai_sdk::find_codex()?;
+                    }
+                    if profile.model.trim().is_empty() {
+                        profile.model = "default".into();
+                    }
+                }
                 // Browser-supplied paths are not a way to read arbitrary host secrets.
                 profile.credential_file = old
                     .as_ref()

@@ -43,9 +43,23 @@ API calls use the API account's billing. Subscription access and limits remain
 provider-controlled: see [Codex authentication](https://learn.chatgpt.com/docs/auth)
 and [Claude Agent SDK plan access](https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan).
 
+## Codex CLI setup
+
+Choose **Codex CLI (use local sign-in)** in the dashboard and save. Paraco finds
+`codex` on the host's PATH (also checking `~/.local/bin` and `~/.npm-global/bin`)
+and checks its sign-in status. No Node.js path or separate JavaScript SDK is
+required. Leave Model blank to use the Codex default, or enter an override.
+If Codex is missing or signed out, the dashboard explains how to install or sign
+in before saving. Installations must support `codex exec --ephemeral`.
+
+Calls use the existing host sign-in, an empty temporary working directory,
+read-only sandboxing, disabled tools, bounded output and a 120-second deadline.
+They do not silently fall back to API-key billing. A saved connection confirms
+local sign-in; provider eligibility and limits are checked when making a request.
+
 ## Optional SDK setup
 
-SDK mode requires Node.js and the relevant official JavaScript SDK installed on
+Under **Advanced connection settings**, SDK mode requires Node.js and the relevant official JavaScript SDK installed on
 the host, outside app packages. These optional dependencies are not included in
 the Paraco release bundle. Install the package in a dedicated host directory,
 sign in with its coding client, and enter the absolute Node executable and SDK

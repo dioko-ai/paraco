@@ -616,7 +616,7 @@ async fn ai_settings(state: &Management, request: Request) -> Response {
             Ok(Ok(body)) => body,
             _ => return StatusCode::BAD_REQUEST.into_response(),
         };
-        let update: paraco::ai_settings::Update = match serde_json::from_slice(&body) {
+        let mut update: paraco::ai_settings::Update = match serde_json::from_slice(&body) {
             Ok(value) => value,
             Err(_) => return (StatusCode::BAD_REQUEST, "Invalid AI settings").into_response(),
         };
@@ -635,6 +635,19 @@ async fn ai_settings(state: &Management, request: Request) -> Response {
         } else {
             None
         };
+        if update.mode == "custom"
+            && let Some(profile) = &mut update.profile
+            && let paraco::ai::ProviderKind::CodexCli { executable } = &mut profile.transport
+        {
+            // The dashboard chooses the connection; the host resolves its executable.
+            match paraco::ai_sdk::find_codex() {
+                Ok(path) => *executable = path,
+                Err(error) => return (StatusCode::BAD_REQUEST, error).into_response(),
+            }
+            if let Err(error) = paraco::ai_sdk::check_codex_login(executable).await {
+                return (StatusCode::BAD_REQUEST, error).into_response();
+            }
+        }
         if let Err(error) = paraco::ai_settings::update(root, deployment.as_deref(), update) {
             return (StatusCode::BAD_REQUEST, error).into_response();
         }

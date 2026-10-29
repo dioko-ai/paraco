@@ -217,7 +217,7 @@ test('real Cron browser lifecycle uses explicit review and immutable revision pu
     assert.equal(await page.locator('#review').isHidden(),true);
     assert.match(await page.getByRole('status').textContent(),/Restored to the editor/);
     await page.locator('#kind').selectOption('cron');await page.locator('#frequency').selectOption('advanced');await page.locator('#timezone').fill('America/Denver');await page.locator('#expression').fill('0 9 * * *');await page.locator('#preview').click();
-    await wait(async()=>/T\d\d:/.test(await page.locator('#occurrences').textContent()),'timezone schedule preview');
+    await wait(async()=>/America\/Denver/.test(await page.locator('#occurrences').textContent()),'timezone schedule preview');
     await page.locator('#source').fill('export default async function(ctx) { syntax error here }');await page.getByRole('button',{name:'Save draft & review',exact:true}).click();
     await page.locator('#review').waitFor({state:'visible'});await page.locator('#approved').check();
     const failedPublication = page.waitForResponse(response => response.url().endsWith('/api/publish') && response.request().method()==='POST');
@@ -264,6 +264,7 @@ test('Chromium exercises guided schedules, races, paging and refresh', {skip: !p
     await page.addInitScript(()=>{window.setInterval=fn=>{window.cronPoll=fn;return 1;};});
     page.on('dialog',dialog=>dialog.dismiss());
     await page.goto(`http://127.0.0.1:${server.address().port}/`);await page.getByRole('button',{name:'Existing'}).waitFor();
+    assert.equal(await page.evaluate(()=>{const cards=['history','notifications','instruction','revisions'].map(id=>document.getElementById(id).closest('.card'));return new Set(cards).size===4 && cards.every(card=>card.parentElement===cards[0].parentElement);}),true,'Runs, local inbox, AI, and revision history must be sibling cards');
     assert.equal(await page.locator('#timezone').inputValue(),'America/Denver');
     await page.locator('#kind').selectOption('cron');await page.locator('#time').fill('14:35');await page.locator('#preview').click();
     await page.waitForFunction(()=>document.querySelector('#occurrences').textContent.includes('Manual schedule'));
@@ -333,4 +334,67 @@ test('publish waits for the save refresh and preserves the later validation erro
   assert.match(b.get('message').textContent,/validation failed/);
   assert.equal(b.get('state').textContent,'Saved draft awaiting review');
   assert.equal(b.get('publish').disabled,false);
+});
+
+test('saved review explains activation and permissions before approval', async () => {
+  const b=browser(); await tick(); b.fire('editor','submit'); await tick();
+  assert.match(b.get('reviewSummary').textContent,/Runs only when you choose Run published revision/);
+  assert.match(b.get('reviewSummary').textContent,/Network: none/);
+  assert.match(b.get('reviewSummary').textContent,/local inbox notifications/);
+  assert.equal(b.get('publish').disabled,true);
+  assert.equal(b.get('editorTitle').textContent,'Test');
+});
+test('unpublished jobs are explicitly inactive and irrelevant actions stay hidden', async () => {
+  const b=browser(); await tick();
+  assert.equal(b.get('publishedPanel').hidden,true);
+  vm.runInContext("state.jobs=[{id:'draft',name:'Draft',current_revision:null}];state.selected='draft';renderJobs()",b.context);
+  assert.match(b.get('publishedSummary').textContent,/Not active/);
+  assert.equal(b.get('delete').hidden,true);
+  assert.equal(b.get('run').disabled,true);
+});
+test('one-off preview uses the browser timezone and manual preview stays hidden', async () => {
+  const at=Date.parse('2026-11-01T08:30:00Z');
+  const b=browser(action=>action==='preview'?response({times:[at]}):undefined); await tick();
+  assert.equal(b.get('preview').hidden,true);
+  b.get('kind').value='once'; b.get('at').value='2026-11-01T01:30'; b.fire('kind','change'); b.fire('preview'); await tick();
+  assert.equal(b.get('preview').hidden,false);
+  assert.match(b.get('occurrences').textContent,new RegExp(Intl.DateTimeFormat().resolvedOptions().timeZone));
+});
+
+
+test('activation review handles archived and already admitted one-offs exactly', () => {
+  const b=browser();
+  const at=Date.now()-1000;
+  b.context.onceAt=at;
+  assert.match(vm.runInContext("activationSummary({schedule:{kind:'once',at:onceAt}},{archived:true}).activation",b.context),/Publishing keeps it archived/);
+  assert.match(vm.runInContext("activationSummary({schedule:{kind:'once',at:onceAt}},{once_claimed:true,published_schedule:{kind:'once',at:onceAt}}).next",b.context),/none.*already admitted/);
+  assert.match(vm.runInContext("activationSummary({schedule:{kind:'once',at:onceAt}},{once_claimed:true,published_schedule:{kind:'once',at:onceAt-1}}).activation",b.context),/eligible immediately/);
+});
+test('archive, one-off admission and published revision changes invalidate open review', async () => {
+  for (const changed of [{archived:true},{once_claimed:true},{current_revision:'other'}]) {
+    let jobs=[{id:'j1',name:'Test',current_revision:null}];
+    const b=browser(action=>action==='list'?response(jobs):undefined); await tick();
+    vm.runInContext("state.selected='j1'",b.context); b.fire('editor','submit'); await tick(); await tick();
+    assert.equal(b.get('review').hidden,false);
+    jobs=[{...jobs[0],...changed}]; await vm.runInContext('refresh()',b.context);
+    assert.equal(b.get('review').hidden,true);
+    assert.equal(b.get('publish').disabled,true);
+    assert.match(b.get('message').textContent,/activation state changed/);
+  }
+});
+
+
+test('new draft history gives next steps and archive refresh preserves editing state', async () => {
+  let jobs=[];
+  const b=browser(action=>action==='list'?response(jobs):undefined); await tick();
+  assert.match(b.get('history').children[0].textContent,/Publish a reviewed revision/);
+  assert.match(b.get('revisions').children[0].textContent,/Save a draft/);
+  vm.runInContext("state.selected='j1'",b.context); b.fire('editor','input');
+  jobs=[{id:'j1',name:'Test',archived:true,current_revision:'r'}]; await vm.runInContext('refresh()',b.context);
+  assert.equal(b.get('state').textContent,'Archived · Draft edits');
+  jobs=[{...jobs[0],archived:false}]; await vm.runInContext('refresh()',b.context);
+  assert.equal(b.get('state').textContent,'Draft edits');
+  b.fire('new');
+  assert.match(b.get('history').children[0].textContent,/Publish a reviewed revision/);
+  assert.match(b.get('revisions').children[0].textContent,/Save a draft/);
 });

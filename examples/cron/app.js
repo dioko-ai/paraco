@@ -2,6 +2,8 @@
 const $ = id => document.getElementById(id);
 const state = {jobs: [], selected: null, revisions: [], runs: [], epoch: 0, reviewed: null, ai: null, suggestion: null, load: 0, dirty: false, saving: false, publishing: false, selecting: false, revisionOffset: 0, historyOffset: 0, refreshGeneration: 0, jobsRender: null, notificationsRender: null, onceSnapshot: null, selectionGeneration: 0};
 const initialSource = $('source').value;
+const dashboardUrl = typeof location !== 'undefined' ? new URL(location.href) : null;
+if (dashboardUrl) { dashboardUrl.hostname = 'localhost'; dashboardUrl.pathname = '/'; dashboardUrl.search = ''; dashboardUrl.hash = ''; $('dashboardLink').href = dashboardUrl.href; $('aiSettingsLink').href = dashboardUrl.href + '#ai-settings'; }
 const localTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
 $('timezone').value = localTimezone;
 function setSelecting(value) { state.selecting = value; for (const id of ['name','source','kind','at','expression','frequency','time','weekday','timezone','timeout','network','success','failure','preview','applyAi','prevRevisions','moreRevisions','prevHistory','moreHistory']) $(id).disabled = value; $('save').disabled = value || state.saving; $('generate').disabled = value || !!state.ai; }
@@ -22,7 +24,7 @@ async function safe(action) { try { await action(); } catch (error) { if (error.
 function invalidate(dirty = true) {
   if (dirty) state.dirty = true;
   state.epoch++; state.reviewed = null; $('review').hidden = true; $('approved').checked = false; $('publish').disabled = true;
-  $('state').textContent = 'Draft edits'; $('occurrences').textContent = 'Preview the schedule after editing.'; updateContext(); renderPublished();
+  $('state').textContent = state.jobs.find(j=>j.id===state.selected)?.archived ? 'Archived · Draft edits' : 'Draft edits'; $('occurrences').textContent = 'Preview the schedule after editing.'; updateContext(); renderPublished();
 }
 function schedule() {
   if ($('kind').value === 'once') {
@@ -54,7 +56,7 @@ function draftBody() {
   if (!Number.isFinite(timeout_ms) || timeout_ms < 1000 || timeout_ms > 3600000) throw new Error('Timeout must be between 1 and 3600 seconds.');
   return {...(state.selected ? {job_id:state.selected} : {}), name:$('name').value.trim(), source:$('source').value, schedule:schedule(), timeout_ms, network:$('network').value.split(',').map(x=>x.trim()).filter(Boolean), notify_success:$('success').checked, notify_failure:$('failure').checked};
 }
-function fields() { $('timezoneFields').hidden = $('kind').value !== 'cron'; $('weekdayFields').hidden = $('frequency').value !== 'weekly'; $('onceFields').hidden = $('kind').value !== 'once'; $('cronFields').hidden = $('kind').value !== 'cron'; $('basicFields').hidden = $('frequency').value === 'advanced'; $('advancedFields').hidden = $('frequency').value !== 'advanced'; }
+function fields() { $('preview').hidden = $('kind').value === 'manual'; $('occurrences').hidden = $('kind').value === 'manual'; $('timezoneFields').hidden = $('kind').value !== 'cron'; $('weekdayFields').hidden = $('frequency').value !== 'weekly'; $('onceFields').hidden = $('kind').value !== 'once'; $('cronFields').hidden = $('kind').value !== 'cron'; $('basicFields').hidden = $('frequency').value === 'advanced'; $('advancedFields').hidden = $('frequency').value !== 'advanced'; }
 function setDraft(draft) {
   $('name').value = draft.name; $('source').value = draft.source; $('kind').value = draft.schedule.kind;
   const at = draft.schedule.at == null ? null : new Date(draft.schedule.at);
@@ -72,13 +74,27 @@ function setDraft(draft) {
 }
 function scheduleLabel(value) {
   if (!value) return 'Not published';
-  return value.kind === 'cron' ? `${value.expression} (${value.timezone})` : value.kind === 'once' ? `Once: ${date(value.at)}` : 'Manual';
+  const simple = value.kind === 'cron' && /^(\d{1,2}) (\d{1,2}) \* \* (\*|1-5|[0-6])$/.exec(value.expression);
+  const readable = simple ? `${simple[3] === '*' ? 'Daily' : simple[3] === '1-5' ? 'Weekdays' : ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'][Number(simple[3])]} at ${simple[2].padStart(2,'0')}:${simple[1].padStart(2,'0')} · ` : '';
+  return value.kind === 'cron' ? `${readable}${value.expression} (${value.timezone})` : value.kind === 'once' ? `Once: ${formatOccurrence(value.at, value)}` : 'Manual';
 }
 function publishedSummary(job) {
+  if (!job.current_revision) return 'Not active · No published revision. Save, review and publish to enable runs.';
   return `Published schedule: ${scheduleLabel(job.published_schedule)} · Next run: ${job.archived ? 'Archived' : date(job.next_at)} · Last result: ${job.last_result || 'No runs yet'} · Unpublished changes: ${job.unpublished_changes || (state.selected === job.id && state.dirty) ? 'Yes' : 'No'}${job.blocked ? ' · '+job.blocked : ''}`;
+}
+function jobReviewState(job) { return JSON.stringify([!!job?.archived, !!job?.once_claimed, job?.current_revision ?? null, job?.published_schedule ?? null]); }
+function activationSummary(settings, job) {
+  const sched = settings.schedule;
+  if (job?.archived) return {activation:'This job is archived. Publishing keeps it archived; no new runs are admitted until you unarchive it.',next:'Next run: none while archived.'};
+  if (sched.kind === 'manual') return {activation:'Runs only when you choose Run published revision.',next:'Next run: only when you request it.'};
+  const completed = sched.kind === 'once' && job?.once_claimed && job.published_schedule?.kind === 'once' && job.published_schedule.at === sched.at;
+  if (completed) return {activation:'This one-off occurrence has already been admitted. Publishing changes its code and settings without running it again. Choose Run published revision for another manual run.',next:'Next automatic run: none; this one-off occurrence was already admitted.'};
+  if (sched.kind === 'once' && sched.at <= Date.now()) return {activation:'This new one-off occurrence is overdue and becomes eligible immediately after publication.',next:'Next run: immediately after publication when the runtime has capacity.'};
+  return {activation:sched.kind === 'once' ? 'Runs once at the time shown after publication.' : 'Automatic runs begin at the next scheduled occurrence after publication.',next:'Checking next scheduled occurrence…',preview:true};
 }
 function renderPublished() {
   const job = state.jobs.find(j => j.id === state.selected);
+  $('publishedPanel').hidden = !job;
   $('publishedSummary').textContent = job ? publishedSummary(job) : 'No published job selected.';
 }
 function renderJobs() {
@@ -87,20 +103,25 @@ function renderJobs() {
   state.jobsRender = signature; $('jobs').replaceChildren();
   for (const job of state.jobs.filter(j => $('showArchived').checked || !j.archived)) {
     const b = button(`${job.name}${job.archived ? ' · Archived' : ''}`, () => selectJob(job.id));
-    b.append(document.createElement('br')); paragraph(publishedSummary(job), b);
+    b.append(document.createElement('br')); paragraph(`${job.archived ? 'Archived' : !job.current_revision ? 'Draft · Not active' : job.blocked || 'Published'} · Next: ${job.archived ? '—' : date(job.next_at)} · Last: ${job.last_result || 'No runs'}`, b);
     b.className = 'job'; b.setAttribute('aria-current', String(job.id === state.selected)); $('jobs').append(b);
   }
-  if (!$('jobs').childElementCount) paragraph('No jobs here yet.', $('jobs'));
+  if (!$('jobs').childElementCount) paragraph(state.jobs.some(j=>j.archived) && !$('showArchived').checked ? 'No active jobs. Select Show archived to find archived jobs.' : 'No jobs yet. Edit the local reminder, then save and review it.', $('jobs'));
   }
   const job = state.jobs.find(j => j.id === state.selected);
   renderPublished();
+  const editorState = $('state').textContent || 'Unpublished';
+  const withoutArchived = editorState.replace(/^Archived(?: · )?/, '') || 'Published revision loaded';
+  $('state').textContent = job?.archived ? `Archived${withoutArchived ? ' · '+withoutArchived : ''}` : withoutArchived;
   $('archive').disabled = !job; $('archive').textContent = job?.archived ? 'Unarchive' : 'Archive';
-  $('run').disabled = !job?.current_revision || job.archived || !!job.blocked; $('delete').disabled = !job?.archived;
+  $('run').disabled = !job?.current_revision || job.archived || !!job.blocked; $('delete').disabled = !job?.archived; $('delete').hidden = !job?.archived;
 }
 async function refresh() {
   const generation = ++state.refreshGeneration;
   const [jobs, status, notifications] = await Promise.all([api('list'), api('status'), api('notifications')]);
   if (generation !== state.refreshGeneration) return;
+  const reviewed = state.reviewed;
+  if (reviewed && reviewed.jobState !== jobReviewState(jobs.find(j=>j.id===reviewed.job))) { invalidate(false); message('Job activation state changed. Save and review again before publishing.'); }
   state.jobs = jobs; renderJobs();
   $('runtime').textContent = `${status.machine_off} Last scheduler check: ${date(status.last_tick)}. Up to ${status.global_concurrency} jobs at once. Current network grants: ${(status.network_grants || []).join(', ') || 'none'}.`;
   const notificationSignature = JSON.stringify(notifications);
@@ -111,7 +132,7 @@ async function refresh() {
     if (!n.read) row.append(button('Mark read', async()=> { await api('read_notification',{id:n.id}); await refresh(); }));
     $('notifications').append(row);
   }
-  if (!notifications.length) paragraph('No notifications.', $('notifications'));
+  if (!notifications.length) paragraph('Your local inbox is empty. ctx.notify messages and enabled automatic outcome notifications appear here.', $('notifications'));
   }
   if (state.selected && !state.selecting && !$('revisions').contains(document.activeElement) && !$('history').contains(document.activeElement)) await loadDetails(state.selected, true);
 }
@@ -142,7 +163,12 @@ async function loadDetails(jobId, preserve = false) {
     if (run.logs_preview) row.append(button('Load full logs', async()=> { const full=await api('logs',{run_id:run.id}); run.logs=full.logs; run.truncated=full.truncated; run.diagnostic=full.diagnostic; run.logs_preview=0; logs.textContent=`${full.logs || '(No logs)'}${full.truncated?'\n[Logs truncated]':''}${full.diagnostic?'\n'+full.diagnostic:''}`; updateContext(); }));
     if (['pending','running'].includes(run.status)) row.append(button('Cancel run',async()=> { await api('cancel',{run_id:run.id}); await loadDetails(jobId); })); $('history').append(row);
   }
-  if (!runs.length) paragraph('No runs yet.', $('history')); updateContext(); return revisions;
+  if (!revisions.length) paragraph('No revisions yet. Save a draft to create the first revision for review.', $('revisions'));
+  if (!runs.length) paragraph('No runs yet. Publish a reviewed revision, then run it manually or wait for its schedule. Results and logs appear here.', $('history')); updateContext(); return revisions;
+}
+function emptyDetails() {
+  paragraph('No runs yet. Publish a reviewed revision, then run it manually or wait for its schedule. Results and logs appear here.', $('history'));
+  paragraph('No revisions yet. Save a draft to create the first revision for review.', $('revisions'));
 }
 function canLeave() {
   if (state.saving) { message('Wait for the draft save to finish.'); return false; }
@@ -185,16 +211,18 @@ $('editor').addEventListener('submit', event => { event.preventDefault(); safe(a
   if (state.selected === selected) state.selected = result.job_id;
   if (state.epoch !== epoch || state.selected !== result.job_id) { await refresh(); message('Draft saved, but newer edits require another review.'); return; }
   state.dirty = false;
-  state.reviewed = {revision:result.revision_id, expected, epoch, job:result.job_id};
+  state.reviewed = {revision:result.revision_id, expected, epoch, job:result.job_id, jobState:jobReviewState(state.jobs.find(j=>j.id===selected))};
   $('reviewInfo').textContent = `Revision ${result.revision_id} · Digest ${result.digest}. Publishing activates exactly this saved revision.`;
-  if (body.schedule.kind === 'once' && body.schedule.at <= Date.now()) {
-    const job = state.jobs.find(j => j.id === selected);
-    const completed = job?.once_claimed && previous?.schedule.kind === 'once' && previous.schedule.at === body.schedule.at;
-    $('reviewInfo').textContent += completed ? ' This one-off has already been admitted; editing its code does not run it again. Use Run now explicitly.' : ' This one-off is overdue and will run once immediately when active.';
-  }
+  $('editorTitle').textContent = body.name;
+  const settings = result.body, sched = settings.schedule;
+  const job = state.jobs.find(j=>j.id===selected), activation = activationSummary(settings,job);
+  $('reviewSummary').textContent = `Schedule: ${scheduleLabel(sched)}.\nActivation: ${activation.activation}\nTimeout: ${settings.timeout_ms / 1000} seconds.\nNetwork: ${settings.network.length ? settings.network.join(', ') : 'none (no outbound access)'}.\nAutomatic local inbox notifications: success ${settings.notify_success ? 'on' : 'off'}, failure ${settings.notify_failure ? 'on' : 'off'}.\nMessages sent by ctx.notify appear in the local inbox regardless of these switches.\nParaco and this computer must stay running.`;
+  $('reviewNext').textContent = activation.next;
+  if (activation.preview) api('preview', {schedule:sched}).then(next => { if (state.reviewed?.revision === result.revision_id && state.epoch === epoch) $('reviewNext').textContent = next.times.length ? `Next scheduled occurrence: ${formatOccurrence(next.times[0], sched)}` : 'No future occurrence found. Check the schedule before publishing.'; }).catch(() => { if (state.reviewed?.revision === result.revision_id) $('reviewNext').textContent = 'Next occurrence unavailable. Check the schedule before publishing.'; });
+  $('sourceDiff').textContent = sourceDiff(previous?.source || '', result.body.source);
   $('diff').textContent = `SOURCE DIFF (− removed, + added)\n${sourceDiff(previous?.source || '',result.body.source)}\n\nPREVIOUS SETTINGS\n${previous ? JSON.stringify({...previous,source:undefined},null,2) : '(none)'}\n\nPROPOSED SETTINGS\n${JSON.stringify({...result.body,source:undefined},null,2)}`;
-  $('approved').checked=false; $('publish').disabled=true; $('review').hidden=false; $('state').textContent='Saved draft awaiting review';
-  await refresh(); message('Draft saved. Review source and settings before publishing.');
+  $('approved').checked=false; $('publish').disabled=true; $('review').hidden=false; $('state').textContent=job?.archived ? 'Archived · Saved draft awaiting review' : 'Saved draft awaiting review';
+  await refresh(); message('Draft saved. Review source and settings before publishing.'); $('review').scrollIntoView?.({behavior:'smooth',block:'start'}); $('review').focus?.({preventScroll:true});
   } finally { state.saving = false; $('save').disabled = state.selecting; updatePublish(); }
 }); });
 $('approved').addEventListener('change',updatePublish);
@@ -211,21 +239,22 @@ $('publish').addEventListener('click',()=>safe(async()=> {
   if (state.reviewed === review) { invalidate(false); $('state').textContent='Published'; }
   await refresh(); message('Reviewed revision published.');
 }));
+function formatOccurrence(at, value) { const zone = value.timezone || localTimezone; return `${new Intl.DateTimeFormat(undefined,{dateStyle:'full',timeStyle:'long',timeZone:zone}).format(at)} (${zone})`; }
 $('preview').addEventListener('click',()=>safe(async()=> {
   const epoch=state.epoch; const value=schedule(); const result=await api('preview',{schedule:value});
-  if(epoch===state.epoch) $('occurrences').textContent=result.times.length ? result.times.map(t=>`${new Date(t).toISOString()} · ${new Intl.DateTimeFormat(undefined,{dateStyle:'full',timeStyle:'long',timeZone:value.timezone || 'UTC'}).format(t)}`).join('\n') : value.kind === 'once' ? 'This one-off is overdue. A new occurrence runs once when active; a completed occurrence is not replayed.' : 'Manual schedule: no automatic occurrences.';
+  if(epoch===state.epoch) $('occurrences').textContent=result.times.length ? result.times.map(t=>formatOccurrence(t,value)).join('\n') : value.kind === 'once' ? 'This one-off is overdue. A new occurrence runs once when active; a completed occurrence is not replayed.' : 'Manual schedule: no automatic occurrences.';
 }));
-$('run').addEventListener('click',()=>safe(async()=> { await api('run',{job_id:state.selected}); await refresh(); message('Run requested for the published revision.'); }));
+$('run').addEventListener('click',()=>safe(async()=> { await api('run',{job_id:state.selected}); await refresh(); message('Run requested for the published revision.'); $('runsTitle').scrollIntoView?.({behavior:'smooth',block:'start'}); $('runsTitle').focus?.({preventScroll:true}); }));
 $('archive').addEventListener('click',()=>safe(async()=> {
   const job=state.jobs.find(j=>j.id===state.selected); if (!job) return;
-  if (!confirm(job.archived ? 'Unarchive this job? An overdue once job may run immediately.' : 'Archive this job and stop future scheduled runs?')) return;
+  if (!confirm(job.archived ? 'Unarchive this job? An overdue once job may run immediately.' : 'Archive this job and stop future scheduled runs? Already running work continues until it finishes or you cancel it.')) return;
   await api(job.archived?'unarchive':'archive',{job_id:job.id}); await refresh(); message(job.archived?'Job unarchived.':'Job archived.');
 }));
 $('new').addEventListener('click',()=> {
   if (!canLeave()) return;
   state.selected=null; state.selectionGeneration++; setSelecting(false); state.revisionOffset=0; state.historyOffset=0; state.revisions=[]; state.runs=[]; state.load++;
   setDraft({name:'My job',source:initialSource,schedule:{kind:'manual'},timeout_ms:60000,network:[],notify_success:false,notify_failure:true});
-  $('editorTitle').textContent='New draft'; $('revisions').replaceChildren(); $('history').replaceChildren(); renderJobs();
+  $('editorTitle').textContent='New draft'; $('revisions').replaceChildren(); $('history').replaceChildren(); emptyDetails(); renderJobs();
 });
 $('delete').addEventListener('click',()=>safe(async()=> {
   const job=state.jobs.find(j=>j.id===state.selected); if (!job?.archived || !canLeave()) return;
@@ -268,4 +297,4 @@ $('applyAi').addEventListener('click',()=> {
   if(!state.suggestion || state.suggestion.epoch!==state.epoch) { message('The editor changed. Generate a new suggestion.'); return; }
   $('source').value=state.suggestion.text; invalidate(); state.suggestion=null; $('suggestionPanel').hidden=true; message('Suggestion applied to the editor. Save and review before publication.');
 });
-fields(); updateContext(); safe(refresh); setInterval(()=>safe(refresh), 15000);
+fields(); emptyDetails(); updateContext(); safe(refresh); setInterval(()=>safe(refresh), 15000);
