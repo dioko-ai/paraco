@@ -76,13 +76,15 @@ fn profile(spec: &ExecutionSpec<'_>) -> Result<String, String> {
         (allow file-read* (subpath \"/System/Library\") (subpath \"/usr/lib\") (literal \"/dev/null\") (literal \"/dev/urandom\") (literal \"/dev/random\"))\n\
         (allow file-write* (literal \"/dev/null\"))\n",
     );
-    // Reported dyld startup denials. Keep these exceptions exact: root
-    // metadata does not grant directory listing or reads beneath root, and
-    // sysctl access must not expand to an unrestricted sysctl-read grant.
-    // These are candidate startup allowances, pending native Mac validation.
+    // macOS 27 ignition opens the root directory during dyld cache startup.
+    // Metadata alone is insufficient. A literal read permits opening/listing
+    // this directory, not reading its children or mapping other executables.
+    // Rust's stack guard setup also needs getpagesize(), whose numeric sysctl
+    // (HW_PAGESIZE) is named hw.pagesize_compat by Seatbelt on this host.
+    // Keep these exact; see docs/native-containment.md for native experiments.
     p.push_str(
-        "(allow sysctl-read (sysctl-name \"security.mac.lockdown_mode_state\") (sysctl-name \"kern.bootargs\"))\n\
-        (allow file-read-metadata (literal \"/\"))\n",
+        "(allow sysctl-read (sysctl-name \"security.mac.lockdown_mode_state\") (sysctl-name \"kern.bootargs\") (sysctl-name \"hw.pagesize_compat\"))\n\
+        (allow file-read-metadata file-read-data (literal \"/\"))\n",
     );
     p.push_str(&format!(
         "(allow process-exec (literal {}))\n",
@@ -119,10 +121,11 @@ fn profile(spec: &ExecutionSpec<'_>) -> Result<String, String> {
             quoted(&socket)?
         ));
     }
-    // Accept on the caller-supplied listener. No IP socket creation or bind is
-    // granted; the inherited descriptor is the only intended IP capability.
+    // Accept on the caller-supplied listener. On macOS 27 the inbound grant
+    // also permits a new bind unless explicitly denied. Keep the inherited
+    // listener as the only usable IP listener capability.
     if matches!(spec.kind, super::WorkloadKind::Runtime) {
-        p.push_str("(allow network-inbound (local ip \"localhost:*\"))\n");
+        p.push_str("(allow network-inbound (local ip \"localhost:*\"))\n(deny network-bind)\n");
     }
     Ok(p)
 }
@@ -198,14 +201,90 @@ mod tests {
         assert!(!policy.contains("(allow network-outbound)"));
         assert!(!policy.contains("(allow process-fork)"));
         assert!(policy.contains(
-            "(allow sysctl-read (sysctl-name \"security.mac.lockdown_mode_state\") (sysctl-name \"kern.bootargs\"))"
+            "(allow sysctl-read (sysctl-name \"security.mac.lockdown_mode_state\") (sysctl-name \"kern.bootargs\") (sysctl-name \"hw.pagesize_compat\"))"
         ));
         assert!(!policy.contains("(allow sysctl-read)"));
         let root_rules: Vec<_> = policy
             .lines()
             .filter(|line| line.contains("\"/\""))
             .collect();
-        assert_eq!(root_rules, ["(allow file-read-metadata (literal \"/\"))"]);
+        assert_eq!(
+            root_rules,
+            ["(allow file-read-metadata file-read-data (literal \"/\"))"]
+        );
+    }
+
+    // Explicit native regression: run outside an inherited agent sandbox with
+    // PARACO_EXPERIMENTAL_MACOS_SANDBOX=1 cargo test --bin paraco
+    // native_startup_and_literal_root_boundary -- --ignored
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "requires native macOS Seatbelt execution outside inherited sandboxes"]
+    fn native_startup_and_literal_root_boundary() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().canonicalize().unwrap();
+        let scratch = root.join("scratch");
+        std::fs::create_dir(&scratch).unwrap();
+        let sentinel = root.join("outside");
+        std::fs::write(&sentinel, b"outside").unwrap();
+        let executable = std::env::current_exe().unwrap();
+        for kind in [
+            super::super::WorkloadKind::Compiler,
+            super::super::WorkloadKind::Runtime,
+        ] {
+            let mut command = super::super::command(&ExecutionSpec {
+                executable: &executable,
+                readable: &[],
+                writable: std::slice::from_ref(&scratch),
+                cwd: &scratch,
+                kind,
+                capability_socket: None,
+            })
+            .unwrap();
+            let output = command
+                .args([
+                    "--exact",
+                    "containment::macos::tests::native_startup_fixture",
+                    "--nocapture",
+                ])
+                .env("PARACO_STARTUP_FIXTURE", &sentinel)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{:?}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                String::from_utf8_lossy(&output.stdout)
+                    .contains("native startup boundary verified")
+            );
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_startup_fixture() {
+        let Some(sentinel) = std::env::var_os("PARACO_STARTUP_FIXTURE") else {
+            return;
+        };
+        assert!(unsafe { libc::sysconf(libc::_SC_PAGESIZE) } > 0);
+        // Literal root reads include directory enumeration, but not its children.
+        assert!(std::fs::read_dir("/").is_ok());
+        assert_eq!(
+            std::fs::read(&sentinel).unwrap_err().raw_os_error(),
+            Some(libc::EPERM)
+        );
+        assert_eq!(
+            std::fs::write(&sentinel, b"changed")
+                .unwrap_err()
+                .raw_os_error(),
+            Some(libc::EPERM)
+        );
+        assert!(std::fs::write("allowed", b"scratch").is_ok());
+        assert!(std::net::TcpListener::bind("127.0.0.1:0").is_err());
+        println!("native startup boundary verified");
     }
 
     #[cfg(unix)]

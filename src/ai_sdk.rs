@@ -256,7 +256,7 @@ mod tests {
         let executable = dir.path().join("codex");
         std::fs::write(
             &executable,
-            r#"#!/usr/bin/node
+            r#"#!/usr/bin/env node
 const assert = require('node:assert/strict');
 const args = process.argv.slice(2);
 assert.equal(args[0], 'exec');

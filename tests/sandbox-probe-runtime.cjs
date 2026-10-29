@@ -18,9 +18,14 @@ async function port() {
   return value;
 }
 
-test('trusted containment evidence and unsafe mode reach the probe report', {timeout: 180000}, async () => {
-  const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'paraco-sandbox-probe-test-'));
-  const env = {...process.env, TMPDIR: temp, PATH: path.join(root, 'node_modules/.bin') + path.delimiter + (process.env.PATH || '')};
+test('symlinked temporary paths preserve trusted containment evidence and unsafe failures', {timeout: 180000}, async () => {
+  // Keep nested Unix socket paths within macOS sun_path limits.
+  const temp = await fs.mkdtemp(path.join(process.platform === 'darwin' ? '/private/tmp' : os.tmpdir(), 'paraco-sandbox-probe-test-'));
+  // Exercise host path aliases (macOS normally uses /var -> /private/var).
+  // Compiler input/output and workerd config arguments must match policy paths.
+  const alias = path.join(temp, 'tmp-alias');
+  await fs.symlink(temp, alias, 'dir');
+  const env = {...process.env, TMPDIR: alias, PATH: path.join(root, 'node_modules/.bin') + path.delimiter + (process.env.PATH || '')};
   delete env.PARACO_ALLOW_UNSANDBOXED;
   const unsafe = {...env, PARACO_ALLOW_UNSANDBOXED: '1'};
   const children = new Set();

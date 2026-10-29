@@ -30,7 +30,8 @@ async function listen(handler) {
 }
 
 async function main() {
-  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'paraco-workerd-security-'));
+  // Keep nested Unix socket paths within macOS sun_path limits.
+  const tmp = await fs.mkdtemp(path.join(process.platform === 'darwin' ? '/private/tmp' : os.tmpdir(), 'paraco-workerd-security-'));
   const fixtureHits = {allowed: 0, redirect: 0, outside: 0, appProbe: 0};
   const outside = await listen((req, res) => {
     fixtureHits.outside++;
@@ -119,7 +120,7 @@ async function main() {
     {cwd: tmp, env, stdio: ['ignore', 'pipe', 'pipe']});
     cron.stdout.on('data', chunk => output += chunk);
     cron.stderr.on('data', chunk => output += chunk);
-    await until(async () => { const response = await call('/'); return response.ok && response.text.includes('editor'); }, 'Cron readiness');
+    await until(async () => { const response = await call('/'); return response.ok && response.text.includes('editor'); }, 'Cron readiness').catch(error => { throw new Error(`${error.message}\n${output}`); });
 
     const allowed = await draft(`export default async ({log}) => {
       const response = await fetch('http://127.0.0.1:${fixture.port}/allowed');

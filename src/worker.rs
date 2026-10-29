@@ -41,7 +41,16 @@ pub fn compile(entry: &Path, output: &Path, root: &Path) -> Result<(), String> {
         .map_err(|_| "entrypoint outside application")?;
     let source = snapshot.path().join("source");
     crate::artifact::copy_tree(&root, &source)?;
+    // Seatbelt grants canonical paths. Pass the same paths to esbuild: resolving
+    // /var -> /private/var inside the sandbox requires unrelated ancestor access.
+    let source = source.canonicalize().map_err(|e| e.to_string())?;
     let entry = source.join(relative);
+    let output = output
+        .parent()
+        .ok_or("output needs parent")?
+        .canonicalize()
+        .map_err(|e| e.to_string())?
+        .join(output.file_name().ok_or("output needs filename")?);
     let meta = output.with_extension("meta.json");
     let compiler = compiler()?.canonicalize().map_err(|e| e.to_string())?;
     let mut command = compiler_command(
@@ -174,6 +183,9 @@ pub fn launch_command(
     use std::os::{fd::AsRawFd, unix::process::CommandExt};
     let runtime = runtime.canonicalize().map_err(|e| e.to_string())?;
     let dir = dir.canonicalize().map_err(|e| e.to_string())?;
+    // Match the canonical read grant instead of resolving host symlinks inside
+    // workerd (notably macOS's /var temporary-directory alias).
+    let config = config.canonicalize().map_err(|e| e.to_string())?;
     let socket = dir.join("host.sock");
     let mut command = crate::containment::command(&crate::containment::ExecutionSpec {
         executable: &runtime,

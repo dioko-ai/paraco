@@ -932,6 +932,10 @@ export default { async fetch(_request, context) {
 fn slow_stop_keeps_control_and_other_apps_responsive() {
     let mut server = Server::run(&[("stubborn", APP), ("healthy", APP)]);
     server.ready();
+    // Dashboard readiness precedes app startup. Stop an established workerd,
+    // not a compiler/startup child whose identity can still change.
+    server.inspect("stubborn");
+    server.inspect("healthy");
     let pid = server.supervised_child_pid("stubborn");
     assert_eq!(unsafe { libc::kill(pid, libc::SIGSTOP) }, 0);
     let start = Instant::now();

@@ -336,6 +336,26 @@ fn serves_http_forwards_logs_and_reaps_on_ctrl_c() {
     app.assert_released(pid);
 }
 
+// Exercise hot JavaScript with workerd's normal JIT enabled, not --jitless.
+#[test]
+fn hot_javascript_runs_under_native_containment() {
+    let mut app = App::run(
+        r#"function mix(x) { return Math.imul(x ^ (x >>> 16), 0x45d9f3b); }
+export default {fetch() {
+  let value = 0;
+  for (let i = 0; i < 1000000; ++i) value = mix(value + i);
+  return new Response(String(value));
+}};"#,
+    );
+    app.ready();
+    // Stable integer arithmetic checks that the workload actually completed.
+    let response = app.request("/");
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    assert!(response.ends_with("-17350591"), "{response}");
+    app.interrupt();
+    assert!(app.wait().success());
+}
+
 #[test]
 fn forced_runtime_death_reaps_even_an_app_with_a_blocked_event_loop() {
     let source = r#"export default {fetch(request) {

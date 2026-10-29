@@ -527,12 +527,20 @@ impl Tasks {
         // Keep the input outside the compiler's writable output grant.
         let compiled = dir.join("compiled");
         fs::create_dir(&compiled).map_err(err)?;
-        // Transform only: the compiler never resolves or reads task imports.
+        // Transform stdin only: a file entry makes esbuild resolve its parent
+        // directory even without bundling. Keep the exact input-file grant and
+        // pass that file as stdin instead of exposing the surrounding directory.
+        // All imports are external, so esbuild never resolves dependencies;
+        // retained imports are rejected through the output metadata.
         let mut command =
             crate::worker::compiler_command(&crate::worker::compiler()?, &source, &compiled)?;
         command
-            .arg(&source)
             .args([
+                "--bundle",
+                "--external:*",
+                "--tree-shaking=false",
+                "--loader=ts",
+                "--sourcefile=task.ts",
                 "--format=esm",
                 "--platform=browser",
                 "--target=es2022",
@@ -543,7 +551,7 @@ impl Tasks {
                 "--metafile={}",
                 compiled.join("meta.json").display()
             ))
-            .stdin(Stdio::null())
+            .stdin(Stdio::from(fs::File::open(&source).map_err(err)?))
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
         let output = bounded_command(command, Duration::from_secs(30), || {
@@ -2349,6 +2357,29 @@ mod tests {
         assert!(error.starts_with("task validation failed:"), "{error}");
         draft.source = "import 'file:///etc/passwd'; export default async function() {}".into();
         assert!(tasks.prepare("invalid", &draft).is_err());
+        // Stdin compilation must preserve dependency rejection without opening
+        // parent directories or resolving any of these imports.
+        for (revision, source) in [
+            (
+                "relative",
+                "import './missing.ts'; export default async function() {}",
+            ),
+            (
+                "package",
+                "import 'node:fs'; export default async function() {}",
+            ),
+            (
+                "dynamic",
+                "export default async function() { await import('../private.ts'); }",
+            ),
+        ] {
+            draft.source = source.into();
+            let error = tasks.prepare(revision, &draft).unwrap_err();
+            assert!(
+                error.contains("Task dependencies are not supported"),
+                "{error}"
+            );
+        }
         let private = _dir.path().join("private.ts");
         fs::write(
             &private,

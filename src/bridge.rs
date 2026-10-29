@@ -17,6 +17,9 @@ pub struct Bridge {
 }
 impl Bridge {
     pub fn start(settings: serde_json::Value, directory: &std::path::Path) -> Result<Self, String> {
+        // The runtime policy grants the canonical socket path. Publish that
+        // same address so workerd need not resolve host aliases under Seatbelt.
+        let directory = directory.canonicalize().map_err(|e| e.to_string())?;
         let socket = directory.join("host.sock");
         let listener =
             std::os::unix::net::UnixListener::bind(&socket).map_err(|e| e.to_string())?;
